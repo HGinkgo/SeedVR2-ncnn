@@ -1,0 +1,7 @@
+# Local planning and agent-continuity files
+ROADMAP.md
+.agent/
+
+# Local build output
+build/
+out/
