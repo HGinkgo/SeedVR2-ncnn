@@ -88,7 +88,7 @@ def main() -> None:
     traced = torch.jit.trace(model, (video, text), check_trace=True)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = args.output_dir / "awa_attention.pt"
+    model_path = (args.output_dir / "awa_attention.pt").resolve()
     traced.save(str(model_path))
     print(f"saved {model_path}")
 
@@ -102,7 +102,7 @@ def main() -> None:
     )
     subprocess.run(
         [str(args.pnnx), str(model_path), f"inputshape={input_shape}"],
-        cwd=args.output_dir,
+        cwd=args.output_dir.resolve(),
         check=True,
     )
 
