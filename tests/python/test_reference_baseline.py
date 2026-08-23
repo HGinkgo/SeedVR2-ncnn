@@ -3,6 +3,7 @@ import json
 import pytest
 import torch
 
+from tools.reference.awa_window import AwaWindowPartition, AwaWindowReverse
 from tools.reference.seedvr2_baseline import (
     awa_round_trip,
     build_manifest,
@@ -28,7 +29,16 @@ def test_awa_round_trip_preserves_every_feature_value_for_both_modes():
 
     for shifted in (False, True):
         restored, metadata = awa_round_trip(source, (4, 3, 3), shifted=shifted)
+        partition = AwaWindowPartition((2, 19, 23), (4, 3, 3), shifted=shifted)
+        reverse = AwaWindowReverse((2, 19, 23), (4, 3, 3), shifted=shifted)
+        partitioned = partition(source)
+        traced_partition = torch.jit.trace(partition, source)
+        traced_reverse = torch.jit.trace(reverse, partitioned)
 
+        assert torch.equal(reverse(partitioned), source)
+        assert torch.equal(partitioned, source.reshape(-1, 3).index_select(0, partition.target_index))
+        assert torch.equal(traced_partition(source), partitioned)
+        assert torch.equal(traced_reverse(partitioned), source)
         assert torch.equal(restored, source)
         assert metadata["source_shape"] == [2, 19, 23, 3]
         assert metadata["window_count"] == len(metadata["windows"])
