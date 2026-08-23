@@ -13,3 +13,6 @@ ckpts/
 # Python development caches
 __pycache__/
 .pytest_cache/
+
+# Temporary implementation design documents
+docs/superpowers/
