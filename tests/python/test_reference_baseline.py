@@ -3,6 +3,7 @@ import json
 import pytest
 import torch
 
+from tools.reference.awa_attention import AwaAttentionPack, AwaAttentionUnpack
 from tools.reference.awa_window import AwaWindowPartition, AwaWindowReverse
 from tools.reference.seedvr2_baseline import (
     awa_round_trip,
@@ -42,6 +43,52 @@ def test_awa_round_trip_preserves_every_feature_value_for_both_modes():
         assert torch.equal(restored, source)
         assert metadata["source_shape"] == [2, 19, 23, 3]
         assert metadata["window_count"] == len(metadata["windows"])
+
+        heads, head_dim, text_tokens = 2, 3, 5
+        vid_qkv = torch.arange(
+            2 * 19 * 23 * 3 * heads * head_dim, dtype=torch.float32
+        ).reshape(2, 19, 23, 3, heads, head_dim)
+        txt_qkv = torch.arange(text_tokens * 3 * heads * head_dim, dtype=torch.float32).reshape(
+            text_tokens, 3, heads, head_dim
+        )
+        pack = AwaAttentionPack(
+            (2, 19, 23), (4, 3, 3), text_tokens, shifted=shifted
+        )
+        unpack = AwaAttentionUnpack(
+            (2, 19, 23), (4, 3, 3), text_tokens, shifted=shifted
+        )
+        packed, cu_seqlens = pack(vid_qkv, txt_qkv)
+
+        expected_segments = []
+        source_index = torch.arange(2 * 19 * 23).reshape(2, 19, 23)
+        for window in make_windows((2, 19, 23), (4, 3, 3), shifted=shifted):
+            time, height, width = window
+            expected_segments.append(
+                vid_qkv.reshape(-1, 3, heads, head_dim).index_select(
+                    0,
+                    source_index[
+                        time[0] : time[1], height[0] : height[1], width[0] : width[1]
+                    ].reshape(-1),
+                )
+            )
+            expected_segments.append(txt_qkv)
+        expected = torch.cat(expected_segments)
+        assert torch.equal(packed, expected)
+        expected_cu_seqlens = [0, 214, 428, 661, 894] if shifted else [0, 423, 846, 870, 894]
+        assert cu_seqlens.tolist() == expected_cu_seqlens
+
+        video_out, text_out = unpack(packed[:, 0])
+        assert torch.equal(video_out, vid_qkv[:, :, :, 0])
+        assert torch.equal(text_out, txt_qkv[:, 0])
+
+        traced_pack = torch.jit.trace(pack, (vid_qkv, txt_qkv))
+        traced_unpack = torch.jit.trace(unpack, (packed[:, 0],))
+        traced_packed, traced_cu_seqlens = traced_pack(vid_qkv, txt_qkv)
+        traced_video, traced_text = traced_unpack(packed[:, 0])
+        assert torch.equal(traced_packed, packed)
+        assert torch.equal(traced_cu_seqlens, cu_seqlens)
+        assert torch.equal(traced_video, video_out)
+        assert torch.equal(traced_text, text_out)
 
 
 def test_reference_artifacts_are_deterministic_and_checksummed(tmp_path):
