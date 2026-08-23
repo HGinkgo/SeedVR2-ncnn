@@ -2,8 +2,13 @@ import json
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from tools.reference.awa_attention import AwaAttentionPack, AwaAttentionUnpack
+from tools.reference.awa_attention import (
+    AwaAttentionPack,
+    AwaAttentionUnpack,
+    AwaWindowAttention,
+)
 from tools.reference.awa_window import AwaWindowPartition, AwaWindowReverse
 from tools.reference.seedvr2_baseline import (
     awa_round_trip,
@@ -45,11 +50,15 @@ def test_awa_round_trip_preserves_every_feature_value_for_both_modes():
         assert metadata["window_count"] == len(metadata["windows"])
 
         heads, head_dim, text_tokens = 2, 3, 5
-        vid_qkv = torch.arange(
-            2 * 19 * 23 * 3 * heads * head_dim, dtype=torch.float32
-        ).reshape(2, 19, 23, 3, heads, head_dim)
-        txt_qkv = torch.arange(text_tokens * 3 * heads * head_dim, dtype=torch.float32).reshape(
-            text_tokens, 3, heads, head_dim
+        vid_qkv = (
+            torch.arange(2 * 19 * 23 * 3 * heads * head_dim, dtype=torch.float32)
+            .reshape(2, 19, 23, 3, heads, head_dim)
+            / 100
+        )
+        txt_qkv = (
+            torch.arange(text_tokens * 3 * heads * head_dim, dtype=torch.float32)
+            .reshape(text_tokens, 3, heads, head_dim)
+            / 100
         )
         pack = AwaAttentionPack(
             (2, 19, 23), (4, 3, 3), text_tokens, shifted=shifted
@@ -81,14 +90,31 @@ def test_awa_round_trip_preserves_every_feature_value_for_both_modes():
         assert torch.equal(video_out, vid_qkv[:, :, :, 0])
         assert torch.equal(text_out, txt_qkv[:, 0])
 
+        attention = AwaWindowAttention(cu_seqlens, head_dim=head_dim)
+        attended = attention(packed)
+        expected_attended = []
+        for start, end in zip(expected_cu_seqlens[:-1], expected_cu_seqlens[1:]):
+            segment = packed[start:end]
+            expected_attended.append(
+                F.scaled_dot_product_attention(
+                    segment[:, 0].transpose(0, 1),
+                    segment[:, 1].transpose(0, 1),
+                    segment[:, 2].transpose(0, 1),
+                ).transpose(0, 1)
+            )
+        expected_attended = torch.cat(expected_attended)
+        assert torch.allclose(attended, expected_attended, atol=1e-6, rtol=1e-6)
+
         traced_pack = torch.jit.trace(pack, (vid_qkv, txt_qkv))
         traced_unpack = torch.jit.trace(unpack, (packed[:, 0],))
+        traced_attention = torch.jit.trace(attention, (packed,))
         traced_packed, traced_cu_seqlens = traced_pack(vid_qkv, txt_qkv)
         traced_video, traced_text = traced_unpack(packed[:, 0])
         assert torch.equal(traced_packed, packed)
         assert torch.equal(traced_cu_seqlens, cu_seqlens)
         assert torch.equal(traced_video, video_out)
         assert torch.equal(traced_text, text_out)
+        assert torch.allclose(traced_attention(packed), attended, atol=1e-6, rtol=1e-6)
 
 
 def test_reference_artifacts_are_deterministic_and_checksummed(tmp_path):

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+import math
+from typing import Sequence, Union
 
 import torch
 from torch import nn
@@ -116,4 +117,38 @@ class AwaAttentionUnpack(nn.Module):
         return video, text
 
 
-__all__ = ["AwaAttentionPack", "AwaAttentionUnpack"]
+class AwaWindowAttention(nn.Module):
+    """Apply independent scaled dot-product attention to each packed window."""
+
+    def __init__(
+        self, cu_seqlens: Union[Sequence[int], torch.Tensor], head_dim: int
+    ) -> None:
+        super().__init__()
+        if int(head_dim) <= 0:
+            raise ValueError("head_dim must be positive")
+        if isinstance(cu_seqlens, torch.Tensor):
+            values = [int(item) for item in cu_seqlens.detach().cpu().tolist()]
+        else:
+            values = [int(item) for item in cu_seqlens]
+        if len(values) < 2 or values[0] != 0 or any(
+            end <= start for start, end in zip(values[:-1], values[1:])
+        ):
+            raise ValueError("cu_seqlens must start at zero and contain positive segments")
+        self.register_buffer("cu_seqlens", torch.tensor(values, dtype=torch.long))
+        self._window_ranges = tuple(zip(values[:-1], values[1:]))
+        self.scale = 1.0 / math.sqrt(int(head_dim))
+
+    def forward(self, packed_qkv: torch.Tensor) -> torch.Tensor:
+        outputs = []
+        for start, end in self._window_ranges:
+            segment = packed_qkv[start:end]
+            query = segment[:, 0].transpose(0, 1)
+            key = segment[:, 1].transpose(0, 1)
+            value = segment[:, 2].transpose(0, 1)
+            scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+            weights = torch.softmax(scores, dim=-1)
+            outputs.append(torch.matmul(weights, value).transpose(0, 1))
+        return torch.cat(outputs, dim=0)
+
+
+__all__ = ["AwaAttentionPack", "AwaAttentionUnpack", "AwaWindowAttention"]
