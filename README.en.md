@@ -30,6 +30,16 @@ bash tests/smoke.sh ./build/seedvr2-ncnn
 
 The current program does not load models or process media. Model files, preprocessing, and inference options will be added after the PyTorch baseline and export path are frozen.
 
+## Reference Baseline
+
+`tools/reference/seedvr2_baseline.py` generates reproducible AWA partitions and VAE input/output tensors for export and ncnn operator checks. The VAE baseline requires `SEEDVR2_UPSTREAM_ROOT` and `SEEDVR2_CKPT_DIR`; keep generated files in local `.agent/golden/`.
+
+```bash
+conda run -n seedvr2-ncnn pytest -q tests/python
+conda run -n seedvr2-ncnn python -m tools.reference.seedvr2_baseline awa \
+  --size 1,45,80 --windows 4,3,3 --output-dir .agent/golden/awa
+```
+
 ## Layout
 
 ```text

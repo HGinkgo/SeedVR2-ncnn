@@ -30,6 +30,16 @@ bash tests/smoke.sh ./build/seedvr2-ncnn
 
 当前程序不会加载模型或处理媒体文件。模型、预处理和推理参数将在 PyTorch 基线冻结及导出链路完成后加入。
 
+## 参考基线
+
+可用 `tools/reference/seedvr2_baseline.py` 生成可复现的 AWA 分块和 VAE 输入/输出张量，用于后续导出与 ncnn 算子对齐。VAE 基线需要设置 `SEEDVR2_UPSTREAM_ROOT` 和 `SEEDVR2_CKPT_DIR`；生成文件建议保存在本地 `.agent/golden/`。
+
+```bash
+conda run -n seedvr2-ncnn pytest -q tests/python
+conda run -n seedvr2-ncnn python -m tools.reference.seedvr2_baseline awa \
+  --size 1,45,80 --windows 4,3,3 --output-dir .agent/golden/awa
+```
+
 ## 目录
 
 ```text

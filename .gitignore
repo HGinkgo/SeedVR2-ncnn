@@ -6,3 +6,10 @@ ROADMAP.md
 build/
 build-vulkan/
 out/
+
+# Local reference model weights
+ckpts/
+
+# Python development caches
+__pycache__/
+.pytest_cache/
