@@ -1,0 +1,59 @@
+#version 450
+
+layout(constant_id = 0) const int mode = 0;
+
+layout(binding = 0) readonly buffer packed_blob { sfp packed_data[]; };
+layout(binding = 1) writeonly buffer video_blob { sfp video_data[]; };
+layout(binding = 2) writeonly buffer text_blob { sfp text_data[]; };
+layout(binding = 3) readonly buffer mapping_blob { int mapping_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int packed_cstep;
+    int output_cstep;
+    int heads;
+    int head_dim;
+    int source_t;
+    int source_h;
+    int source_w;
+    int source_tokens;
+    int text_tokens;
+    int window_count;
+    int time_index;
+    int text_offset;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (mode == 0)
+    {
+        if (gx >= p.head_dim || gy >= p.heads * p.source_w || gz >= p.source_h)
+            return;
+
+        int spatial = gz * p.source_w + gy / p.heads;
+        int source_index = p.time_index * p.source_h * p.source_w + spatial;
+        int packed_index = mapping_data[source_index];
+        int head = gy % p.heads;
+        int packed_offset = packed_index * p.packed_cstep + head * p.head_dim + gx;
+        int video_offset = gz * p.output_cstep + gy * p.head_dim + gx;
+        buffer_cp1(video_data, video_offset, packed_data, packed_offset);
+        return;
+    }
+
+    if (gx >= p.head_dim || gy >= p.heads || gz >= p.text_tokens)
+        return;
+
+    int output_offset = gz * p.output_cstep + gy * p.head_dim + gx;
+    afp value = afp(0.f);
+    for (int window = 0; window < p.window_count; window++)
+    {
+        int packed_index = mapping_data[p.text_offset + window * p.text_tokens + gz];
+        int packed_offset = packed_index * p.packed_cstep + gy * p.head_dim + gx;
+        value += afp(packed_data[packed_offset]);
+    }
+    buffer_st1(text_data, output_offset, value / float(p.window_count));
+}

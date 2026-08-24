@@ -3,6 +3,8 @@
 
 #include "net.h"
 #include "platform.h"
+#include "awa/awa_layers.h"
+#include "vae/temporal_pad.h"
 
 namespace
 {
@@ -20,7 +22,8 @@ void print_version()
 {
     // Constructing Net keeps the CLI smoke test tied to the linked ncnn API.
     ncnn::Net net;
-    (void)net;
+    register_seedvr2_awa_layers(net);
+    register_seedvr2_vae_layers(net);
     std::printf("SeedVR2-ncnn %s\n", SEEDVR2_VERSION);
     std::printf("ncnn %s\n", NCNN_VERSION_STRING);
 }

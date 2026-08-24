@@ -1,0 +1,34 @@
+#version 450
+
+layout(binding = 0) readonly buffer bottom_blob { sfp bottom_data[]; };
+layout(binding = 1) writeonly buffer top_blob { sfp top_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_width;
+    int input_height;
+    int input_depth;
+    int input_channels;
+    int input_cstep;
+    int output_cstep;
+    int prepend;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+    int output_depth = p.input_depth + p.prepend;
+    if (gx >= p.input_width || gy >= p.input_height * output_depth || gz >= p.input_channels)
+        return;
+
+    int channel = gz;
+    int depth = gy / p.input_height;
+    int row = gy % p.input_height;
+    int source_depth = depth < p.prepend ? 0 : depth - p.prepend;
+    int plane = p.input_width * p.input_height;
+    int output_offset = channel * p.output_cstep + depth * plane + row * p.input_width + gx;
+    int input_offset = channel * p.input_cstep + source_depth * plane + row * p.input_width + gx;
+    buffer_cp1(top_data, output_offset, bottom_data, input_offset)
+}

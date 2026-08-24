@@ -1,0 +1,45 @@
+#version 450
+
+layout(binding = 0) readonly buffer bottom_blob { sfp bottom_data[]; };
+layout(binding = 1) writeonly buffer top_blob { sfp top_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_width;
+    int input_height;
+    int input_depth;
+    int output_channels;
+    int block_x;
+    int block_y;
+    int block_z;
+    int input_cstep;
+    int output_cstep;
+    int output_width;
+    int output_height;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+    int output_depth = p.input_depth * p.block_z;
+    if (gx >= p.output_width || gy >= p.output_height * output_depth || gz >= p.output_channels)
+        return;
+
+    int channel = gz;
+    int depth = gy / p.output_height;
+    int row = gy % p.output_height;
+    int source_depth = depth / p.block_z;
+    int source_z = depth % p.block_z;
+    int source_row = row / p.block_x;
+    int source_x = row % p.block_x;
+    int source_column = gx / p.block_y;
+    int source_y = gx % p.block_y;
+    int source_channel = (((source_x * p.block_y) + source_y) * p.block_z + source_z) * p.output_channels + channel;
+    int input_plane = p.input_width * p.input_height;
+    int output_plane = p.output_width * p.output_height;
+    int input_offset = source_channel * p.input_cstep + source_depth * input_plane + source_row * p.input_width + source_column;
+    int output_offset = channel * p.output_cstep + depth * output_plane + row * p.output_width + gx;
+    buffer_cp1(top_data, output_offset, bottom_data, input_offset)
+}

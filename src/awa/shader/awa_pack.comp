@@ -1,0 +1,47 @@
+#version 450
+
+layout(binding = 0) readonly buffer video_blob { sfp video_data[]; };
+layout(binding = 1) readonly buffer text_blob { sfp text_data[]; };
+layout(binding = 2) writeonly buffer packed_blob { sfp packed_data[]; };
+layout(binding = 3) writeonly buffer cu_seqlens_blob { sfp cu_seqlens_data[]; };
+layout(binding = 4) readonly buffer mapping_blob { int mapping_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int video_cstep;
+    int text_cstep;
+    int heads;
+    int head_dim;
+    int source_tokens;
+    int sequence_tokens;
+    int packed_cstep;
+    int cu_offset;
+    int cu_count;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (gx >= p.head_dim || gy >= 3 * p.heads || gz >= p.sequence_tokens)
+        return;
+
+    int source_index = mapping_data[gz];
+    bool is_video = source_index < p.source_tokens;
+    int token = is_video ? source_index : source_index - p.source_tokens;
+    int qkv = gy / p.heads;
+    int head = gy % p.heads;
+    int source_offset = token * (is_video ? p.video_cstep : p.text_cstep) +
+                        qkv * p.heads * p.head_dim + head * p.head_dim + gx;
+    int packed_offset = gz * p.packed_cstep + gy * p.head_dim + gx;
+
+    if (is_video)
+        buffer_cp1(packed_data, packed_offset, video_data, source_offset)
+    else
+        buffer_cp1(packed_data, packed_offset, text_data, source_offset)
+
+    if (gx == 0 && gy == 0 && gz < p.cu_count)
+        buffer_st1(cu_seqlens_data, gz, afp(mapping_data[p.cu_offset + gz]));
+}

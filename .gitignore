@@ -1,11 +1,14 @@
 # Local planning and agent-continuity files
+AGENTS.md
 ROADMAP.md
 .agent/
 
 # Local build output
 build/
 build-vulkan/
+build-awa-test/
 out/
+runtime/
 
 # Local reference model weights
 ckpts/
