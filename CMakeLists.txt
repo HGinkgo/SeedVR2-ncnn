@@ -28,9 +28,11 @@ add_subdirectory(third_party/ncnn)
 add_executable(seedvr2-ncnn
     src/main.cpp
     src/awa/awa_layers.cpp
+    src/sampler/sampler.cpp
     src/vae/temporal_pad.cpp
     src/vae/depth_to_space.cpp)
 target_link_libraries(seedvr2-ncnn PRIVATE ncnn)
+target_include_directories(seedvr2-ncnn PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(seedvr2-ncnn PRIVATE
     SEEDVR2_VERSION="${PROJECT_VERSION}")
 
@@ -109,6 +111,13 @@ install(TARGETS seedvr2-ncnn RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(SEEDVR2_BUILD_TESTS)
     enable_testing()
+
+    add_executable(seedvr2-sampler-test
+        tests/cpp/test_sampler.cpp
+        src/sampler/sampler.cpp)
+    target_include_directories(seedvr2-sampler-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME seedvr2-sampler-test COMMAND seedvr2-sampler-test)
+
     add_executable(seedvr2-awa-benchmark-test
         tests/cpp/test_awa_benchmark.cpp
         src/awa/awa_benchmark.cpp)
