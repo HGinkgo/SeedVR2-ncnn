@@ -8,17 +8,36 @@ on:
 jobs:
   cpu:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out source and submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      - name: Read ncnn revision
+        id: ncnn-revision
+        run: echo "sha=$(git -C third_party/ncnn rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore CMake build cache
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-seedvr2-cmake-${{ steps.ncnn-revision.outputs.sha }}-${{ hashFiles('CMakeLists.txt', '.github/workflows/build.yml') }}
+
       - name: Configure
-        run: cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release
+        run: >-
+          cmake -S . -B build
+          -DSEEDVR2_ENABLE_VULKAN=OFF
+          -DSEEDVR2_BUILD_TESTS=OFF
+          -DNCNN_RUNTIME_CPU=OFF
+          -DNCNN_SSE2=OFF
+          -DNCNN_AVX=OFF
+          -DNCNN_OPENMP=OFF
+          -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 2
 
       - name: Smoke test
         run: bash tests/smoke.sh ./build/seedvr2-ncnn
