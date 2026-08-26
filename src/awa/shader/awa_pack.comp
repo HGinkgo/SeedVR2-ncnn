@@ -8,8 +8,10 @@ layout(binding = 4) readonly buffer mapping_blob { int mapping_data[]; };
 
 layout(push_constant) uniform parameter
 {
-    int video_cstep;
-    int text_cstep;
+    int video_token_stride;
+    int text_token_stride;
+    int video_qkv_stride;
+    int text_qkv_stride;
     int heads;
     int head_dim;
     int source_tokens;
@@ -33,8 +35,9 @@ void main()
     int token = is_video ? source_index : source_index - p.source_tokens;
     int qkv = gy / p.heads;
     int head = gy % p.heads;
-    int source_offset = token * (is_video ? p.video_cstep : p.text_cstep) +
-                        qkv * p.heads * p.head_dim + head * p.head_dim + gx;
+    int source_offset = token * (is_video ? p.video_token_stride : p.text_token_stride) +
+                        qkv * (is_video ? p.video_qkv_stride : p.text_qkv_stride) +
+                        head * p.head_dim + gx;
     int packed_offset = gz * p.packed_cstep + gy * p.head_dim + gx;
 
     if (is_video)

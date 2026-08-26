@@ -95,4 +95,81 @@ private:
 #endif
 };
 
+class SeedVR2MMRoPE final : public ncnn::Layer
+{
+public:
+    SeedVR2MMRoPE();
+
+    int load_param(const ncnn::ParamDict& pd) override;
+    int forward(const std::vector<ncnn::Mat>& bottom_blobs,
+                std::vector<ncnn::Mat>& top_blobs,
+                const ncnn::Option& opt) const override;
+
+#if NCNN_VULKAN
+    int upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt) override;
+    int create_pipeline(const ncnn::Option& opt) override;
+    int destroy_pipeline(const ncnn::Option& opt) override;
+    int forward(const std::vector<ncnn::VkMat>& bottom_blobs,
+                std::vector<ncnn::VkMat>& top_blobs,
+                ncnn::VkCompute& cmd,
+                const ncnn::Option& opt) const override;
+#endif
+
+private:
+    int source_t_ = 0;
+    int source_h_ = 0;
+    int source_w_ = 0;
+    int windows_t_ = 0;
+    int windows_h_ = 0;
+    int windows_w_ = 0;
+    int text_tokens_ = 0;
+    bool shifted_ = false;
+    int rope_dim_ = 0;
+    int sequence_tokens_ = 0;
+    ncnn::Mat rotations_cpu_;
+
+#if NCNN_VULKAN
+    ncnn::VkMat rotations_gpu_;
+    ncnn::Pipeline* pipeline_ = 0;
+#endif
+};
+
+class SeedVR2WindowAttention final : public ncnn::Layer
+{
+public:
+    SeedVR2WindowAttention();
+
+    int load_param(const ncnn::ParamDict& pd) override;
+    int forward(const std::vector<ncnn::Mat>& bottom_blobs,
+                std::vector<ncnn::Mat>& top_blobs,
+                const ncnn::Option& opt) const override;
+
+#if NCNN_VULKAN
+    int create_pipeline(const ncnn::Option& opt) override;
+    int destroy_pipeline(const ncnn::Option& opt) override;
+    int forward(const std::vector<ncnn::VkMat>& bottom_blobs,
+                std::vector<ncnn::VkMat>& top_blobs,
+                ncnn::VkCompute& cmd,
+                const ncnn::Option& opt) const override;
+#endif
+
+private:
+    int source_t_ = 0;
+    int source_h_ = 0;
+    int source_w_ = 0;
+    int windows_t_ = 0;
+    int windows_h_ = 0;
+    int windows_w_ = 0;
+    int text_tokens_ = 0;
+    bool shifted_ = false;
+    int sequence_tokens_ = 0;
+    std::vector<int> window_offsets_;
+
+#if NCNN_VULKAN
+    ncnn::Pipeline* score_pipeline_ = 0;
+    ncnn::Pipeline* softmax_pipeline_ = 0;
+    ncnn::Pipeline* value_pipeline_ = 0;
+#endif
+};
+
 void register_seedvr2_awa_layers(ncnn::Net& net);

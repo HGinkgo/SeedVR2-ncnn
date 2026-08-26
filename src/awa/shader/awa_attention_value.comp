@@ -1,0 +1,36 @@
+#version 450
+
+layout(binding = 0) readonly buffer input_blob { sfp input_data[]; };
+layout(binding = 1) readonly buffer scores_blob { float scores_data[]; };
+layout(binding = 2) writeonly buffer output_blob { sfp output_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_cstep;
+    int score_cstep;
+    int output_cstep;
+    int heads;
+    int head_dim;
+    int window_start;
+    int window_length;
+} p;
+
+void main()
+{
+    int feature = int(gl_GlobalInvocationID.x);
+    int head = int(gl_GlobalInvocationID.y);
+    int query = int(gl_GlobalInvocationID.z);
+    if (feature >= p.head_dim || head >= p.heads || query >= p.window_length)
+        return;
+
+    float value = 0.f;
+    int score_offset = head * p.score_cstep + query * p.window_length;
+    for (int key = 0; key < p.window_length; key++)
+    {
+        int input_offset = (p.window_start + key) * p.input_cstep +
+                           (2 * p.heads + head) * p.head_dim + feature;
+        value += scores_data[score_offset + key] * float(afp(input_data[input_offset]));
+    }
+    int output_offset = (p.window_start + query) * p.output_cstep + head * p.head_dim + feature;
+    buffer_st1(output_data, output_offset, afp(value));
+}

@@ -1,0 +1,42 @@
+#version 450
+
+layout(binding = 0) readonly buffer input_blob { sfp input_data[]; };
+layout(binding = 1) writeonly buffer output_blob { sfp output_data[]; };
+layout(binding = 2) readonly buffer rotations_blob { float rotations_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_cstep;
+    int output_cstep;
+    int heads;
+    int head_dim;
+    int rope_dim;
+} p;
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int gz = int(gl_GlobalInvocationID.z);
+
+    if (gx >= p.head_dim || gy >= 3 * p.heads)
+        return;
+
+    int input_offset = gz * p.input_cstep + gy * p.head_dim + gx;
+    int output_offset = gz * p.output_cstep + gy * p.head_dim + gx;
+    if (gy >= 2 * p.heads || gx >= p.rope_dim)
+    {
+        buffer_cp1(output_data, output_offset, input_data, input_offset);
+        return;
+    }
+
+    int paired_feature = gx % 2 == 0 ? gx + 1 : gx - 1;
+    int paired_offset = gz * p.input_cstep + gy * p.head_dim + paired_feature;
+    int rotation_offset = gz * (2 * p.rope_dim) + gx;
+    afp value = afp(input_data[input_offset]);
+    afp paired = afp(input_data[paired_offset]);
+    float cosine = rotations_data[rotation_offset];
+    float sine = rotations_data[rotation_offset + p.rope_dim];
+    afp rotated = gx % 2 == 0 ? value * cosine - paired * sine : value * cosine + paired * sine;
+    buffer_st1(output_data, output_offset, rotated);
+}

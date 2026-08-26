@@ -104,6 +104,25 @@ void run_case(bool shifted)
                 static_cast<const float*>(text.channel(0).data)[0],
             "text sequence is appended to each window");
 
+    ncnn::Mat video_batched(head_dim, heads, 3, static_cast<size_t>(4u), 1, source_tokens);
+    ncnn::Mat text_batched(head_dim, heads, 3, static_cast<size_t>(4u), 1, text_tokens);
+    for (int token = 0; token < source_tokens; token++)
+        for (int qkv = 0; qkv < 3; qkv++)
+            std::memcpy(video_batched.batch(token).channel(qkv).data,
+                        video.channel(token).depth(qkv).data,
+                        static_cast<size_t>(heads * head_dim) * sizeof(float));
+    for (int token = 0; token < text_tokens; token++)
+        for (int qkv = 0; qkv < 3; qkv++)
+            std::memcpy(text_batched.batch(token).channel(qkv).data,
+                        text.channel(token).depth(qkv).data,
+                        static_cast<size_t>(heads * head_dim) * sizeof(float));
+
+    std::vector<ncnn::Mat> batched_pack_outputs;
+    require(pack.forward({video_batched, text_batched}, batched_pack_outputs, option) == 0,
+            "pack accepts token-batch QKV inputs");
+    require(batched_pack_outputs.size() == 2 && fnv1a(batched_pack_outputs[0]) == expected_hash,
+            "token-batch pack sequence matches channel-token layout");
+
     SeedVR2AWAUnpack unpack;
     require(unpack.load_param(params) == 0, "unpack parameters load");
     ncnn::Mat attended(head_dim, heads, packed.c);

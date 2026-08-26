@@ -62,6 +62,23 @@ void make_inputs(ncnn::Mat& video, ncnn::Mat& text)
     }
 }
 
+bool make_token_batched_qkv(const ncnn::Mat& source, ncnn::Mat& destination)
+{
+    if (source.dims != 4 || source.d != 3 || source.n != 1)
+        return false;
+
+    destination.create(source.w, source.h, source.d, source.elemsize, source.elempack, source.c);
+    if (destination.empty())
+        return false;
+
+    const size_t qkv_size = static_cast<size_t>(source.w) * source.h * sizeof(float);
+    for (int token = 0; token < source.c; token++)
+        for (int qkv = 0; qkv < source.d; qkv++)
+            std::memcpy(destination.batch(token).channel(qkv).data,
+                        source.channel(token).depth(qkv).data, qkv_size);
+    return true;
+}
+
 int run_vulkan(const ncnn::Mat& packed, const ncnn::Option& base_opt, ncnn::Mat& output_video, ncnn::Mat& output_text)
 {
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device();
@@ -214,6 +231,18 @@ int main()
     if (pack.forward({video, text}, pack_outputs, opt) != 0)
         return 1;
 
+    ncnn::Mat video_batched;
+    ncnn::Mat text_batched;
+    std::vector<ncnn::Mat> batched_pack_outputs;
+    if (!make_token_batched_qkv(video, video_batched) || !make_token_batched_qkv(text, text_batched) ||
+        pack.forward({video_batched, text_batched}, batched_pack_outputs, opt) != 0 ||
+        batched_pack_outputs.size() != 2 || !compare(pack_outputs[0], batched_pack_outputs[0], 1e-6f) ||
+        !compare(pack_outputs[1], batched_pack_outputs[1], 1e-6f))
+    {
+        std::fprintf(stderr, "Token-batch CPU Pack output differs from token-channel layout\n");
+        return 1;
+    }
+
     const ncnn::Mat& packed_qkv = pack_outputs[0];
     ncnn::Mat packed(packed_qkv.w, packed_qkv.h / 3, packed_qkv.c);
     for (int token = 0; token < packed.c; token++)
@@ -235,6 +264,12 @@ int main()
         !compare(pack_outputs[0], gpu_packed, 1e-3f) || !compare(pack_outputs[1], gpu_cu, 1e-3f))
     {
         std::fprintf(stderr, "CPU/Vulkan Pack outputs differ\n");
+        return 1;
+    }
+    if (run_pack_vulkan(video_batched, text_batched, opt, gpu_packed, gpu_cu) != 0 ||
+        !compare(pack_outputs[0], gpu_packed, 1e-3f) || !compare(pack_outputs[1], gpu_cu, 1e-3f))
+    {
+        std::fprintf(stderr, "Token-batch CPU/Vulkan Pack outputs differ\n");
         return 1;
     }
     if (run_vulkan(packed, opt, gpu_video, gpu_text) != 0)

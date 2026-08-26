@@ -7,6 +7,7 @@ ROADMAP.md
 build/
 build-vulkan/
 build-awa-test/
+build-vulkan-asan/
 out/
 runtime/
 

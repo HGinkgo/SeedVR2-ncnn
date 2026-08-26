@@ -38,7 +38,7 @@ if(SEEDVR2_ENABLE_VULKAN)
     set(SEEDVR2_AWA_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/awa/shader")
     set(SEEDVR2_AWA_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
     set(SEEDVR2_AWA_SHADER_HEADERS)
-    foreach(SEEDVR2_AWA_SHADER awa_pack awa_unpack)
+    foreach(SEEDVR2_AWA_SHADER awa_pack awa_unpack awa_attention_score awa_attention_softmax awa_attention_value mmrope)
         set(SEEDVR2_AWA_SHADER_SRC "${SEEDVR2_AWA_SHADER_DIR}/${SEEDVR2_AWA_SHADER}.comp")
         set(SEEDVR2_AWA_SHADER_HEADER
             "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader/${SEEDVR2_AWA_SHADER}.comp.hex.h")
@@ -150,6 +150,12 @@ if(SEEDVR2_BUILD_TESTS)
     endif()
     add_test(NAME seedvr2-depth-to-space-test COMMAND seedvr2-depth-to-space-test)
 
+    add_executable(seedvr2-conditioning-test
+        tests/cpp/test_conditioning.cpp
+        src/conditioning/conditioning.cpp)
+    target_link_libraries(seedvr2-conditioning-test PRIVATE ncnn)
+    target_include_directories(seedvr2-conditioning-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
     add_executable(seedvr2-awa-graph-load-test
         tests/cpp/test_awa_graph_load.cpp
         src/awa/awa_layers.cpp)
@@ -158,6 +164,16 @@ if(SEEDVR2_BUILD_TESTS)
     if(SEEDVR2_ENABLE_VULKAN)
         target_sources(seedvr2-awa-graph-load-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
         target_include_directories(seedvr2-awa-graph-load-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+    endif()
+
+    add_executable(seedvr2-dit-block-graph-load-test
+        tests/cpp/test_dit_block_graph_load.cpp
+        src/awa/awa_layers.cpp)
+    target_link_libraries(seedvr2-dit-block-graph-load-test PRIVATE ncnn)
+    target_include_directories(seedvr2-dit-block-graph-load-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    if(SEEDVR2_ENABLE_VULKAN)
+        target_sources(seedvr2-dit-block-graph-load-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+        target_include_directories(seedvr2-dit-block-graph-load-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
     endif()
 
     add_executable(seedvr2-vae-graph-load-test
@@ -236,6 +252,53 @@ if(SEEDVR2_BUILD_TESTS)
             "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
         target_sources(seedvr2-awa-graph-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
 
+        add_executable(seedvr2-dit-block-end-to-end-vulkan-test
+            tests/cpp/test_dit_block_end_to_end_vulkan.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-dit-block-end-to-end-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-dit-block-end-to-end-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-dit-block-end-to-end-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+
+        add_executable(seedvr2-dit-stack-vulkan-test
+            tests/cpp/test_dit_stack_vulkan.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-dit-stack-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-dit-stack-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-dit-stack-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+
+        add_executable(seedvr2-vae-dit-vae-vulkan-test
+            tests/cpp/test_vae_dit_vae_vulkan.cpp
+            src/awa/awa_layers.cpp
+            src/vae/temporal_pad.cpp
+            src/vae/depth_to_space.cpp)
+        target_link_libraries(seedvr2-vae-dit-vae-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-vae-dit-vae-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-vae-dit-vae-vulkan-test PRIVATE
+            ${SEEDVR2_AWA_SHADER_HEADERS}
+            "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
+            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+
+        add_executable(seedvr2-vae-dit-stack-vulkan-test
+            tests/cpp/test_vae_dit_stack_vulkan.cpp
+            src/awa/awa_layers.cpp
+            src/conditioning/conditioning.cpp
+            src/vae/temporal_pad.cpp
+            src/vae/depth_to_space.cpp)
+        target_link_libraries(seedvr2-vae-dit-stack-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-vae-dit-stack-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-vae-dit-stack-vulkan-test PRIVATE
+            ${SEEDVR2_AWA_SHADER_HEADERS}
+            "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
+            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+
         add_executable(seedvr2-awa-unpack-vulkan-test
             tests/cpp/test_awa_unpack_vulkan.cpp
             src/awa/awa_layers.cpp)
@@ -245,5 +308,23 @@ if(SEEDVR2_BUILD_TESTS)
             "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
         target_sources(seedvr2-awa-unpack-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
         add_test(NAME seedvr2-awa-unpack-vulkan-test COMMAND seedvr2-awa-unpack-vulkan-test)
+
+        add_executable(seedvr2-mmrope-vulkan-test
+            tests/cpp/test_mmrope_vulkan.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-mmrope-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-mmrope-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-mmrope-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+
+        add_executable(seedvr2-awa-attention-vulkan-test
+            tests/cpp/test_awa_attention_vulkan.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-awa-attention-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-awa-attention-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-awa-attention-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
     endif()
 endif()

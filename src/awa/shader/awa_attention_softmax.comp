@@ -1,0 +1,34 @@
+#version 450
+
+layout(binding = 0) buffer scores_blob { float scores_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int score_cstep;
+    int heads;
+    int window_length;
+} p;
+
+void main()
+{
+    int lane = int(gl_GlobalInvocationID.x);
+    int query = int(gl_GlobalInvocationID.y);
+    int head = int(gl_GlobalInvocationID.z);
+    if (lane != 0 || query >= p.window_length || head >= p.heads)
+        return;
+
+    int offset = head * p.score_cstep + query * p.window_length;
+    float maximum = scores_data[offset];
+    for (int key = 1; key < p.window_length; key++)
+        maximum = max(maximum, scores_data[offset + key]);
+
+    float normalizer = 0.f;
+    for (int key = 0; key < p.window_length; key++)
+    {
+        float value = exp(scores_data[offset + key] - maximum);
+        scores_data[offset + key] = value;
+        normalizer += value;
+    }
+    for (int key = 0; key < p.window_length; key++)
+        scores_data[offset + key] /= normalizer;
+}
