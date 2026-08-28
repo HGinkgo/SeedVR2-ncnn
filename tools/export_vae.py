@@ -272,7 +272,14 @@ def disable_memory_slicing_for_trace(vae: nn.Module) -> None:
         vae.set_memory_limit(conv_max_mem=None, norm_max_mem=None)
 
 
+def _resolve_vae_paths(upstream_root: Path, checkpoint: Path) -> tuple[Path, Path]:
+    """Resolve paths before changing cwd for imports from the upstream tree."""
+
+    return upstream_root.expanduser().resolve(), checkpoint.expanduser().resolve()
+
+
 def _load_vae(upstream_root: Path, checkpoint: Path, device: torch.device):
+    upstream_root, checkpoint = _resolve_vae_paths(upstream_root, checkpoint)
     sys.path.insert(0, str(upstream_root))
     previous_cwd = Path.cwd()
     os.chdir(upstream_root)

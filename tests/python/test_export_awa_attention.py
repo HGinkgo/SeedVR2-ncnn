@@ -113,6 +113,15 @@ def test_vae_pnnx_command_uses_primary_shape_and_absolute_paths(tmp_path):
     ]
 
 
+def test_vae_load_paths_are_absolute_before_chdir(tmp_path):
+    upstream_root, checkpoint = vae_exporter._resolve_vae_paths(
+        Path("relative-upstream"), Path("relative-checkpoint")
+    )
+
+    assert upstream_root == (Path.cwd() / "relative-upstream").resolve()
+    assert checkpoint == (Path.cwd() / "relative-checkpoint").resolve()
+
+
 def test_vae_trace_disables_memory_slicing():
     class Vae:
         def __init__(self):
