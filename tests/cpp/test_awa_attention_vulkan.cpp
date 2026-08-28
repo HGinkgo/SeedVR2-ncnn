@@ -20,6 +20,20 @@ constexpr int kWindowTokens = 1 + kTextTokens;
 constexpr int kWindowCount = 4;
 constexpr int kSequenceTokens = kWindowCount * kWindowTokens;
 
+struct RealScaleConfig
+{
+    int source_t;
+    int source_h;
+    int source_w;
+    int windows_t;
+    int windows_h;
+    int windows_w;
+    int text_tokens;
+    int heads;
+    int head_dim;
+    bool shifted;
+};
+
 void require(bool condition, const char* message)
 {
     if (!condition)
@@ -45,6 +59,20 @@ ncnn::ParamDict make_params()
     return params;
 }
 
+ncnn::ParamDict make_params(const RealScaleConfig& config)
+{
+    ncnn::ParamDict params;
+    params.set(0, config.source_t);
+    params.set(1, config.source_h);
+    params.set(2, config.source_w);
+    params.set(3, config.windows_t);
+    params.set(4, config.windows_h);
+    params.set(5, config.windows_w);
+    params.set(6, config.text_tokens);
+    params.set(7, config.shifted ? 1 : 0);
+    return params;
+}
+
 ncnn::Mat make_input()
 {
     ncnn::Mat input(kHeadDim, 3 * kHeads, kSequenceTokens);
@@ -55,6 +83,88 @@ ncnn::Mat make_input()
                     input.channel(token).row(qkv * kHeads + head)[feature] =
                         0.01f * static_cast<float>(17 * token + 5 * qkv + 3 * head + feature + 1);
     return input;
+}
+
+ncnn::Mat make_real_scale_input(int sequence_tokens, const RealScaleConfig& config)
+{
+    ncnn::Mat input(config.head_dim, 3 * config.heads, sequence_tokens);
+    for (int token = 0; token < sequence_tokens; token++)
+        for (int qkv = 0; qkv < 3; qkv++)
+            for (int head = 0; head < config.heads; head++)
+                for (int feature = 0; feature < config.head_dim; feature++)
+                {
+                    const int value = (token * 31 + qkv * 19 + head * 13 + feature * 7) % 997;
+                    input.channel(token).row(qkv * config.heads + head)[feature] =
+                        (static_cast<float>(value) - 498.f) / 997.f;
+                }
+    return input;
+}
+
+bool matches_real_scale_samples(const ncnn::Mat& input, const ncnn::Mat& output,
+                                const RealScaleConfig& config, float tolerance)
+{
+    const std::vector<seedvr2::AwaWindow> windows = seedvr2::make_awa_windows(
+        config.source_t, config.source_h, config.source_w, config.windows_t, config.windows_h, config.windows_w,
+        config.shifted);
+    std::vector<int> offsets;
+    offsets.reserve(windows.size() + 1);
+    offsets.push_back(0);
+    for (const seedvr2::AwaWindow& window : windows)
+    {
+        const int video_tokens = (window.t1 - window.t0) * (window.h1 - window.h0) * (window.w1 - window.w0);
+        offsets.push_back(offsets.back() + video_tokens + config.text_tokens);
+    }
+    if (output.dims != 3 || output.w != config.head_dim || output.h != config.heads || output.c != offsets.back())
+        return false;
+
+    const float scale = 1.f / std::sqrt(static_cast<float>(config.head_dim));
+    for (size_t window_index = 0; window_index < windows.size(); window_index++)
+    {
+        const int window_start = offsets[window_index];
+        const int window_length = offsets[window_index + 1] - window_start;
+        const int query = window_start + window_length / 2;
+        for (int head = 0; head < config.heads; head++)
+        {
+            std::vector<float> scores(static_cast<size_t>(window_length));
+            float maximum = -INFINITY;
+            for (int key = 0; key < window_length; key++)
+            {
+                float dot = 0.f;
+                const float* query_data = static_cast<const float*>(input.channel(query).row(head));
+                const float* key_data = static_cast<const float*>(input.channel(window_start + key).row(config.heads + head));
+                for (int feature = 0; feature < config.head_dim; feature++)
+                    dot += query_data[feature] * key_data[feature];
+                scores[key] = dot * scale;
+                maximum = std::max(maximum, scores[key]);
+            }
+            float normalizer = 0.f;
+            for (float& score : scores)
+            {
+                score = std::exp(score - maximum);
+                normalizer += score;
+            }
+            for (int feature = 0; feature < config.head_dim; feature++)
+            {
+                float expected = 0.f;
+                for (int key = 0; key < window_length; key++)
+                {
+                    const float* value = static_cast<const float*>(
+                        input.channel(window_start + key).row(2 * config.heads + head));
+                    expected += scores[key] / normalizer * value[feature];
+                }
+                const float actual = output.channel(query).row(head)[feature];
+                if (!std::isfinite(actual) || std::fabs(expected - actual) > tolerance)
+                {
+                    std::fprintf(stderr,
+                                 "real-scale attention mismatch shifted=%d window=%zu token=%d head=%d feature=%d "
+                                 "expected=%f actual=%f\n",
+                                 config.shifted, window_index, query, head, feature, expected, actual);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 ncnn::Mat attention_reference(const ncnn::Mat& input)
@@ -118,7 +228,7 @@ void require_matches(const ncnn::Mat& expected, const ncnn::Mat& actual, float t
             }
 }
 
-int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
+int run_vulkan(const ncnn::Mat& input, const ncnn::ParamDict& params, ncnn::Mat& output)
 {
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device();
     if (!vkdev)
@@ -137,7 +247,7 @@ int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
 
     int result = -1;
     SeedVR2WindowAttention attention;
-    if (attention.load_param(make_params()) != 0)
+    if (attention.load_param(params) != 0)
         std::fprintf(stderr, "attention Vulkan: load_param failed\n");
     else
     {
@@ -175,6 +285,27 @@ int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
     return result;
 }
 
+int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
+{
+    return run_vulkan(input, make_params(), output);
+}
+
+void verify_real_scale_attention(bool shifted)
+{
+    const RealScaleConfig config = {1, 45, 80, 4, 3, 3, 58, 20, 128, shifted};
+    const std::vector<seedvr2::AwaWindow> windows = seedvr2::make_awa_windows(
+        config.source_t, config.source_h, config.source_w, config.windows_t, config.windows_h, config.windows_w,
+        config.shifted);
+    int sequence_tokens = 0;
+    for (const seedvr2::AwaWindow& window : windows)
+        sequence_tokens += (window.t1 - window.t0) * (window.h1 - window.h0) * (window.w1 - window.w0) +
+                           config.text_tokens;
+    const ncnn::Mat input = make_real_scale_input(sequence_tokens, config);
+    ncnn::Mat output;
+    require(run_vulkan(input, make_params(config), output) == 0, "real-scale attention Vulkan forward");
+    require(matches_real_scale_samples(input, output, config, 2e-3f), "real-scale attention reference values");
+}
+
 } // namespace
 
 int main()
@@ -193,6 +324,9 @@ int main()
     ncnn::Mat vulkan_output;
     require(run_vulkan(input, vulkan_output) == 0, "attention Vulkan forward");
     require_matches(expected, vulkan_output, 2e-5f);
+
+    verify_real_scale_attention(false);
+    verify_real_scale_attention(true);
 
     std::puts("seedvr2-awa-attention-vulkan: ok");
     return 0;

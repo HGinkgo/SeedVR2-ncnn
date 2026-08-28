@@ -37,11 +37,13 @@ int main()
         return 1;
 
     const std::vector<float> timesteps = seedvr2::uniform_trailing_timesteps();
-    if (timesteps.size() != 50 || !near(timesteps.front(), 1000.f) || !near(timesteps.back(), 20.f))
+    if (timesteps.size() != 1 || !near(timesteps.front(), 1000.f))
         return 1;
-    for (size_t index = 1; index < timesteps.size(); index++)
-        if (!(timesteps[index - 1] > timesteps[index]))
-            return 1;
+    std::vector<float> endpoint;
+    if (!seedvr2::euler_v_lerp_endpoint({3.f, -2.f}, {0.5f, 1.25f}, 1000.f, 1000.f, endpoint))
+        return 1;
+    if (endpoint.size() != 2 || !near(endpoint[0], 2.5f) || !near(endpoint[1], -3.25f))
+        return 1;
 
     std::vector<float> next;
     if (!seedvr2::euler_v_lerp_step({10.f, 20.f}, {2.f, -4.f}, 1000.f, 500.f, 1000.f, next))

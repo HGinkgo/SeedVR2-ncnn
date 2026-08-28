@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "layer.h"
 
 #if NCNN_VULKAN
@@ -11,6 +13,25 @@ namespace ncnn
 {
 class Net;
 }
+
+namespace seedvr2
+{
+
+struct AwaWindow final
+{
+    int t0 = 0;
+    int t1 = 0;
+    int h0 = 0;
+    int h1 = 0;
+    int w0 = 0;
+    int w1 = 0;
+};
+
+// Build clipped windows in the same order used by the custom AWA layers.
+std::vector<AwaWindow> make_awa_windows(int source_t, int source_h, int source_w,
+                                        int windows_t, int windows_h, int windows_w, bool shifted);
+
+} // namespace seedvr2
 
 class SeedVR2AWAPack final : public ncnn::Layer
 {

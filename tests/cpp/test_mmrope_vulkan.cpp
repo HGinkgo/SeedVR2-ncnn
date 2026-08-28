@@ -20,6 +20,19 @@ constexpr int kTextTokens = 3;
 constexpr int kWindowTokens = kWindowVideoTokens + kTextTokens;
 constexpr int kSequenceTokens = 2 * kWindowTokens;
 
+struct ProductionRopeConfig
+{
+    int source_t;
+    int source_h;
+    int source_w;
+    int windows_t;
+    int windows_h;
+    int windows_w;
+    int text_tokens;
+    int rope_dim;
+    bool shifted;
+};
+
 void require(bool condition, const char* message)
 {
     if (!condition)
@@ -44,6 +57,21 @@ ncnn::ParamDict make_params()
     return params;
 }
 
+ncnn::ParamDict make_params(const ProductionRopeConfig& config)
+{
+    ncnn::ParamDict params;
+    params.set(0, config.source_t);
+    params.set(1, config.source_h);
+    params.set(2, config.source_w);
+    params.set(3, config.windows_t);
+    params.set(4, config.windows_h);
+    params.set(5, config.windows_w);
+    params.set(6, config.text_tokens);
+    params.set(7, config.shifted ? 1 : 0);
+    params.set(8, config.rope_dim);
+    return params;
+}
+
 ncnn::Mat make_input()
 {
     ncnn::Mat input(kHeadDim, 3 * kHeads, kSequenceTokens);
@@ -53,6 +81,97 @@ ncnn::Mat make_input()
                 input.channel(token).row(qkv)[feature] =
                     token * 0.01f + qkv * 0.1f + feature * 0.01f;
     return input;
+}
+
+int production_sequence_tokens(const ProductionRopeConfig& config)
+{
+    int total = 0;
+    for (const seedvr2::AwaWindow& window : seedvr2::make_awa_windows(
+             config.source_t, config.source_h, config.source_w, config.windows_t, config.windows_h,
+             config.windows_w, config.shifted))
+    {
+        total += (window.t1 - window.t0) * (window.h1 - window.h0) * (window.w1 - window.w0) + config.text_tokens;
+    }
+    return total;
+}
+
+ncnn::Mat make_production_input(int sequence_tokens, const ProductionRopeConfig& config)
+{
+    ncnn::Mat input(config.rope_dim, 3, sequence_tokens);
+    for (int token = 0; token < sequence_tokens; token++)
+        for (int qkv = 0; qkv < 3; qkv++)
+            for (int feature = 0; feature < config.rope_dim; feature++)
+            {
+                const int value = (token * 29 + qkv * 17 + feature * 11) % 997;
+                input.channel(token).row(qkv)[feature] = (static_cast<float>(value) - 498.f) / 997.f;
+            }
+    return input;
+}
+
+void require_production_reference(const ncnn::Mat& input, const ncnn::Mat& output,
+                                  const ProductionRopeConfig& config)
+{
+    const std::vector<seedvr2::AwaWindow> windows = seedvr2::make_awa_windows(
+        config.source_t, config.source_h, config.source_w, config.windows_t, config.windows_h,
+        config.windows_w, config.shifted);
+    require(output.dims == 3 && output.w == config.rope_dim && output.h == 3 &&
+                output.c == production_sequence_tokens(config),
+            "production MMRoPE output layout");
+
+    int window_start = 0;
+    for (const seedvr2::AwaWindow& window : windows)
+    {
+        const int height = window.h1 - window.h0;
+        const int width = window.w1 - window.w0;
+        const int video_tokens = (window.t1 - window.t0) * height * width;
+        for (int local_token = 0; local_token < video_tokens + config.text_tokens; local_token++)
+        {
+            const int token = window_start + local_token;
+            int coordinates[3] = {0, 0, 0};
+            if (local_token < video_tokens)
+            {
+                coordinates[0] = config.text_tokens + local_token / (height * width);
+                coordinates[1] = (local_token / width) % height;
+                coordinates[2] = local_token % width;
+            }
+            else
+            {
+                const int text_token = local_token - video_tokens;
+                coordinates[0] = text_token;
+                coordinates[1] = text_token;
+                coordinates[2] = text_token;
+            }
+
+            for (int qkv = 0; qkv < 3; qkv++)
+                for (int feature = 0; feature < config.rope_dim; feature++)
+                {
+                    const float value = input.channel(token).row(qkv)[feature];
+                    float expected = value;
+                    if (qkv < 2)
+                    {
+                        const int axis_dim = config.rope_dim / 3;
+                        const int axis = feature / axis_dim;
+                        const int axis_feature = feature % axis_dim;
+                        const int pair = axis_feature / 2;
+                        const float frequency = std::pow(10000.f, -static_cast<float>(2 * pair) / axis_dim);
+                        const float angle = coordinates[axis] * frequency;
+                        const int paired_feature = feature % 2 == 0 ? feature + 1 : feature - 1;
+                        const float paired = input.channel(token).row(qkv)[paired_feature];
+                        expected = feature % 2 == 0 ? value * std::cos(angle) - paired * std::sin(angle)
+                                                    : value * std::cos(angle) + paired * std::sin(angle);
+                    }
+                    const float actual = output.channel(token).row(qkv)[feature];
+                    if (std::fabs(actual - expected) >= 3e-5f)
+                    {
+                        std::fprintf(stderr,
+                                     "production MMRoPE mismatch shifted=%d token=%d qkv=%d feature=%d expected=%f actual=%f\n",
+                                     config.shifted, token, qkv, feature, expected, actual);
+                        require(false, "production MMRoPE reference value");
+                    }
+                }
+        }
+        window_start += video_tokens + config.text_tokens;
+    }
 }
 
 float frequency_for(int token, int feature)
@@ -100,7 +219,7 @@ void require_matches_reference(const ncnn::Mat& input, const ncnn::Mat& output)
             }
 }
 
-int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
+int run_vulkan(const ncnn::Mat& input, const ncnn::ParamDict& params, ncnn::Mat& output)
 {
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device();
     if (!vkdev)
@@ -118,7 +237,7 @@ int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
     opt.staging_vkallocator = staging_allocator;
 
     SeedVR2MMRoPE rope;
-    if (rope.load_param(make_params()) != 0)
+    if (rope.load_param(params) != 0)
         return -1;
     rope.vkdev = vkdev;
     if (rope.create_pipeline(opt) != 0)
@@ -131,8 +250,8 @@ int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
 
     ncnn::VkMat input_gpu;
     {
-        ncnn::VkCompute upload(vkdev);
-        upload.record_upload(input, input_gpu, opt);
+        ncnn::VkTransfer upload(vkdev);
+        upload.record_upload(input, input_gpu, opt, false);
         if (upload.submit_and_wait() != 0)
             return -1;
     }
@@ -146,6 +265,28 @@ int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
     vkdev->reclaim_blob_allocator(blob_allocator);
     vkdev->reclaim_staging_allocator(staging_allocator);
     return submit_result;
+}
+
+int run_vulkan(const ncnn::Mat& input, ncnn::Mat& output)
+{
+    return run_vulkan(input, make_params(), output);
+}
+
+void verify_production_mmrope(bool shifted)
+{
+    const ProductionRopeConfig config = {1, 45, 80, 4, 3, 3, 58, 126, shifted};
+    const ncnn::Mat input = make_production_input(production_sequence_tokens(config), config);
+    SeedVR2MMRoPE rope;
+    require(rope.load_param(make_params(config)) == 0, "production MMRoPE parameters load");
+    ncnn::Option option;
+    std::vector<ncnn::Mat> cpu_outputs;
+    require(rope.forward({input}, cpu_outputs, option) == 0 && cpu_outputs.size() == 1,
+            "production MMRoPE CPU forward");
+    require_production_reference(input, cpu_outputs[0], config);
+
+    ncnn::Mat vulkan_output;
+    require(run_vulkan(input, make_params(config), vulkan_output) == 0, "production MMRoPE Vulkan forward");
+    require_production_reference(input, vulkan_output, config);
 }
 
 int run_vulkan_via_net(const ncnn::Mat& input, ncnn::Mat& output)
@@ -242,6 +383,9 @@ int main()
                 require(std::fabs(outputs[0].channel(token).row(qkv)[feature] -
                                       vulkan_output.channel(token).row(qkv)[feature]) < 2e-5f,
                         "MMRoPE CPU/Vulkan parity");
+
+    verify_production_mmrope(false);
+    verify_production_mmrope(true);
 
     std::puts("seedvr2-mmrope-vulkan: ok");
     return 0;

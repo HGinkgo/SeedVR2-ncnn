@@ -1,4 +1,4 @@
-"""Export fixed-shape SeedVR2 VAE encode/decode graphs for PNNX inspection."""
+"""Export shape-parameterized SeedVR2 VAE encode/decode graphs for PNNX."""
 
 from __future__ import annotations
 
@@ -26,6 +26,47 @@ def rewrite_ncnn_param(param_path: Path) -> None:
 
     def fields(line: str) -> list[str]:
         return line.split()
+
+    def param_value(layer: list[str], key: int, default: str) -> str:
+        prefix = f"{key}="
+        for token in layer[6:]:
+            if token.startswith(prefix):
+                return token[len(prefix):]
+        return default
+
+    def set_param_value(layer: list[str], key: int, value: str) -> None:
+        prefix = f"{key}="
+        for index, token in enumerate(layer[6:], start=6):
+            if token.startswith(prefix):
+                layer[index] = f"{prefix}{value}"
+                return
+        layer.append(f"{prefix}{value}")
+
+    def has_zero_convolution_padding(layer: list[str]) -> bool:
+        try:
+            left = int(param_value(layer, 4, "0"))
+            right = int(param_value(layer, 15, str(left)))
+            top = int(param_value(layer, 14, str(left)))
+            bottom = int(param_value(layer, 16, str(top)))
+            front = int(param_value(layer, 24, str(left)))
+            behind = int(param_value(layer, 17, str(front)))
+        except ValueError:
+            return False
+        return left == right == top == bottom == front == behind == 0
+
+    def is_fusable_zero_padding(layer: list[str]) -> bool:
+        if len(layer) < 6 or layer[0] != "Padding" or layer[2:4] != ["1", "1"]:
+            return False
+        try:
+            return (
+                int(param_value(layer, 4, "0")) == 0
+                and float(param_value(layer, 5, "0")) == 0.0
+                and int(param_value(layer, 6, "0")) == 0
+                and int(param_value(layer, 7, "0")) == 0
+                and int(param_value(layer, 8, "0")) == 0
+            )
+        except ValueError:
+            return False
 
     rewritten: list[str] = []
     replacements = 0
@@ -84,6 +125,13 @@ def rewrite_ncnn_param(param_path: Path) -> None:
             and concat[5] == split[5]
             and concat[-1] == "0=1"
         )
+        is_standalone_causal_tile = (
+            len(split) == 7
+            and split[:4] == ["Split", split[1], "1", "2"]
+            and len(tile) == 6
+            and tile[:4] == ["torch.tile", tile[1], "1", "1"]
+            and tile[4] == split[6]
+        )
         if is_depth_to_space:
             _, _, _, _, x, y, z = depth_shape
             rewritten.append(
@@ -101,20 +149,85 @@ def rewrite_ncnn_param(param_path: Path) -> None:
             replacements += 1
             index += 3
             continue
+        if is_standalone_causal_tile:
+            # The first Split output is still consumed by the following branch.
+            # Keep the Split and replace only its tile branch.
+            rewritten.append(lines[index])
+            rewritten.append(
+                f"SeedVR2TemporalPad temporal_pad_{replacements} 1 1 {tile[4]} {tile[5]} 0=2"
+            )
+            replacements += 1
+            index += 2
+            continue
         rewritten.append(lines[index])
         index += 1
 
+    fused: list[str] = []
+    index = 0
+    while index < len(rewritten):
+        temporal_pad = fields(rewritten[index])
+        next_layer = fields(rewritten[index + 1]) if index + 1 < len(rewritten) else []
+        convolution = next_layer
+        is_fusable_causal_convolution = (
+            len(temporal_pad) == 7
+            and temporal_pad[:4] == ["SeedVR2TemporalPad", temporal_pad[1], "1", "1"]
+            and len(convolution) >= 7
+            and convolution[0] == "Convolution3D"
+            and convolution[2:4] == ["1", "1"]
+            and convolution[4] == temporal_pad[5]
+        )
+        if is_fusable_causal_convolution:
+            convolution[0] = "SeedVR2CausalConv3D"
+            convolution[4] = temporal_pad[4]
+            convolution.append(f"31={temporal_pad[6].split('=', 1)[1]}")
+            fused.append(" ".join(convolution))
+            index += 2
+            continue
+
+        padding = next_layer
+        convolution = fields(rewritten[index + 2]) if index + 2 < len(rewritten) else []
+        is_fusable_padding_causal_convolution = (
+            len(temporal_pad) == 7
+            and temporal_pad[:4] == ["SeedVR2TemporalPad", temporal_pad[1], "1", "1"]
+            and is_fusable_zero_padding(padding)
+            and padding[4] == temporal_pad[5]
+            and len(convolution) >= 7
+            and convolution[0] == "Convolution3D"
+            and convolution[2:4] == ["1", "1"]
+            and convolution[4] == padding[5]
+            and has_zero_convolution_padding(convolution)
+        )
+        if is_fusable_padding_causal_convolution:
+            convolution[0] = "SeedVR2CausalConv3D"
+            convolution[4] = temporal_pad[4]
+            set_param_value(convolution, 4, param_value(padding, 2, "0"))
+            set_param_value(convolution, 15, param_value(padding, 3, "0"))
+            set_param_value(convolution, 14, param_value(padding, 0, "0"))
+            set_param_value(convolution, 16, param_value(padding, 1, "0"))
+            convolution.append(f"31={temporal_pad[6].split('=', 1)[1]}")
+            fused.append(" ".join(convolution))
+            index += 3
+            continue
+
+        fused.append(rewritten[index])
+        index += 1
+
     if replacements == 0:
-        if any(line.startswith(("SeedVR2TemporalPad ", "SeedVR2DepthToSpace ")) for line in lines[2:]):
+        has_custom_layer = any(
+            line.startswith(("SeedVR2TemporalPad ", "SeedVR2DepthToSpace ", "SeedVR2CausalConv3D "))
+            for line in lines[2:]
+        )
+        if not has_custom_layer:
+            raise ValueError(f"cannot locate causal temporal tile boundary in {param_path}")
+        if fused == lines[2:]:
             return
-        raise ValueError(f"cannot locate causal temporal tile boundary in {param_path}")
     header = lines[1].split()
     if len(header) != 2:
         raise ValueError(f"invalid ncnn layer/blob count in {param_path}")
-    layer_count = len(rewritten)
-    rewritten.insert(0, lines[0])
-    rewritten.insert(1, f"{layer_count} {header[1]}")
-    param_path.write_text("\n".join(rewritten) + "\n")
+    layer_count = len(fused)
+    fused.insert(0, lines[0])
+    fused.insert(1, f"{layer_count} {header[1]}")
+    param_path.write_text("\n".join(fused) + "\n")
 
 
 class VaeEncodeWrapper(nn.Module):
@@ -147,6 +260,18 @@ def _shape(value: str) -> tuple[int, int, int, int, int]:
     return parts
 
 
+def _pnnx_command(pnnx: Path, model_path: Path, input_shape: tuple[int, ...]) -> list[str]:
+    shape = ",".join(str(value) for value in input_shape)
+    return [str(pnnx.resolve()), str(model_path.resolve()), f"inputshape=[{shape}]"]
+
+
+def disable_memory_slicing_for_trace(vae: nn.Module) -> None:
+    """Trace the direct causal-convolution path PNNX can map to ncnn."""
+
+    if hasattr(vae, "set_memory_limit"):
+        vae.set_memory_limit(conv_max_mem=None, norm_max_mem=None)
+
+
 def _load_vae(upstream_root: Path, checkpoint: Path, device: torch.device):
     sys.path.insert(0, str(upstream_root))
     previous_cwd = Path.cwd()
@@ -172,6 +297,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--input-shape", type=_shape, default=(1, 3, 1, 128, 128), metavar="B,C,T,H,W")
+    parser.add_argument(
+        "--alternate-input-shape",
+        type=_shape,
+        default=(1, 3, 1, 720, 1280),
+        metavar="B,C,T,H,W",
+    )
     parser.add_argument("--upstream-root", type=Path, default=Path(os.environ.get("SEEDVR2_UPSTREAM_ROOT", "")))
     parser.add_argument("--checkpoint", type=Path, default=Path(os.environ.get("SEEDVR2_CKPT_DIR", "ckpts")) / "ema_vae.pth")
     parser.add_argument("--pnnx", type=Path)
@@ -198,13 +329,17 @@ def main() -> None:
     vae = vae.float()
     dtype = torch.float32
     sample = torch.zeros(args.input_shape, device="cuda", dtype=dtype)
+    alternate_sample = torch.zeros(args.alternate_input_shape, device="cuda", dtype=dtype)
     scale = float(config.vae.scaling_factor)
     encode = VaeEncodeWrapper(vae, scale).eval()
     decode = VaeDecodeWrapper(vae, scale).eval()
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
         latent = encode(sample)
+        alternate_latent = encode(alternate_sample)
         reconstruction = decode(latent)
+        alternate_reconstruction = decode(alternate_latent)
+        disable_memory_slicing_for_trace(vae)
         encode_trace = torch.jit.trace(encode, sample, check_trace=False)
         decode_trace = torch.jit.trace(decode, latent, check_trace=False)
 
@@ -215,13 +350,17 @@ def main() -> None:
     decode_trace.save(str(decode_path))
     print(f"encode_input={tuple(sample.shape)} encode_output={tuple(latent.shape)}")
     print(f"decode_input={tuple(latent.shape)} decode_output={tuple(reconstruction.shape)}")
+    print(f"alternate_encode_input={tuple(alternate_sample.shape)} alternate_encode_output={tuple(alternate_latent.shape)}")
+    print(
+        f"alternate_decode_input={tuple(alternate_latent.shape)} "
+        f"alternate_decode_output={tuple(alternate_reconstruction.shape)}"
+    )
     print(f"saved={encode_path} {decode_path}")
 
     if args.pnnx is not None:
         for model_path, input_tensor in ((encode_path, sample), (decode_path, latent)):
-            shape = ",".join(str(value) for value in input_tensor.shape)
             subprocess.run(
-                [str(args.pnnx), str(model_path), f"inputshape=[{shape}]"],
+                _pnnx_command(args.pnnx, model_path, tuple(input_tensor.shape)),
                 cwd=args.output_dir.resolve(),
                 check=True,
             )

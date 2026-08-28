@@ -1,4 +1,5 @@
 #include "temporal_pad.h"
+#include "causal_conv3d.h"
 #include "depth_to_space.h"
 
 #include <cstring>
@@ -113,5 +114,6 @@ DEFINE_LAYER_CREATOR(SeedVR2TemporalPad)
 void register_seedvr2_vae_layers(ncnn::Net& net)
 {
     net.register_custom_layer("SeedVR2TemporalPad", SeedVR2TemporalPad_layer_creator);
+    net.register_custom_layer("SeedVR2CausalConv3D", SeedVR2CausalConv3D_layer_creator);
     net.register_custom_layer("SeedVR2DepthToSpace", SeedVR2DepthToSpace_layer_creator);
 }

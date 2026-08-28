@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "net.h"
@@ -188,6 +189,25 @@ int create_awa_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data
 
 } // namespace
 
+namespace seedvr2
+{
+
+std::vector<AwaWindow> make_awa_windows(int source_t, int source_h, int source_w,
+                                        int windows_t, int windows_h, int windows_w, bool shifted)
+{
+    if (source_t <= 0 || source_h <= 0 || source_w <= 0 || windows_t <= 0 || windows_h <= 0 || windows_w <= 0)
+        return {};
+    const std::vector<Window> windows = make_windows(source_t, source_h, source_w, windows_t, windows_h,
+                                                     windows_w, shifted);
+    std::vector<AwaWindow> result;
+    result.reserve(windows.size());
+    for (const Window& window : windows)
+        result.push_back({window.t0, window.t1, window.h0, window.h1, window.w0, window.w1});
+    return result;
+}
+
+} // namespace seedvr2
+
 SeedVR2AWAPack::SeedVR2AWAPack()
 {
     one_blob_only = false;
@@ -307,7 +327,10 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
                             const ncnn::Option& opt) const
 {
     if (bottom_blobs.size() != 2 || sequence_index_.empty() || pipeline_ == 0 || mapping_gpu_.empty())
+    {
+        std::fprintf(stderr, "SeedVR2AWAPack: uninitialized Vulkan state\n");
         return -1;
+    }
     const ncnn::VkMat& video = bottom_blobs[0];
     const ncnn::VkMat& text = bottom_blobs[1];
     QkvLayout video_layout;
@@ -316,6 +339,9 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         !describe_qkv_layout(text, text_tokens_, text_layout) ||
         video_layout.heads != text_layout.heads || video_layout.head_dim != text_layout.head_dim)
     {
+        std::fprintf(stderr, "SeedVR2AWAPack: invalid input video=%d:%dx%dx%dx%d pack=%d text=%d:%dx%dx%dx%d pack=%d\n",
+                     video.dims, video.w, video.h, video.d, video.c, video.elempack, text.dims, text.w, text.h,
+                     text.d, text.c, text.elempack);
         return -1;
     }
 
@@ -493,11 +519,19 @@ int SeedVR2AWAUnpack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
                               const ncnn::Option& opt) const
 {
     if (bottom_blobs.size() != 1 || window_count_ <= 0 || pipeline_video_ == 0 || pipeline_text_ == 0 || mapping_gpu_.empty())
+    {
+        std::fprintf(stderr, "SeedVR2AWAUnpack: uninitialized Vulkan state\n");
         return -1;
+    }
     const ncnn::VkMat& packed = bottom_blobs[0];
     if ((packed.elemsize != 2u && packed.elemsize != 4u) || packed.elempack != 1 || packed.dims != 3 ||
         packed.w <= 0 || packed.h <= 0 || packed.c != sequence_tokens_)
+    {
+        std::fprintf(stderr, "SeedVR2AWAUnpack: invalid packed input=%d:%dx%dx%dx%d pack=%d elem=%zu expected=%d\n",
+                     packed.dims, packed.w, packed.h, packed.d, packed.c, packed.elempack, packed.elemsize,
+                     sequence_tokens_);
         return -1;
+    }
 
     const int heads = packed.h;
     if (heads <= 0)
@@ -687,12 +721,16 @@ int SeedVR2MMRoPE::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
 {
     if (bottom_blobs.size() != 1 || pipeline_ == 0 || rotations_gpu_.empty())
     {
+        std::fprintf(stderr, "SeedVR2MMRoPE: uninitialized Vulkan state\n");
         return -1;
     }
     const ncnn::VkMat& input = bottom_blobs[0];
     if ((input.elemsize != 2u && input.elemsize != 4u) || input.elempack != 1 || input.dims != 3 ||
         input.w < rope_dim_ || input.h <= 0 || input.h % 3 != 0 || input.c != sequence_tokens_)
     {
+        std::fprintf(stderr, "SeedVR2MMRoPE: invalid input=%d:%dx%dx%dx%d pack=%d elem=%zu expected=%d\n",
+                     input.dims, input.w, input.h, input.d, input.c, input.elempack, input.elemsize,
+                     sequence_tokens_);
         return -1;
     }
     top_blobs.resize(1);
@@ -730,7 +768,6 @@ int SeedVR2WindowAttention::load_param(const ncnn::ParamDict& pd)
 {
     if (!load_common(pd, source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, text_tokens_, shifted_))
         return -1;
-
     window_offsets_.clear();
     window_offsets_.push_back(0);
     for (const Window& window : make_windows(source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, shifted_))
@@ -836,12 +873,16 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::VkMat>& bottom_blobs
     if (bottom_blobs.size() != 1 || window_offsets_.size() < 2 || score_pipeline_ == 0 ||
         softmax_pipeline_ == 0 || value_pipeline_ == 0)
     {
+        std::fprintf(stderr, "SeedVR2WindowAttention: uninitialized Vulkan state\n");
         return -1;
     }
     const ncnn::VkMat& input = bottom_blobs[0];
     if ((input.elemsize != 2u && input.elemsize != 4u) || input.elempack != 1 || input.dims != 3 ||
         input.w <= 0 || input.h <= 0 || input.h % 3 != 0 || input.c != sequence_tokens_)
     {
+        std::fprintf(stderr, "SeedVR2WindowAttention: invalid input=%d:%dx%dx%dx%d pack=%d elem=%zu expected=%d\n",
+                     input.dims, input.w, input.h, input.d, input.c, input.elempack, input.elemsize,
+                     sequence_tokens_);
         return -1;
     }
 

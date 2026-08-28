@@ -1,4 +1,4 @@
-"""Fixed-shape SeedVR2 DiT stack reference used by the ncnn exporter."""
+"""Shape-parameterized SeedVR2 DiT stack reference used by the ncnn exporter."""
 
 from __future__ import annotations
 
@@ -30,6 +30,9 @@ class DitStackContract:
         if int(self.text_tokens) not in self.supported_text_tokens:
             supported = " or ".join(str(value) for value in self.supported_text_tokens)
             raise ValueError(f"text_tokens must be {supported}, got {self.text_tokens}")
+        for name, value in (("source_shape", self.source_shape), ("window_shape", self.window_shape)):
+            if len(value) != 3 or any(int(item) <= 0 for item in value):
+                raise ValueError(f"{name} dimensions must be positive triples")
 
     @property
     def video_tokens(self) -> int:
@@ -79,10 +82,20 @@ class DitStackContract:
 DIT_STACK_CONTRACT = DitStackContract()
 
 
-def make_dit_stack_contract(text_tokens: int) -> DitStackContract:
-    """Return one of the two frozen official text-token graph contracts."""
+def make_dit_stack_contract(
+    text_tokens: int,
+    *,
+    source_shape: tuple[int, int, int] = DIT_STACK_CONTRACT.source_shape,
+    window_shape: tuple[int, int, int] = DIT_STACK_CONTRACT.window_shape,
+) -> DitStackContract:
+    """Return a contract for one text length and runtime video source grid."""
 
-    return replace(DIT_STACK_CONTRACT, text_tokens=int(text_tokens))
+    return replace(
+        DIT_STACK_CONTRACT,
+        text_tokens=int(text_tokens),
+        source_shape=tuple(int(item) for item in source_shape),
+        window_shape=tuple(int(item) for item in window_shape),
+    )
 
 
 def load_dit_state(checkpoint: Path) -> dict[str, torch.Tensor]:

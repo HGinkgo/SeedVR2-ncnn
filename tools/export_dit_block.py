@@ -1,4 +1,4 @@
-"""Export and rewrite the fixed-shape SeedVR2 DiT block probe."""
+"""Export and rewrite a shape-parameterized SeedVR2 DiT block probe."""
 
 from __future__ import annotations
 
@@ -20,10 +20,11 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from tools.reference.dit_block import DIT_BLOCK_CONTRACT, load_fixed_dit_block
+from tools.reference.seedvr2_baseline import make_windows
 
 
 def _shape(value: str) -> tuple[int, int, int]:
-    """Parse the only source shape currently supported by this probe."""
+    """Parse a positive ``T,H,W`` source grid."""
 
     try:
         parts = tuple(int(part) for part in value.split(","))
@@ -31,11 +32,6 @@ def _shape(value: str) -> tuple[int, int, int]:
         raise ValueError("expected three positive comma-separated integers") from exc
     if len(parts) != 3 or any(part <= 0 for part in parts):
         raise ValueError("expected three positive comma-separated integers")
-    if parts != DIT_BLOCK_CONTRACT.source_shape:
-        raise ValueError(
-            "only the supported fixed shape "
-            f"{','.join(str(item) for item in DIT_BLOCK_CONTRACT.source_shape)} is available"
-        )
     return parts
 
 
@@ -87,10 +83,33 @@ def rewrite_ncnn_param(
             tops=tuple(fields[begin + bottom_count : end]),
         )
 
-    def fix_text_batch_axis(line: str) -> str:
+    def fix_text_batch_axis(line: str, text_blob: str | None = None) -> str:
         fields = line.split()
         if len(fields) < 4 or fields[0] != "Reshape":
             return line
+        bottom_count = int(fields[2])
+        top_count = int(fields[3])
+        parameter_start = 4 + bottom_count + top_count
+        if (
+            text_blob is not None
+            and bottom_count == 1
+            and fields[4] == text_blob
+            and f"0={DIT_BLOCK_CONTRACT.txt_dim}" in fields[parameter_start:]
+        ):
+            replacements = {
+                "1": str(int(text_tokens)),
+                "12": "233",
+                "13": "0",
+            }
+            for parameter, value in replacements.items():
+                prefix = f"{parameter}="
+                for index in range(parameter_start, len(fields)):
+                    if fields[index].startswith(prefix):
+                        fields[index] = f"{parameter}={value}"
+                        break
+                else:
+                    fields.append(f"{parameter}={value}")
+            return " ".join(fields)
         if (
             f"0={DIT_BLOCK_CONTRACT.txt_dim}" in fields
             and f"1={int(text_tokens)}" in fields
@@ -105,9 +124,10 @@ def rewrite_ncnn_param(
     def fix_existing_video_batch_reshape(current_lines: list[str]) -> list[str]:
         current_layers = [parse_layer(line) for line in current_lines[2:]]
         unpack = next((layer for layer in current_layers if layer.layer_type == "SeedVR2AWAUnpack"), None)
-        if unpack is None or not unpack.tops:
+        if unpack is None or len(unpack.tops) != 2:
             return current_lines
         video_blob = unpack.tops[0]
+        text_blob = unpack.tops[1]
         custom_fields = unpack.line.split()
         custom_params = {
             int(field.split("=", 1)[0]): int(field.split("=", 1)[1])
@@ -123,35 +143,38 @@ def rewrite_ncnn_param(
                     fields[index] = f"1={video_tokens}"
             updated = list(current_lines)
             updated[existing_index + 2] = " ".join(fields)
-            return updated
-        consumer_index = next(
-            (index for index, layer in enumerate(current_layers)
-             if layer.layer_type == "InnerProduct" and video_blob in layer.bottoms),
-            None,
-        )
-        if consumer_index is None:
-            return current_lines
-        input_line = (
-            f"Reshape reshape_awa_video_batch 1 1 {video_blob} awa_video_batch "
-            f"0={DIT_BLOCK_CONTRACT.vid_dim} 1={video_tokens} 12=233 13=0"
-        )
-        rewritten = [current_lines[0], "0 0"]
-        for index, layer in enumerate(current_layers):
-            if index == consumer_index:
-                rewritten.append(input_line)
-            fields = layer.line.split()
-            if index == consumer_index:
-                begin = 4
-                for bottom_index in range(int(fields[2])):
-                    if fields[begin + bottom_index] == video_blob:
-                        fields[begin + bottom_index] = "awa_video_batch"
-                rewritten.append(" ".join(fields))
-            else:
-                rewritten.append(layer.line)
-        rewritten_nodes = [parse_layer(line) for line in rewritten[2:]]
-        blob_count = len({top for layer in rewritten_nodes for top in layer.tops})
-        rewritten[1] = f"{len(rewritten_nodes)} {blob_count}"
-        return rewritten
+        else:
+            consumer_index = next(
+                (index for index, layer in enumerate(current_layers)
+                 if layer.layer_type == "InnerProduct" and video_blob in layer.bottoms),
+                None,
+            )
+            if consumer_index is None:
+                return current_lines
+            input_line = (
+                f"Reshape reshape_awa_video_batch 1 1 {video_blob} awa_video_batch "
+                f"0={DIT_BLOCK_CONTRACT.vid_dim} 1={video_tokens} 12=233 13=0"
+            )
+            updated = [current_lines[0], "0 0"]
+            for index, layer in enumerate(current_layers):
+                if index == consumer_index:
+                    updated.append(input_line)
+                fields = layer.line.split()
+                if index == consumer_index:
+                    begin = 4
+                    for bottom_index in range(int(fields[2])):
+                        if fields[begin + bottom_index] == video_blob:
+                            fields[begin + bottom_index] = "awa_video_batch"
+                    updated.append(" ".join(fields))
+                else:
+                    updated.append(layer.line)
+            updated_nodes = [parse_layer(line) for line in updated[2:]]
+            blob_count = len({top for layer in updated_nodes for top in layer.tops})
+            updated[1] = f"{len(updated_nodes)} {blob_count}"
+        return [
+            line if index < 2 else fix_text_batch_axis(line, text_blob)
+            for index, line in enumerate(updated)
+        ]
     custom_layer_types = {
         "SeedVR2AWAPack",
         "SeedVR2AWAUnpack",
@@ -325,6 +348,13 @@ def rewrite_ncnn_param(
 
     source_t, source_h, source_w = (int(item) for item in size)
     windows_t, windows_h, windows_w = (int(item) for item in windows)
+    expected_window_count = len(
+        make_windows(
+            (source_t, source_h, source_w),
+            (windows_t, windows_h, windows_w),
+            shifted=shifted,
+        )
+    )
     pack_line = (
         f"SeedVR2AWAPack awa_pack 2 2 {concat.bottoms[0]} {concat.bottoms[1]} "
         f"{pack.tops[0]} awa_cu_seqlens "
@@ -369,26 +399,30 @@ def rewrite_ncnn_param(
         ]
         if attention_end_index is not None and layers[attention_end_index].layer_type == "Concat":
             attention_layer = layers[attention_end_index]
-            if len(attention_layer.bottoms) == 9:
-                if len(attention_start_candidates) != 1:
-                    raise ValueError(
-                        "expected one DiT static window-attention Split, "
-                        f"found {len(attention_start_candidates)}"
-                    )
-                attention_start_index = attention_start_candidates[0]
-                if attention_start_index >= attention_end_index:
-                    raise ValueError("DiT static window-attention boundaries are out of order")
-                attention_line = (
-                    f"SeedVR2WindowAttention awa_attention 1 1 {rope_output} {attended_blob} "
-                    f"0={source_t} 1={source_h} 2={source_w} "
-                    f"3={windows_t} 4={windows_h} 5={windows_w} "
-                    f"6={int(text_tokens)} 7={1 if shifted else 0}"
+            if len(attention_layer.bottoms) != expected_window_count:
+                raise ValueError(
+                    "unexpected DiT static window-attention count: "
+                    f"expected {expected_window_count}, found {len(attention_layer.bottoms)}"
                 )
-                attention_removed = {
-                    index
-                    for index in range(attention_start_index, attention_end_index + 1)
-                    if layers[index].layer_type != "MemoryData"
-                }
+            if len(attention_start_candidates) != 1:
+                raise ValueError(
+                    "expected one DiT static window-attention Split, "
+                    f"found {len(attention_start_candidates)}"
+                )
+            attention_start_index = attention_start_candidates[0]
+            if attention_start_index >= attention_end_index:
+                raise ValueError("DiT static window-attention boundaries are out of order")
+            attention_line = (
+                f"SeedVR2WindowAttention awa_attention 1 1 {rope_output} {attended_blob} "
+                f"0={source_t} 1={source_h} 2={source_w} "
+                f"3={windows_t} 4={windows_h} 5={windows_w} "
+                f"6={int(text_tokens)} 7={1 if shifted else 0}"
+            )
+            attention_removed = {
+                index
+                for index in range(attention_start_index, attention_end_index + 1)
+                if layers[index].layer_type != "MemoryData"
+            }
         elif tuple(size) != DIT_BLOCK_CONTRACT.source_shape:
             # On small fixed grids PNNX keeps the dense attention as a direct
             # MatMul chain. Its output is the Reshape immediately before the
@@ -461,7 +495,7 @@ def rewrite_ncnn_param(
                 f"0={int(DIT_BLOCK_CONTRACT.vid_dim)} 1={source_t * source_h * source_w} 12=233 13=0"
             )
         if index not in removed:
-            line = fix_text_batch_axis(layer.line)
+            line = fix_text_batch_axis(layer.line, text_path[0])
             if index == video_batch_consumer_index:
                 fields = line.split()
                 begin = 4
@@ -486,7 +520,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def export_torchscript(checkpoint: Path, output_dir: Path, *, seed: int) -> tuple[Path, Path]:
+def export_torchscript(
+    checkpoint: Path,
+    output_dir: Path,
+    *,
+    seed: int,
+    source_shape: Sequence[int] = DIT_BLOCK_CONTRACT.source_shape,
+) -> tuple[Path, Path]:
     """Export block 0 and deterministic FP32 golden tensors on the CPU."""
 
     checkpoint = Path(checkpoint)
@@ -496,8 +536,10 @@ def export_torchscript(checkpoint: Path, output_dir: Path, *, seed: int) -> tupl
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(int(seed))
-    block = load_fixed_dit_block(checkpoint).float().eval()
-    vid = torch.randn(DIT_BLOCK_CONTRACT.video_tokens, DIT_BLOCK_CONTRACT.vid_dim)
+    source_shape = tuple(int(item) for item in source_shape)
+    block = load_fixed_dit_block(checkpoint, source_shape=source_shape).float().eval()
+    video_tokens = int(source_shape[0]) * int(source_shape[1]) * int(source_shape[2])
+    vid = torch.randn(video_tokens, DIT_BLOCK_CONTRACT.vid_dim)
     txt = torch.randn(DIT_BLOCK_CONTRACT.text_tokens, DIT_BLOCK_CONTRACT.txt_dim)
     emb = torch.randn(1, DIT_BLOCK_CONTRACT.emb_dim)
     with torch.inference_mode():
@@ -526,6 +568,8 @@ def export_torchscript(checkpoint: Path, output_dir: Path, *, seed: int) -> tupl
                 "checkpoint_sha256": _sha256(checkpoint),
                 "seed": int(seed),
                 "dtype": "float32",
+                "source_shape": list(source_shape),
+                "video_tokens": video_tokens,
                 "inputs": {
                     "vid": list(vid.shape),
                     "txt": list(txt.shape),
@@ -548,8 +592,14 @@ def export_torchscript(checkpoint: Path, output_dir: Path, *, seed: int) -> tupl
     return model_path, manifest_path
 
 
-def run_pnnx(pnnx: Path, model_path: Path, output_dir: Path) -> None:
-    """Convert an exported block with one explicit fixed-shape invocation."""
+def run_pnnx(
+    pnnx: Path,
+    model_path: Path,
+    output_dir: Path,
+    *,
+    source_shape: Sequence[int] = DIT_BLOCK_CONTRACT.source_shape,
+) -> None:
+    """Convert an exported block with one explicit source-grid invocation."""
 
     pnnx = Path(pnnx)
     model_path = Path(model_path)
@@ -558,8 +608,10 @@ def run_pnnx(pnnx: Path, model_path: Path, output_dir: Path) -> None:
         raise FileNotFoundError(f"pnnx executable not found: {pnnx}")
     if not model_path.is_file():
         raise FileNotFoundError(f"TorchScript model not found: {model_path}")
+    source_shape = tuple(int(item) for item in source_shape)
+    video_tokens = int(source_shape[0]) * int(source_shape[1]) * int(source_shape[2])
     input_shape = (
-        f"[{DIT_BLOCK_CONTRACT.video_tokens},{DIT_BLOCK_CONTRACT.vid_dim}],"
+        f"[{video_tokens},{DIT_BLOCK_CONTRACT.vid_dim}],"
         f"[{DIT_BLOCK_CONTRACT.text_tokens},{DIT_BLOCK_CONTRACT.txt_dim}],"
         f"[1,{DIT_BLOCK_CONTRACT.emb_dim}]"
     )
@@ -592,14 +644,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    model_path, manifest_path = export_torchscript(args.checkpoint, args.output_dir, seed=args.seed)
+    model_path, manifest_path = export_torchscript(
+        args.checkpoint,
+        args.output_dir,
+        seed=args.seed,
+        source_shape=args.size,
+    )
     print(f"saved {model_path}")
     if args.pnnx is None:
         return
 
-    run_pnnx(args.pnnx, model_path, args.output_dir)
+    run_pnnx(args.pnnx, model_path, args.output_dir, source_shape=args.size)
     param_path = Path(args.output_dir).resolve() / "dit_block_0.ncnn.param"
-    rewrite_ncnn_param(param_path)
+    rewrite_ncnn_param(param_path, size=args.size)
     custom_layers = sum(
         line.startswith(
             (

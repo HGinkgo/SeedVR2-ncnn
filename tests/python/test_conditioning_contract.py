@@ -44,13 +44,25 @@ def test_cfg_matches_official_formula():
 
 
 def test_uniform_trailing_timesteps_match_seedvr2_defaults():
-    from tools.reference.conditioning import uniform_trailing_timesteps
+    from tools.reference.conditioning import SEEDVR2_CONDITIONING_CONTRACT, uniform_trailing_timesteps
 
     timesteps = uniform_trailing_timesteps()
 
-    assert timesteps.shape == (50,)
+    assert SEEDVR2_CONDITIONING_CONTRACT.cfg_scale == pytest.approx(1.0)
+    assert SEEDVR2_CONDITIONING_CONTRACT.sampling_steps == 1
+    assert timesteps.shape == (1,)
     assert timesteps[0].item() == pytest.approx(1000.0)
-    assert timesteps[-1].item() == pytest.approx(20.0)
+
+
+def test_single_step_v_lerp_endpoint_matches_official_sampler():
+    from tools.reference.conditioning import v_lerp_endpoint
+
+    sample = torch.tensor([[3.0, -2.0]])
+    prediction = torch.tensor([[0.5, 1.25]])
+
+    result = v_lerp_endpoint(sample, prediction, timestep=1000.0, schedule_t=1000.0)
+
+    assert torch.equal(result, sample - prediction)
 
 
 def test_timestep_transform_matches_official_128px_single_frame_case():

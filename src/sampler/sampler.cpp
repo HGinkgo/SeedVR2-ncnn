@@ -81,6 +81,23 @@ std::vector<float> uniform_trailing_timesteps(float schedule_t, int steps, float
     return timesteps;
 }
 
+bool euler_v_lerp_endpoint(const std::vector<float>& sample,
+                           const std::vector<float>& model_output,
+                           float timestep,
+                           float schedule_t,
+                           std::vector<float>& endpoint)
+{
+    if (sample.empty() || sample.size() != model_output.size() || !all_finite(sample) ||
+        !all_finite(model_output) || !std::isfinite(timestep) || !std::isfinite(schedule_t) ||
+        schedule_t <= 0.f || timestep != schedule_t)
+        return false;
+
+    endpoint.resize(sample.size());
+    for (size_t index = 0; index < sample.size(); index++)
+        endpoint[index] = sample[index] - model_output[index];
+    return all_finite(endpoint);
+}
+
 bool euler_v_lerp_step(const std::vector<float>& sample,
                        const std::vector<float>& model_output,
                        float timestep,

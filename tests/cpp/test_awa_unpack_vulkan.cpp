@@ -10,6 +10,19 @@
 namespace
 {
 
+struct AwaConfig
+{
+    int source_t;
+    int source_h;
+    int source_w;
+    int windows_t;
+    int windows_h;
+    int windows_w;
+    int text_tokens;
+    int shifted;
+    bool verify_token_batch_vulkan;
+};
+
 bool compare(const ncnn::Mat& lhs, const ncnn::Mat& rhs, float tolerance)
 {
     if (lhs.dims != rhs.dims || lhs.w != rhs.w || lhs.h != rhs.h || lhs.d != rhs.d || lhs.c != rhs.c || lhs.n != rhs.n)
@@ -40,21 +53,34 @@ bool compare(const ncnn::Mat& lhs, const ncnn::Mat& rhs, float tolerance)
     return true;
 }
 
-void make_inputs(ncnn::Mat& video, ncnn::Mat& text)
+ncnn::ParamDict make_params(const AwaConfig& config)
 {
-    constexpr int source_tokens = 2 * 19 * 23;
-    constexpr int text_tokens = 5;
+    ncnn::ParamDict params;
+    params.set(0, config.source_t);
+    params.set(1, config.source_h);
+    params.set(2, config.source_w);
+    params.set(3, config.windows_t);
+    params.set(4, config.windows_h);
+    params.set(5, config.windows_w);
+    params.set(6, config.text_tokens);
+    params.set(7, config.shifted);
+    return params;
+}
+
+void make_inputs(const AwaConfig& config, ncnn::Mat& video, ncnn::Mat& text)
+{
+    const int source_tokens = config.source_t * config.source_h * config.source_w;
     constexpr int heads = 2;
     constexpr int head_dim = 3;
     video.create(head_dim, heads, 3, source_tokens);
-    text.create(head_dim, heads, 3, text_tokens);
+    text.create(head_dim, heads, 3, config.text_tokens);
     for (int token = 0; token < source_tokens; token++)
     {
         float* data = static_cast<float*>(video.channel(token).data);
         for (int value = 0; value < 3 * heads * head_dim; value++)
             data[value] = static_cast<float>((token * 17 + value) % 101) / 100.f;
     }
-    for (int token = 0; token < text_tokens; token++)
+    for (int token = 0; token < config.text_tokens; token++)
     {
         float* data = static_cast<float*>(text.channel(token).data);
         for (int value = 0; value < 3 * heads * head_dim; value++)
@@ -79,7 +105,8 @@ bool make_token_batched_qkv(const ncnn::Mat& source, ncnn::Mat& destination)
     return true;
 }
 
-int run_vulkan(const ncnn::Mat& packed, const ncnn::Option& base_opt, ncnn::Mat& output_video, ncnn::Mat& output_text)
+int run_vulkan(const AwaConfig& config, const ncnn::Mat& packed, const ncnn::Option& base_opt,
+               ncnn::Mat& output_video, ncnn::Mat& output_text)
 {
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device();
     if (!vkdev)
@@ -97,15 +124,7 @@ int run_vulkan(const ncnn::Mat& packed, const ncnn::Option& base_opt, ncnn::Mat&
     opt.workspace_vkallocator = blob_allocator;
     opt.staging_vkallocator = staging_allocator;
 
-    ncnn::ParamDict params;
-    params.set(0, 2);
-    params.set(1, 19);
-    params.set(2, 23);
-    params.set(3, 4);
-    params.set(4, 3);
-    params.set(5, 3);
-    params.set(6, 5);
-    params.set(7, 1);
+    const ncnn::ParamDict params = make_params(config);
 
     SeedVR2AWAUnpack unpack;
     if (unpack.load_param(params) != 0)
@@ -122,8 +141,8 @@ int run_vulkan(const ncnn::Mat& packed, const ncnn::Option& base_opt, ncnn::Mat&
 
     ncnn::VkMat packed_gpu;
     {
-        ncnn::VkCompute upload(vkdev);
-        upload.record_upload(packed, packed_gpu, opt);
+        ncnn::VkTransfer upload(vkdev);
+        upload.record_upload(packed, packed_gpu, opt, false);
         if (upload.submit_and_wait() != 0)
             return -1;
     }
@@ -141,8 +160,8 @@ int run_vulkan(const ncnn::Mat& packed, const ncnn::Option& base_opt, ncnn::Mat&
     return ret;
 }
 
-int run_pack_vulkan(const ncnn::Mat& video, const ncnn::Mat& text, const ncnn::Option& base_opt,
-                    ncnn::Mat& output_packed, ncnn::Mat& output_cu)
+int run_pack_vulkan(const AwaConfig& config, const ncnn::Mat& video, const ncnn::Mat& text,
+                    const ncnn::Option& base_opt, ncnn::Mat& output_packed, ncnn::Mat& output_cu)
 {
     ncnn::VulkanDevice* vkdev = ncnn::get_gpu_device();
     if (!vkdev)
@@ -160,15 +179,7 @@ int run_pack_vulkan(const ncnn::Mat& video, const ncnn::Mat& text, const ncnn::O
     opt.workspace_vkallocator = blob_allocator;
     opt.staging_vkallocator = staging_allocator;
 
-    ncnn::ParamDict params;
-    params.set(0, 2);
-    params.set(1, 19);
-    params.set(2, 23);
-    params.set(3, 4);
-    params.set(4, 3);
-    params.set(5, 3);
-    params.set(6, 5);
-    params.set(7, 1);
+    const ncnn::ParamDict params = make_params(config);
 
     SeedVR2AWAPack pack;
     if (pack.load_param(params) != 0)
@@ -185,9 +196,9 @@ int run_pack_vulkan(const ncnn::Mat& video, const ncnn::Mat& text, const ncnn::O
     ncnn::VkMat video_gpu;
     ncnn::VkMat text_gpu;
     {
-        ncnn::VkCompute upload(vkdev);
-        upload.record_upload(video, video_gpu, opt);
-        upload.record_upload(text, text_gpu, opt);
+        ncnn::VkTransfer upload(vkdev);
+        upload.record_upload(video, video_gpu, opt, false);
+        upload.record_upload(text, text_gpu, opt, false);
         if (upload.submit_and_wait() != 0)
             return -1;
     }
@@ -205,31 +216,21 @@ int run_pack_vulkan(const ncnn::Mat& video, const ncnn::Mat& text, const ncnn::O
     return ret;
 }
 
-} // namespace
-
-int main()
+bool verify_config(const AwaConfig& config)
 {
     ncnn::Mat video;
     ncnn::Mat text;
-    make_inputs(video, text);
+    make_inputs(config, video, text);
 
-    ncnn::ParamDict params;
-    params.set(0, 2);
-    params.set(1, 19);
-    params.set(2, 23);
-    params.set(3, 4);
-    params.set(4, 3);
-    params.set(5, 3);
-    params.set(6, 5);
-    params.set(7, 1);
+    const ncnn::ParamDict params = make_params(config);
 
     SeedVR2AWAPack pack;
     if (pack.load_param(params) != 0)
-        return 1;
+        return false;
     ncnn::Option opt;
     std::vector<ncnn::Mat> pack_outputs;
     if (pack.forward({video, text}, pack_outputs, opt) != 0)
-        return 1;
+        return false;
 
     ncnn::Mat video_batched;
     ncnn::Mat text_batched;
@@ -240,7 +241,7 @@ int main()
         !compare(pack_outputs[1], batched_pack_outputs[1], 1e-6f))
     {
         std::fprintf(stderr, "Token-batch CPU Pack output differs from token-channel layout\n");
-        return 1;
+        return false;
     }
 
     const ncnn::Mat& packed_qkv = pack_outputs[0];
@@ -251,37 +252,51 @@ int main()
 
     SeedVR2AWAUnpack unpack_cpu;
     if (unpack_cpu.load_param(params) != 0)
-        return 1;
+        return false;
     std::vector<ncnn::Mat> cpu_outputs;
     if (unpack_cpu.forward({packed}, cpu_outputs, opt) != 0 || cpu_outputs.size() != 2)
-        return 1;
+        return false;
 
     ncnn::Mat gpu_video;
     ncnn::Mat gpu_text;
     ncnn::Mat gpu_packed;
     ncnn::Mat gpu_cu;
-    if (run_pack_vulkan(video, text, opt, gpu_packed, gpu_cu) != 0 ||
+    if (run_pack_vulkan(config, video, text, opt, gpu_packed, gpu_cu) != 0 ||
         !compare(pack_outputs[0], gpu_packed, 1e-3f) || !compare(pack_outputs[1], gpu_cu, 1e-3f))
     {
         std::fprintf(stderr, "CPU/Vulkan Pack outputs differ\n");
-        return 1;
+        return false;
     }
-    if (run_pack_vulkan(video_batched, text_batched, opt, gpu_packed, gpu_cu) != 0 ||
-        !compare(pack_outputs[0], gpu_packed, 1e-3f) || !compare(pack_outputs[1], gpu_cu, 1e-3f))
+    if (config.verify_token_batch_vulkan &&
+        (run_pack_vulkan(config, video_batched, text_batched, opt, gpu_packed, gpu_cu) != 0 ||
+         !compare(pack_outputs[0], gpu_packed, 1e-3f) || !compare(pack_outputs[1], gpu_cu, 1e-3f)))
     {
         std::fprintf(stderr, "Token-batch CPU/Vulkan Pack outputs differ\n");
-        return 1;
+        return false;
     }
-    if (run_vulkan(packed, opt, gpu_video, gpu_text) != 0)
+    if (run_vulkan(config, packed, opt, gpu_video, gpu_text) != 0)
     {
         std::fprintf(stderr, "Vulkan Unpack execution failed\n");
-        return 1;
+        return false;
     }
     if (!compare(cpu_outputs[0], gpu_video, 1e-3f) || !compare(cpu_outputs[1], gpu_text, 1e-3f))
     {
         std::fprintf(stderr, "CPU/Vulkan Unpack outputs differ\n");
-        return 1;
+        return false;
     }
+
+    return true;
+}
+
+} // namespace
+
+int main()
+{
+    const AwaConfig legacy = {2, 19, 23, 4, 3, 3, 5, 1, true};
+    const AwaConfig target_unshifted = {1, 45, 80, 4, 3, 3, 58, 0, false};
+    const AwaConfig target_shifted = {1, 45, 80, 4, 3, 3, 58, 1, false};
+    if (!verify_config(legacy) || !verify_config(target_unshifted) || !verify_config(target_shifted))
+        return 1;
 
     std::puts("seedvr2-awa-unpack-vulkan: ok");
     return 0;

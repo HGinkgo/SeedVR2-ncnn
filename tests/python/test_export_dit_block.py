@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -62,12 +63,35 @@ def test_export_script_can_run_directly_from_the_repository_root():
     assert result.returncode == 0, result.stderr
 
 
-def test_shape_parser_accepts_only_the_supported_probe_shape():
+def test_shape_parser_accepts_runtime_source_grids():
     assert exporter._shape("1,45,80") == (1, 45, 80)
-    with pytest.raises(ValueError, match="supported"):
-        exporter._shape("1,45,79")
+    assert exporter._shape("1,45,79") == (1, 45, 79)
     with pytest.raises(ValueError, match="positive"):
         exporter._shape("1,0,80")
+
+
+def test_dit_block_export_manifest_records_runtime_source_shape(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "checkpoint.pth"
+    checkpoint.touch()
+
+    class FakeBlock(torch.nn.Module):
+        def forward(self, vid, txt, emb):
+            return vid, txt
+
+    monkeypatch.setattr(exporter, "load_fixed_dit_block", lambda *args, **kwargs: FakeBlock())
+    monkeypatch.setattr(exporter, "_sha256", lambda path: "test-sha256")
+
+    _, manifest_path = exporter.export_torchscript(
+        checkpoint,
+        tmp_path / "export",
+        seed=3,
+        source_shape=(1, 2, 3),
+    )
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["source_shape"] == [1, 2, 3]
+    assert manifest["video_tokens"] == 6
+    assert manifest["inputs"]["vid"] == [6, 2560]
 
 
 def test_fixed_mmrope_matches_upstream_coordinate_formula():
@@ -263,6 +287,31 @@ def test_rewrite_existing_stack_param_updates_video_batch_token_count(tmp_path):
     assert any(line.startswith("Reshape reshape_text_batch") and "13=0" in line for line in lines)
 
 
+def test_rewrite_existing_stack_param_preserves_dynamic_text_batch(tmp_path):
+    param_path = tmp_path / "dit_block_0.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "7 8\n"
+        "Input vid 0 1 vid\n"
+        "SeedVR2AWAPack awa_pack 2 2 vid vid packed cu 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0\n"
+        "SeedVR2AWAUnpack awa_unpack 1 2 packed video_out text_out 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0\n"
+        "Reshape reshape_dynamic_text 1 1 text_out text_flat 0=2560\n"
+        "InnerProduct project_txt 1 1 text_flat txt_projected 0=2560\n"
+        "InnerProduct project_vid 1 1 video_out vid_projected 0=2560\n"
+    )
+
+    exporter.rewrite_ncnn_param(param_path, size=(1, 45, 80))
+
+    lines = param_path.read_text().splitlines()
+    assert any(
+        line.startswith("Reshape reshape_dynamic_text")
+        and " text_out text_flat " in line
+        and "0=2560 1=58 12=233 13=0" in line
+        for line in lines
+    )
+    assert any(line.startswith("InnerProduct project_txt") and " text_flat " in line for line in lines)
+
+
 def test_rewrite_dit_param_replaces_pnnx_mmrope_without_consuming_its_weights(tmp_path):
     param_path = tmp_path / "dit_block_0.ncnn.param"
     param_path.write_text(
@@ -347,6 +396,60 @@ def test_rewrite_dit_param_replaces_static_window_attention_after_mmrope(tmp_pat
         for line in lines
     )
     assert any(line.startswith("MemoryData rope_cos") for line in lines)
+    assert not any(line.startswith("Split attention_split") for line in lines)
+    assert not any(line.startswith("MatMul attention_") for line in lines)
+    assert not any(line.startswith("Concat cat_windows") for line in lines)
+
+
+def test_rewrite_dit_param_replaces_shifted_static_window_attention_after_mmrope(tmp_path):
+    param_path = tmp_path / "dit_block_01.ncnn.param"
+    branches = " ".join(f"head_{index}" for index in range(48))
+    attention = "".join(
+        f"MatMul attention_{index} 2 1 head_{index * 3} head_{index * 3 + 1} attended_{index} 0=1\n"
+        for index in range(16)
+    )
+    attended = " ".join(f"attended_{index}" for index in range(16))
+    param_path.write_text(
+        "7767517\n"
+        "56 73\n"
+        "Input vid 0 1 vid\n"
+        "Input txt 0 1 txt\n"
+        "Concat cat_pack 2 1 vid txt merged 0=0\n"
+        "MemoryData pack_indices 0 1 pack_indices 0=16\n"
+        "torch.index_select old_pack 2 1 merged pack_indices packed 0=0\n"
+        "Slice rope_unbind 1 3 packed rope_q rope_k rope_v -23300=3,-233,-233,-233 1=0\n"
+        "MemoryData rope_cos 0 1 rope_cos 0=6 1=1 2=16\n"
+        "Split rope_cos_split 1 2 rope_cos rope_cos0 rope_cos1\n"
+        "BinaryOp rope_mul 2 1 rope_q rope_cos0 rope_q_rotated 0=2\n"
+        "Concat rope_stack 3 1 rope_q_rotated rope_k rope_v rope_qkv 0=0\n"
+        "Reshape rope_end 1 1 rope_qkv qkv_rotated 0=8 1=1 2=3\n"
+        f"Split attention_split 1 48 qkv_rotated {branches}\n"
+        + attention
+        + f"Concat cat_windows 16 1 {attended} attended 0=0\n"
+        "MemoryData video_indices 0 1 video_indices 0=16\n"
+        "torch.index_select old_video 2 1 attended video_indices video_selected 0=0\n"
+        "Reshape reshape_video 1 1 video_selected out0 0=8 1=1 2=16\n"
+        "MemoryData text_indices 0 1 text_indices 0=2\n"
+        "torch.index_select old_text 2 1 attended text_indices text_selected 0=0\n"
+        "Reshape reshape_text 1 1 text_selected text_repeated 0=8 1=1 2=2\n"
+        "Reduction reduce_text 1 1 text_repeated out1 0=3 1=0 -23303=1,0 4=0 5=1\n"
+    )
+
+    exporter.rewrite_ncnn_param(
+        param_path,
+        size=(1, 45, 80),
+        windows=(4, 3, 3),
+        text_tokens=58,
+        shifted=True,
+    )
+
+    lines = param_path.read_text().splitlines()
+    assert any(
+        line.startswith("SeedVR2WindowAttention awa_attention")
+        and " qkv_rotated attended " in line
+        and "7=1" in line
+        for line in lines
+    )
     assert not any(line.startswith("Split attention_split") for line in lines)
     assert not any(line.startswith("MatMul attention_") for line in lines)
     assert not any(line.startswith("Concat cat_windows") for line in lines)

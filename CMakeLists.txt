@@ -28,8 +28,10 @@ add_subdirectory(third_party/ncnn)
 add_executable(seedvr2-ncnn
     src/main.cpp
     src/awa/awa_layers.cpp
+    src/resolution/resolution_plan.cpp
     src/sampler/sampler.cpp
     src/vae/temporal_pad.cpp
+    src/vae/causal_conv3d.cpp
     src/vae/depth_to_space.cpp)
 target_link_libraries(seedvr2-ncnn PRIVATE ncnn)
 target_include_directories(seedvr2-ncnn PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -118,6 +120,12 @@ if(SEEDVR2_BUILD_TESTS)
     target_include_directories(seedvr2-sampler-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME seedvr2-sampler-test COMMAND seedvr2-sampler-test)
 
+    add_executable(seedvr2-resolution-test
+        tests/cpp/test_resolution_plan.cpp
+        src/resolution/resolution_plan.cpp)
+    target_include_directories(seedvr2-resolution-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME seedvr2-resolution-test COMMAND seedvr2-resolution-test)
+
     add_executable(seedvr2-awa-benchmark-test
         tests/cpp/test_awa_benchmark.cpp
         src/awa/awa_benchmark.cpp)
@@ -135,9 +143,21 @@ if(SEEDVR2_BUILD_TESTS)
     endif()
     add_test(NAME seedvr2-awa-test COMMAND seedvr2-awa-test)
 
+    add_executable(seedvr2-awa-dynamic-test
+        tests/cpp/test_awa_dynamic_metadata.cpp
+        src/awa/awa_layers.cpp)
+    target_link_libraries(seedvr2-awa-dynamic-test PRIVATE ncnn)
+    target_include_directories(seedvr2-awa-dynamic-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    if(SEEDVR2_ENABLE_VULKAN)
+        target_sources(seedvr2-awa-dynamic-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+        target_include_directories(seedvr2-awa-dynamic-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+    endif()
+    add_test(NAME seedvr2-awa-dynamic-test COMMAND seedvr2-awa-dynamic-test)
+
     add_executable(seedvr2-temporal-pad-test
         tests/cpp/test_temporal_pad.cpp
         src/vae/temporal_pad.cpp
+        src/vae/causal_conv3d.cpp
         src/vae/depth_to_space.cpp)
     target_link_libraries(seedvr2-temporal-pad-test PRIVATE ncnn)
     target_include_directories(seedvr2-temporal-pad-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -150,6 +170,7 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2-depth-to-space-test
         tests/cpp/test_depth_to_space.cpp
         src/vae/depth_to_space.cpp
+        src/vae/causal_conv3d.cpp
         src/vae/temporal_pad.cpp)
     target_link_libraries(seedvr2-depth-to-space-test PRIVATE ncnn)
     target_include_directories(seedvr2-depth-to-space-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -188,6 +209,7 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2-vae-graph-load-test
         tests/cpp/test_vae_graph_load.cpp
         src/vae/temporal_pad.cpp
+        src/vae/causal_conv3d.cpp
         src/vae/depth_to_space.cpp)
     target_link_libraries(seedvr2-vae-graph-load-test PRIVATE ncnn)
     target_include_directories(seedvr2-vae-graph-load-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -200,6 +222,7 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2-vae-end-to-end-cpu-test
         tests/cpp/test_vae_end_to_end_cpu.cpp
         src/vae/temporal_pad.cpp
+        src/vae/causal_conv3d.cpp
         src/vae/depth_to_space.cpp)
     target_link_libraries(seedvr2-vae-end-to-end-cpu-test PRIVATE ncnn)
     target_include_directories(seedvr2-vae-end-to-end-cpu-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -213,6 +236,7 @@ if(SEEDVR2_BUILD_TESTS)
         add_executable(seedvr2-vae-end-to-end-vulkan-test
             tests/cpp/test_vae_end_to_end_vulkan.cpp
             src/vae/temporal_pad.cpp
+            src/vae/causal_conv3d.cpp
             src/vae/depth_to_space.cpp)
         target_link_libraries(seedvr2-vae-end-to-end-vulkan-test PRIVATE ncnn)
         target_include_directories(seedvr2-vae-end-to-end-vulkan-test PRIVATE
@@ -234,6 +258,7 @@ if(SEEDVR2_BUILD_TESTS)
         add_executable(seedvr2-temporal-pad-vulkan-test
             tests/cpp/test_temporal_pad_vulkan.cpp
             src/vae/temporal_pad.cpp
+            src/vae/causal_conv3d.cpp
             src/vae/depth_to_space.cpp)
         target_link_libraries(seedvr2-temporal-pad-vulkan-test PRIVATE ncnn)
         target_include_directories(seedvr2-temporal-pad-vulkan-test PRIVATE
@@ -279,10 +304,57 @@ if(SEEDVR2_BUILD_TESTS)
             "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
         target_sources(seedvr2-dit-stack-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
 
+        add_executable(seedvr2-dit-cfg-vulkan-test
+            tests/cpp/test_dit_cfg_vulkan.cpp
+            src/dit/dit_stack.cpp
+            src/resolution/resolution_plan.cpp
+            src/sampler/sampler.cpp
+            src/sampler/vulkan_sampler.cpp
+            src/conditioning/conditioning.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-dit-cfg-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-dit-cfg-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-dit-cfg-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+
+        add_executable(seedvr2-dit-patch-vulkan-test
+            tests/cpp/test_dit_patch_vulkan.cpp
+            src/dit/dit_stack.cpp
+            src/resolution/resolution_plan.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-dit-patch-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-dit-patch-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-dit-patch-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+        add_test(NAME seedvr2-dit-patch-vulkan-test COMMAND seedvr2-dit-patch-vulkan-test)
+
+        add_executable(seedvr2-dynamic-dit-stack-vulkan-test
+            tests/cpp/test_dynamic_dit_stack_vulkan.cpp
+            src/dit/dit_stack.cpp
+            src/resolution/resolution_plan.cpp
+            src/conditioning/conditioning.cpp
+            src/awa/awa_layers.cpp)
+        target_link_libraries(seedvr2-dynamic-dit-stack-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-dynamic-dit-stack-vulkan-test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+        target_sources(seedvr2-dynamic-dit-stack-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+
+        add_executable(seedvr2-sampler-vulkan-test
+            tests/cpp/test_sampler_vulkan.cpp
+            src/sampler/sampler.cpp
+            src/sampler/vulkan_sampler.cpp)
+        target_link_libraries(seedvr2-sampler-vulkan-test PRIVATE ncnn)
+        target_include_directories(seedvr2-sampler-vulkan-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        add_test(NAME seedvr2-sampler-vulkan-test COMMAND seedvr2-sampler-vulkan-test)
+
         add_executable(seedvr2-vae-dit-vae-vulkan-test
             tests/cpp/test_vae_dit_vae_vulkan.cpp
             src/awa/awa_layers.cpp
             src/vae/temporal_pad.cpp
+            src/vae/causal_conv3d.cpp
             src/vae/depth_to_space.cpp)
         target_link_libraries(seedvr2-vae-dit-vae-vulkan-test PRIVATE ncnn)
         target_include_directories(seedvr2-vae-dit-vae-vulkan-test PRIVATE
@@ -296,8 +368,13 @@ if(SEEDVR2_BUILD_TESTS)
         add_executable(seedvr2-vae-dit-stack-vulkan-test
             tests/cpp/test_vae_dit_stack_vulkan.cpp
             src/awa/awa_layers.cpp
+            src/dit/dit_stack.cpp
+            src/resolution/resolution_plan.cpp
             src/conditioning/conditioning.cpp
+            src/sampler/sampler.cpp
+            src/sampler/vulkan_sampler.cpp
             src/vae/temporal_pad.cpp
+            src/vae/causal_conv3d.cpp
             src/vae/depth_to_space.cpp)
         target_link_libraries(seedvr2-vae-dit-stack-vulkan-test PRIVATE ncnn)
         target_include_directories(seedvr2-vae-dit-stack-vulkan-test PRIVATE

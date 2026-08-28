@@ -1,4 +1,4 @@
-"""Export the fixed complete SeedVR2 DiT stack as ncnn subgraphs."""
+"""Export a shape-parameterized complete SeedVR2 DiT stack as ncnn subgraphs."""
 
 from __future__ import annotations
 
@@ -138,17 +138,28 @@ def _attach_ncnn_artifacts(
         manifest["graphs"] = artifacts
 
 
+def _shape3(value: str) -> tuple[int, int, int]:
+    try:
+        parts = tuple(int(part.strip()) for part in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected T,H,W positive integers") from exc
+    if len(parts) != 3 or any(part <= 0 for part in parts):
+        raise argparse.ArgumentTypeError("expected T,H,W positive integers")
+    return parts
+
+
 def export_stack(
     checkpoint: Path,
     output_dir: Path,
     pnnx: Path | None,
     seed: int,
     text_tokens: int = DIT_STACK_CONTRACT.text_tokens,
+    source_shape: tuple[int, int, int] = DIT_STACK_CONTRACT.source_shape,
 ) -> Path:
     checkpoint = Path(checkpoint)
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    contract = make_dit_stack_contract(text_tokens)
+    contract = make_dit_stack_contract(text_tokens, source_shape=source_shape)
     torch.manual_seed(int(seed))
     state = load_dit_state(checkpoint)
 
@@ -242,7 +253,7 @@ def export_stack(
     )
 
     manifest = {
-        "kind": "seedvr2_fixed_dit_stack",
+        "kind": "seedvr2_dit_stack",
         "source_shape": list(contract.source_shape),
         "window_shape": list(contract.window_shape),
         "text_tokens": contract.text_tokens,
@@ -271,7 +282,7 @@ def export_stack(
         pnnx,
         output_dir / "dit_input.pt",
         output_dir,
-        f"[64,132],[{contract.text_tokens},5120]",
+        f"[{contract.video_tokens},{contract.patch_width}],[{contract.text_tokens},5120]",
     )
     _run_pnnx(pnnx, output_dir / "dit_embedding.pt", output_dir, "[1]")
     for block_index in range(contract.block_count):
@@ -280,7 +291,7 @@ def export_stack(
             pnnx,
             output_dir / f"{block_name}.pt",
             output_dir,
-            f"[64,2560],[{contract.text_tokens},2560],[1,15360]",
+            f"[{contract.video_tokens},2560],[{contract.text_tokens},2560],[1,15360]",
         )
         param_path = output_dir / f"{block_name}.ncnn.param"
         rewrite_ncnn_param(
@@ -290,7 +301,12 @@ def export_stack(
             text_tokens=contract.text_tokens,
             shifted=contract.block_shifted(block_index),
         )
-    _run_pnnx(pnnx, output_dir / "dit_output.pt", output_dir, "[64,2560],[1,15360]")
+    _run_pnnx(
+        pnnx,
+        output_dir / "dit_output.pt",
+        output_dir,
+        f"[{contract.video_tokens},2560],[1,15360]",
+    )
 
     _attach_ncnn_artifacts(manifest, output_dir, graph_records, contract)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -308,12 +324,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pnnx", type=Path)
     parser.add_argument("--seed", type=int, default=20260825)
     parser.add_argument("--text-tokens", type=int, choices=(58, 64), default=58)
+    parser.add_argument("--source-shape", type=_shape3, default=DIT_STACK_CONTRACT.source_shape, metavar="T,H,W")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    manifest = export_stack(args.checkpoint, args.output_dir, args.pnnx, args.seed, args.text_tokens)
+    manifest = export_stack(
+        args.checkpoint,
+        args.output_dir,
+        args.pnnx,
+        args.seed,
+        args.text_tokens,
+        source_shape=args.source_shape,
+    )
     print(f"saved {manifest}")
 
 

@@ -13,10 +13,10 @@ class SeedVR2ConditioningContract:
     text_width: int = 5120
     positive_tokens: int = 58
     negative_tokens: int = 64
-    cfg_scale: float = 7.5
+    cfg_scale: float = 1.0
     cfg_rescale: float = 0.0
     schedule_t: float = 1000.0
-    sampling_steps: int = 50
+    sampling_steps: int = 1
     sampling_shift: float = 1.0
 
 
@@ -88,6 +88,22 @@ def uniform_trailing_timesteps(
     return timesteps * float(schedule_t)
 
 
+def v_lerp_endpoint(
+    sample: torch.Tensor,
+    prediction: torch.Tensor,
+    *,
+    timestep: float,
+    schedule_t: float = SEEDVR2_CONDITIONING_CONTRACT.schedule_t,
+) -> torch.Tensor:
+    """Resolve the official one-step ``v_lerp`` prediction at ``t=T`` to ``x_0``."""
+
+    if sample.shape != prediction.shape:
+        raise ValueError(f"sample and prediction must have equal shapes, got {sample.shape} and {prediction.shape}")
+    if float(schedule_t) <= 0.0 or float(timestep) != float(schedule_t):
+        raise ValueError("v_lerp endpoint requires timestep equal to schedule_t")
+    return sample - prediction
+
+
 def transform_timestep(
     timesteps: torch.Tensor,
     latent_shapes: torch.Tensor,
@@ -134,4 +150,5 @@ __all__ = [
     "load_conditioning_pair",
     "transform_timestep",
     "uniform_trailing_timesteps",
+    "v_lerp_endpoint",
 ]

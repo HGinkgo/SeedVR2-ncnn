@@ -1,4 +1,5 @@
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,45 @@ def test_vae_shape_parser_requires_five_positive_dimensions():
         vae_exporter._shape("1,3,0,128,128")
 
 
+def test_vae_export_cli_exposes_alternate_shape_for_dynamic_conversion():
+    result = subprocess.run(
+        [sys.executable, "tools/export_vae.py", "--help"],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--alternate-input-shape" in result.stdout
+
+
+def test_vae_pnnx_command_uses_primary_shape_and_absolute_paths(tmp_path):
+    command = vae_exporter._pnnx_command(
+        Path("relative-pnnx"),
+        tmp_path / "vae_encode.pt",
+        (1, 3, 1, 720, 1280),
+    )
+
+    assert command == [
+        str(Path("relative-pnnx").resolve()),
+        str((tmp_path / "vae_encode.pt").resolve()),
+        "inputshape=[1,3,1,720,1280]",
+    ]
+
+
+def test_vae_trace_disables_memory_slicing():
+    class Vae:
+        def __init__(self):
+            self.calls = []
+
+        def set_memory_limit(self, **kwargs):
+            self.calls.append(kwargs)
+
+    vae = Vae()
+    vae_exporter.disable_memory_slicing_for_trace(vae)
+
+    assert vae.calls == [{"conv_max_mem": None, "norm_max_mem": None}]
+
+
 def test_rewrite_vae_param_replaces_causal_temporal_tile(tmp_path):
     param_path = tmp_path / "vae_encode.ncnn.param"
     param_path.write_text(
@@ -102,11 +142,59 @@ def test_rewrite_vae_param_replaces_causal_temporal_tile(tmp_path):
     vae_exporter.rewrite_ncnn_param(param_path)
 
     lines = param_path.read_text().splitlines()
-    assert lines[1] == "3 7"
-    assert "SeedVR2TemporalPad temporal_pad_0 1 1 in0 padded 0=2" in lines
+    assert lines[1] == "2 7"
+    assert "SeedVR2CausalConv3D conv3d_25 1 1 in0 out0 0=128 31=2" in lines
+    assert not any(line.startswith("SeedVR2TemporalPad") for line in lines)
     assert not any("torch.tile" in line for line in lines)
     assert not any(line.startswith("Split splitncnn_0") for line in lines)
     assert not any(line.startswith("Concat cat_0") for line in lines)
+
+
+def test_rewrite_vae_param_fuses_intermediate_zero_padding_into_causal_convolution(tmp_path):
+    param_path = tmp_path / "vae_encode.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "4 5\n"
+        "Input in0 0 1 in0\n"
+        "Split splitncnn_0 1 2 in0 original first_frame\n"
+        "torch.tile torch.tile_370 1 1 first_frame repeated\n"
+        "Concat cat_0 2 1 repeated original padded 0=1\n"
+        "Padding pad_0 1 1 padded padded_spatial 0=1 1=2 2=3 3=4 4=0 5=0.0 6=0 7=0 8=0\n"
+        "Convolution3D conv3d_25 1 1 padded_spatial out0 0=128 1=3 11=3 21=3 4=0 14=0 24=0\n"
+    )
+
+    vae_exporter.rewrite_ncnn_param(param_path)
+
+    lines = param_path.read_text().splitlines()
+    causal_line = next(line for line in lines if line.startswith("SeedVR2CausalConv3D conv3d_25"))
+    assert lines[1] == "2 5"
+    assert " in0 out0 " in causal_line
+    assert " 4=3" in causal_line
+    assert " 14=1" in causal_line
+    assert " 15=4" in causal_line
+    assert " 16=2" in causal_line
+    assert " 31=2" in causal_line
+    assert not any(line.startswith("Padding pad_0") for line in lines)
+
+
+def test_rewrite_vae_param_replaces_standalone_temporal_tile(tmp_path):
+    param_path = tmp_path / "vae_encode.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "4 6\n"
+        "Input in0 0 1 in0\n"
+        "Split splitncnn_0 1 2 in0 first second\n"
+        "torch.tile torch.tile_451 1 1 second tiled\n"
+        "Slice split_0 1 3 first a b c -23300=3,240,240,240 1=2\n"
+    )
+
+    vae_exporter.rewrite_ncnn_param(param_path)
+
+    lines = param_path.read_text().splitlines()
+    assert lines[1] == "4 6"
+    assert "SeedVR2TemporalPad temporal_pad_0 1 1 second tiled 0=2" in lines
+    assert any(line.startswith("Slice split_0") for line in lines)
+    assert not any(line.startswith("torch.tile") for line in lines)
 
 
 def test_rewrite_vae_param_replaces_upsample_depth_to_space_triplet(tmp_path):

@@ -39,6 +39,17 @@ def test_dit_stack_supports_the_official_positive_and_negative_token_specs():
     assert negative.video_patch_shape == positive.video_patch_shape
 
 
+def test_dit_stack_contract_accepts_runtime_source_grid():
+    from tools.reference.dit_stack import make_dit_stack_contract
+
+    contract = make_dit_stack_contract(58, source_shape=(1, 45, 80))
+
+    assert contract.source_shape == (1, 45, 80)
+    assert contract.video_tokens == 3600
+    assert contract.video_patch_shape == (3600, 132)
+    assert contract.output_shape == (3600, 64)
+
+
 def test_dit_stack_rejects_unfrozen_text_token_specs():
     from tools.reference.dit_stack import make_dit_stack_contract
 
@@ -58,6 +69,37 @@ def test_full_dit_stack_export_script_has_a_stable_cli():
     assert "--checkpoint" in result.stdout
     assert "--output-dir" in result.stdout
     assert "--text-tokens" in result.stdout
+    assert "--source-shape" in result.stdout
+
+
+def test_dit_stack_main_forwards_source_shape_to_exporter(monkeypatch, tmp_path):
+    import argparse
+    import tools.export_dit_stack as exporter
+
+    calls = {}
+
+    def fake_export_stack(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return tmp_path / "manifest.json"
+
+    monkeypatch.setattr(
+        exporter,
+        "parse_args",
+        lambda: argparse.Namespace(
+            checkpoint=tmp_path / "checkpoint.pth",
+            output_dir=tmp_path,
+            pnnx=None,
+            seed=7,
+            text_tokens=58,
+            source_shape=(1, 45, 80),
+        ),
+    )
+    monkeypatch.setattr(exporter, "export_stack", fake_export_stack)
+
+    exporter.main()
+
+    assert calls["kwargs"]["source_shape"] == (1, 45, 80)
 
 
 def test_portable_golden_pack_has_stable_little_endian_layout(tmp_path):
