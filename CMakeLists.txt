@@ -90,9 +90,25 @@ if(SEEDVR2_ENABLE_VULKAN)
         COMMENT "Preprocessing SeedVR2 VAE depth-to-space shader"
         VERBATIM)
     set_source_files_properties("${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}" PROPERTIES GENERATED TRUE)
+    set(SEEDVR2_CAUSAL_CONV3D_SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vae/shader/causal_conv3d.comp")
+    set(SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER
+        "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader/causal_conv3d.comp.hex.h")
+    add_custom_command(
+        OUTPUT "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader"
+        COMMAND ${CMAKE_COMMAND}
+            -DSHADER_SRC=${SEEDVR2_CAUSAL_CONV3D_SHADER_SRC}
+            -DSHADER_COMP_HEADER=${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/cmake/ncnn_generate_shader_comp_header.cmake"
+        DEPENDS "${SEEDVR2_CAUSAL_CONV3D_SHADER_SRC}"
+        COMMENT "Preprocessing SeedVR2 VAE causal convolution shader"
+        VERBATIM)
+    set_source_files_properties("${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}" PROPERTIES GENERATED TRUE)
     target_sources(seedvr2-ncnn PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+    target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
     target_include_directories(seedvr2-ncnn PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
 
     if(SEEDVR2_BUILD_BENCHMARKS)
@@ -163,6 +179,7 @@ if(SEEDVR2_BUILD_TESTS)
     target_include_directories(seedvr2-temporal-pad-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     if(SEEDVR2_ENABLE_VULKAN)
         target_sources(seedvr2-temporal-pad-test PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
+        target_sources(seedvr2-temporal-pad-test PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
         target_include_directories(seedvr2-temporal-pad-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
     endif()
     add_test(NAME seedvr2-temporal-pad-test COMMAND seedvr2-temporal-pad-test)
@@ -216,6 +233,7 @@ if(SEEDVR2_BUILD_TESTS)
     if(SEEDVR2_ENABLE_VULKAN)
         target_sources(seedvr2-vae-graph-load-test PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
         target_sources(seedvr2-vae-graph-load-test PRIVATE "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+        target_sources(seedvr2-vae-graph-load-test PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
         target_include_directories(seedvr2-vae-graph-load-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
     endif()
 
@@ -229,6 +247,7 @@ if(SEEDVR2_BUILD_TESTS)
     if(SEEDVR2_ENABLE_VULKAN)
         target_sources(seedvr2-vae-end-to-end-cpu-test PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
         target_sources(seedvr2-vae-end-to-end-cpu-test PRIVATE "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+        target_sources(seedvr2-vae-end-to-end-cpu-test PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
         target_include_directories(seedvr2-vae-end-to-end-cpu-test PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
     endif()
 
@@ -244,7 +263,8 @@ if(SEEDVR2_BUILD_TESTS)
             "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
         target_sources(seedvr2-vae-end-to-end-vulkan-test PRIVATE
             "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
-            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}"
+            "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
 
         add_executable(seedvr2-awa-vulkan-capability-test
             tests/cpp/test_awa_vulkan_capability.cpp
@@ -265,6 +285,7 @@ if(SEEDVR2_BUILD_TESTS)
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
         target_sources(seedvr2-temporal-pad-vulkan-test PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
+        target_sources(seedvr2-temporal-pad-vulkan-test PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
         add_test(NAME seedvr2-temporal-pad-vulkan-test COMMAND seedvr2-temporal-pad-vulkan-test)
 
         add_executable(seedvr2-depth-to-space-vulkan-test
@@ -363,7 +384,8 @@ if(SEEDVR2_BUILD_TESTS)
         target_sources(seedvr2-vae-dit-vae-vulkan-test PRIVATE
             ${SEEDVR2_AWA_SHADER_HEADERS}
             "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
-            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}"
+            "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
 
         add_executable(seedvr2-vae-dit-stack-vulkan-test
             tests/cpp/test_vae_dit_stack_vulkan.cpp
@@ -383,7 +405,8 @@ if(SEEDVR2_BUILD_TESTS)
         target_sources(seedvr2-vae-dit-stack-vulkan-test PRIVATE
             ${SEEDVR2_AWA_SHADER_HEADERS}
             "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
-            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
+            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}"
+            "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
 
         add_executable(seedvr2-awa-unpack-vulkan-test
             tests/cpp/test_awa_unpack_vulkan.cpp

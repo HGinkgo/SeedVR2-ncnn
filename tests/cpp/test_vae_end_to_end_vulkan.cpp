@@ -153,9 +153,9 @@ int main(int argc, char** argv)
         if (decode_extractor.input("in0", decode_latent_gpu) != 0)
             return 1;
         std::fprintf(stderr, "stage=decode-extract\n");
-        // The graph ends in Convolution3D, which is CPU-only in this ncnn
-        // revision. Host extraction handles the GPU-to-CPU boundary and
-        // avoids treating the CPU result as an empty VkMat.
+        // The graph ends in the custom causal Conv3D layer. Host extraction
+        // keeps the final image boundary explicit while convolution runs on
+        // the Vulkan path.
         if (decode_extractor.extract("out0", reconstruction) != 0)
         {
             return 1;

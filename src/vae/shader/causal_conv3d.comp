@@ -1,0 +1,100 @@
+#version 450
+
+#extension GL_GOOGLE_include_directive : enable
+#include "vulkan_activation.comp"
+
+layout(binding = 0) readonly buffer bottom_blob { sfp bottom_blob_data[]; };
+layout(binding = 1) writeonly buffer top_blob { sfp top_blob_data[]; };
+layout(binding = 2) readonly buffer weight_blob { sfp weight_data[]; };
+layout(binding = 3) readonly buffer bias_blob { sfp bias_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_w;
+    int input_h;
+    int input_d;
+    int input_c;
+    int input_cstep;
+    int output_w;
+    int output_h;
+    int output_d;
+    int output_cstep;
+    int kernel_w;
+    int kernel_h;
+    int kernel_d;
+    int dilation_w;
+    int dilation_h;
+    int dilation_d;
+    int stride_w;
+    int stride_h;
+    int stride_d;
+    int pad_w_before;
+    int pad_w_after;
+    int pad_h_before;
+    int pad_h_after;
+    int pad_d_before;
+    int pad_d_after;
+    int prepend;
+    float pad_value;
+    int num_output;
+    int bias_term;
+    int activation_type;
+    float activation_param_0;
+    float activation_param_1;
+} p;
+
+void main()
+{
+    const int output_x = int(gl_GlobalInvocationID.x);
+    const int output_y_depth = int(gl_GlobalInvocationID.y);
+    const int output_channel = int(gl_GlobalInvocationID.z);
+
+    if (output_x >= p.output_w || output_y_depth >= p.output_h * p.output_d ||
+        output_channel >= p.num_output)
+        return;
+
+    const int output_depth = output_y_depth / p.output_h;
+    const int output_y = output_y_depth % p.output_h;
+    const int output_plane = p.output_w * p.output_h;
+    const int kernel_size = p.kernel_w * p.kernel_h * p.kernel_d;
+    const int output_offset = output_channel * p.output_cstep + output_depth * output_plane +
+                               output_y * p.output_w + output_x;
+
+    afp sum = p.bias_term == 1 ? buffer_ld1(bias_data, output_channel) : afp(0.f);
+    const int virtual_depth = p.input_d + p.prepend;
+    const int input_plane = p.input_w * p.input_h;
+    const int output_weight_offset = output_channel * p.input_c * kernel_size;
+
+    for (int input_channel = 0; input_channel < p.input_c; input_channel++)
+    {
+        const int input_weight_offset = output_weight_offset + input_channel * kernel_size;
+        for (int kernel_depth = 0; kernel_depth < p.kernel_d; kernel_depth++)
+        {
+            const int virtual_depth_index = output_depth * p.stride_d +
+                                            kernel_depth * p.dilation_d - p.pad_d_before;
+            for (int kernel_y = 0; kernel_y < p.kernel_h; kernel_y++)
+            {
+                const int input_y = output_y * p.stride_h + kernel_y * p.dilation_h - p.pad_h_before;
+                for (int kernel_x = 0; kernel_x < p.kernel_w; kernel_x++)
+                {
+                    const int input_x = output_x * p.stride_w + kernel_x * p.dilation_w - p.pad_w_before;
+                    afp value = afp(p.pad_value);
+                    if (virtual_depth_index >= 0 && virtual_depth_index < virtual_depth &&
+                        input_y >= 0 && input_y < p.input_h && input_x >= 0 && input_x < p.input_w)
+                    {
+                        const int source_depth = max(virtual_depth_index - p.prepend, 0);
+                        const int input_offset = input_channel * p.input_cstep + source_depth * input_plane +
+                                                 input_y * p.input_w + input_x;
+                        value = buffer_ld1(bottom_blob_data, input_offset);
+                    }
+                    const int weight_offset = input_weight_offset +
+                                              (kernel_depth * p.kernel_h + kernel_y) * p.kernel_w + kernel_x;
+                    sum += value * buffer_ld1(weight_data, weight_offset);
+                }
+            }
+        }
+    }
+
+    sum = activation_afp(sum, p.activation_type, p.activation_param_0, p.activation_param_1);
+    buffer_st1(top_blob_data, output_offset, sum);
+}
