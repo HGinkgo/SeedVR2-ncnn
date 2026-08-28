@@ -1,4 +1,5 @@
 #include "inference/image_inference.h"
+#include "inference/memory_diagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -74,6 +75,20 @@ ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator, ncnn::VkAlloc
     opt.workspace_vkallocator = blob_allocator;
     opt.staging_vkallocator = staging_allocator;
     return opt;
+}
+
+std::uint64_t query_max_allocation_mib(const ncnn::VulkanDevice* vkdev)
+{
+    if (!vkdev->info.support_VK_KHR_maintenance3() || !ncnn::vkGetPhysicalDeviceProperties2KHR)
+        return 0;
+
+    VkPhysicalDeviceMaintenance3Properties maintenance3{};
+    maintenance3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+    VkPhysicalDeviceProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties.pNext = &maintenance3;
+    ncnn::vkGetPhysicalDeviceProperties2KHR(vkdev->info.physicalDevice(), &properties);
+    return static_cast<std::uint64_t>(maintenance3.maxMemoryAllocationSize / (1024u * 1024u));
 }
 
 bool load_vae(ncnn::Net& net,
@@ -194,9 +209,14 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
                                 const RgbImage& input,
                                 const ResolutionPlan& plan,
                                 ncnn::VulkanDevice* vkdev,
+                                const VulkanMemoryDiagnostics& diagnostics,
                                 RgbImage& output,
                                 std::string& error)
 {
+    const auto stage_error = [&](const char* stage, const char* detail) {
+        error = format_vulkan_stage_error(stage, diagnostics, detail);
+    };
+
     ncnn::Mat sample;
     if (!prepare_input(input, plan, sample))
     {
@@ -208,7 +228,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     ncnn::VkAllocator* staging_allocator = vkdev->acquire_staging_allocator();
     if (!blob_allocator || !staging_allocator)
     {
-        error = "failed to acquire Vulkan allocators";
+        stage_error("allocator-acquire", "failed to acquire Vulkan allocators");
         if (blob_allocator)
             vkdev->reclaim_blob_allocator(blob_allocator);
         if (staging_allocator)
@@ -220,7 +240,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     std::fprintf(stderr, "stage=load-encode\n");
     if (!load_vae(encode, graphs.vae_encode_stem, vkdev, blob_allocator, staging_allocator, false))
     {
-        error = "stage=load-encode failed";
+        stage_error("load-encode", "ncnn graph load returned failure");
         vkdev->reclaim_blob_allocator(blob_allocator);
         vkdev->reclaim_staging_allocator(staging_allocator);
         return false;
@@ -232,7 +252,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
         compute.record_upload(sample, sample_gpu, encode.opt);
         if (compute.submit_and_wait() != 0)
         {
-            error = "stage=input-upload failed";
+            stage_error("input-upload", "Vulkan command submission returned failure");
             return false;
         }
     }
@@ -245,7 +265,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
         if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
             compute.submit_and_wait() != 0)
         {
-            error = "stage=vae-encode failed";
+            stage_error("vae-encode", "ncnn extraction or Vulkan command submission returned failure");
             return false;
         }
     }
@@ -277,7 +297,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
         compute.record_upload(noise, noise_gpu, encode_opt);
         if (compute.submit_and_wait() != 0)
         {
-            error = "stage=noise-upload failed";
+            stage_error("noise-upload", "Vulkan command submission returned failure");
             return false;
         }
     }
@@ -287,7 +307,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     if (!make_dit_input_patches_gpu(noise_gpu, latent_gpu, plan, vkdev, blob_allocator, staging_allocator,
                                     input_patches_gpu))
     {
-        error = "stage=dit-input-patchify failed";
+        stage_error("dit-input-patchify", "GPU patch assembly returned failure");
         return false;
     }
 
@@ -296,7 +316,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     if (!run_dit_stack_gpu(input_patches_gpu, text, 1000.f, graphs.dit_stack_dir.string(), plan, vkdev,
                            blob_allocator, staging_allocator, prediction_gpu))
     {
-        error = "stage=dit-stack failed";
+        stage_error("dit-stack", "GPU DiT execution returned failure");
         return false;
     }
 
@@ -305,7 +325,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, vkdev, blob_allocator, staging_allocator,
                                          noise_patches_gpu))
     {
-        error = "stage=noise-patchify failed";
+        stage_error("noise-patchify", "GPU patch assembly returned failure");
         return false;
     }
 
@@ -314,7 +334,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, vkdev, blob_allocator,
                                           staging_allocator, endpoint_patches_gpu))
     {
-        error = "stage=v-lerp-endpoint failed";
+        stage_error("v-lerp-endpoint", "GPU sampler endpoint returned failure");
         return false;
     }
 
@@ -323,7 +343,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, vkdev, blob_allocator, staging_allocator,
                                 output_latent_gpu))
     {
-        error = "stage=latent-unpatch failed";
+        stage_error("latent-unpatch", "GPU patch removal returned failure");
         return false;
     }
 
@@ -335,7 +355,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
         !clone_to_allocator(output_latent_gpu, decode_latent_gpu, vkdev, decode_blob_allocator,
                             &decode_staging_allocator))
     {
-        error = "stage=handoff-latent failed";
+        stage_error("handoff-latent", "GPU latent handoff returned failure");
         if (decode_blob_allocator)
             vkdev->reclaim_blob_allocator(decode_blob_allocator);
         return false;
@@ -357,7 +377,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
     std::fprintf(stderr, "stage=load-decode\n");
     if (!load_vae(decode, graphs.vae_decode_stem, vkdev, decode_blob_allocator, &decode_staging_allocator, true))
     {
-        error = "stage=load-decode failed";
+        stage_error("load-decode", "ncnn graph load returned failure");
         return false;
     }
 
@@ -367,7 +387,7 @@ bool run_vulkan_image_inference(const ModelGraphSet& graphs,
         ncnn::Extractor extractor = decode.create_extractor();
         if (extractor.input("in0", decode_latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
         {
-            error = "stage=vae-decode failed";
+            stage_error("vae-decode", "ncnn extraction returned failure");
             return false;
         }
     }
@@ -394,7 +414,8 @@ bool run_image_inference(const ModelGraphSet& graphs,
                          const ResolutionPlan& plan,
                          int gpu_id,
                          RgbImage& output,
-                         std::string& error)
+                         std::string& error,
+                         std::uint32_t memory_budget_mib)
 {
     output = RgbImage();
     error.clear();
@@ -422,12 +443,30 @@ bool run_image_inference(const ModelGraphSet& graphs,
         error = "requested Vulkan GPU is unavailable";
         return false;
     }
-    return run_vulkan_image_inference(graphs, input, plan, vkdev, output, error);
+
+    VulkanMemoryDiagnostics diagnostics;
+    diagnostics.gpu_id = selected_gpu;
+    diagnostics.device_name = vkdev->info.device_name();
+    diagnostics.heap_budget_mib = vkdev->get_heap_budget();
+    diagnostics.max_allocation_mib = query_max_allocation_mib(vkdev);
+    diagnostics.target_width = plan.image_width;
+    diagnostics.target_height = plan.image_height;
+    std::fprintf(stderr, "vulkan-gpu=%d name=%s heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
+                 diagnostics.gpu_id, diagnostics.device_name.c_str(), diagnostics.heap_budget_mib,
+                 static_cast<unsigned long long>(diagnostics.max_allocation_mib), diagnostics.target_width,
+                 diagnostics.target_height);
+    if (memory_budget_mib > 0 && diagnostics.heap_budget_mib < memory_budget_mib)
+    {
+        error = format_vulkan_memory_preflight_error(diagnostics, memory_budget_mib);
+        return false;
+    }
+    return run_vulkan_image_inference(graphs, input, plan, vkdev, diagnostics, output, error);
 #else
     (void)graphs;
     (void)input;
     (void)plan;
     (void)gpu_id;
+    (void)memory_budget_mib;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif

@@ -14,6 +14,7 @@ grep -Fq -- '--version' <<<"$help_output"
 grep -Fq -- '--model-dir' <<<"$help_output"
 grep -Fq -- '--input' <<<"$help_output"
 grep -Fq -- '--width' <<<"$help_output"
+grep -Fq -- '--memory-budget-mib' <<<"$help_output"
 
 version_output="$($binary --version)"
 grep -Fq 'SeedVR2-ncnn' <<<"$version_output"

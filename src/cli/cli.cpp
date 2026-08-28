@@ -125,6 +125,18 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
             }
             options.gpu_id = parsed;
         }
+        else if (std::strcmp(argument, "--memory-budget-mib") == 0)
+        {
+            if (!next_value(argc, argv, index, value, error, true))
+                return false;
+            int parsed = 0;
+            if (!parse_integer(value, parsed) || parsed < 0)
+            {
+                error = "--memory-budget-mib must be a non-negative integer";
+                return false;
+            }
+            options.memory_budget_mib = static_cast<std::uint32_t>(parsed);
+        }
         else
         {
             error = std::string("unknown option: ") + argument;

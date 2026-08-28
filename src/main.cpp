@@ -29,6 +29,7 @@ void print_usage()
     std::puts("  --width      Explicit output width (optional)");
     std::puts("  --height     Explicit output height (optional)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
+    std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");
 }
 
 void print_version()
@@ -138,7 +139,8 @@ int main(int argc, char** argv)
             }
             std::fprintf(stderr, "stage=video-frame index=%d\n", processed_frames);
             seedvr2::RgbImage output_frame;
-            if (!seedvr2::run_image_inference(graphs, frame, resolution_plan, options.gpu_id, output_frame, error))
+            if (!seedvr2::run_image_inference(graphs, frame, resolution_plan, options.gpu_id, output_frame, error,
+                                              options.memory_budget_mib))
             {
                 std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
                              error.c_str());
@@ -192,7 +194,8 @@ int main(int argc, char** argv)
     }
 
     seedvr2::RgbImage output_image;
-    if (!seedvr2::run_image_inference(graphs, input_image, resolution_plan, options.gpu_id, output_image, error))
+    if (!seedvr2::run_image_inference(graphs, input_image, resolution_plan, options.gpu_id, output_image, error,
+                                      options.memory_budget_mib))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;

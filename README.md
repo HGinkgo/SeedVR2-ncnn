@@ -26,7 +26,7 @@ cmake --build build-vulkan --parallel
 bash tests/smoke.sh ./build/seedvr2-ncnn
 ```
 
-当前 CLI 支持 PNG/JPEG 图片，以及未压缩 RGB24 AVI 的逐帧处理。视频输入需要使用 AVI 输出；单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。
+当前 CLI 支持 PNG/JPEG 图片，以及未压缩 RGB24 AVI 的逐帧处理。视频输入需要使用 AVI 输出；单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。可用 `--memory-budget-mib` 设置运行前的最小 Vulkan 显存预算（默认 `0`，不预检）。
 
 ## 目录
 

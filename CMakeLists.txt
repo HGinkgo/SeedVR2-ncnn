@@ -32,6 +32,7 @@ add_executable(seedvr2-ncnn
     src/conditioning/conditioning.cpp
     src/io/image_io.cpp
     src/inference/image_inference.cpp
+    src/inference/memory_diagnostics.cpp
     src/model/model_registry.cpp
     src/video/video_io.cpp
     src/awa/awa_layers.cpp
@@ -148,6 +149,7 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2-cli-test
         tests/unit/cpp/test_cli.cpp
         src/cli/cli.cpp
+        src/inference/memory_diagnostics.cpp
         src/resolution/resolution_plan.cpp)
     target_include_directories(seedvr2-cli-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME seedvr2-cli-test COMMAND seedvr2-cli-test)
