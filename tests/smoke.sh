@@ -35,3 +35,13 @@ set -e
 grep -Fq 'input=2x1' <<<"$preflight_output"
 grep -Fq 'target=' <<<"$preflight_output"
 grep -Fq 'model variant' <<<"$preflight_output"
+
+invalid_video="$(mktemp --suffix=.avi)"
+trap 'rm -f "$smoke_image" "$invalid_video"' EXIT
+printf 'not an avi' >"$invalid_video"
+set +e
+video_output="$($binary --model-dir . --input "$invalid_video" --output /tmp/seedvr2-invalid-output.avi 2>&1)"
+video_status=$?
+set -e
+[[ "$video_status" -eq 1 ]]
+grep -Fq 'not a RIFF AVI video' <<<"$video_output"

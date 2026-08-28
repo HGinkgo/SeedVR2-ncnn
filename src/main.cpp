@@ -11,6 +11,7 @@
 #include "model/model_registry.h"
 #include "resolution/resolution_plan.h"
 #include "vae/temporal_pad.h"
+#include "video/video_io.h"
 
 namespace
 {
@@ -38,6 +39,15 @@ void print_version()
     register_seedvr2_vae_layers(net);
     std::printf("SeedVR2-ncnn %s\n", SEEDVR2_VERSION);
     std::printf("ncnn %s\n", NCNN_VERSION_STRING);
+}
+
+bool has_avi_extension(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    for (char& value : extension)
+        if (value >= 'A' && value <= 'Z')
+            value = static_cast<char>(value - 'A' + 'a');
+    return extension == ".avi";
 }
 
 } // namespace
@@ -70,6 +80,91 @@ int main(int argc, char** argv)
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
+    }
+
+    if (has_avi_extension(options.input))
+    {
+        seedvr2::AviVideoReader reader;
+        if (!seedvr2::AviVideoReader::open(options.input, reader, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+
+        seedvr2::ResolutionPlan resolution_plan;
+        if (!seedvr2::make_image_resolution_plan(options, reader.info().width, reader.info().height,
+                                                 resolution_plan, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        if (!has_avi_extension(options.output))
+        {
+            std::fprintf(stderr, "error: AVI input requires an AVI output path\n");
+            return 1;
+        }
+        std::fprintf(stderr, "input-video=%dx%d frames=%d target=%dx%d\n", reader.info().width,
+                     reader.info().height, reader.info().frame_count, resolution_plan.image_width,
+                     resolution_plan.image_height);
+
+        seedvr2::ModelGraphSet graphs;
+        if (!registry.resolve(resolution_plan, graphs, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        seedvr2::VideoInfo output_info = reader.info();
+        output_info.width = resolution_plan.image_width;
+        output_info.height = resolution_plan.image_height;
+        seedvr2::AviVideoWriter writer;
+        if (!seedvr2::AviVideoWriter::open(options.output, output_info, writer, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+
+        int processed_frames = 0;
+        for (;;)
+        {
+            seedvr2::RgbImage frame;
+            if (!reader.read_next(frame, error))
+            {
+                if (!error.empty())
+                {
+                    std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
+                    return 1;
+                }
+                break;
+            }
+            std::fprintf(stderr, "stage=video-frame index=%d\n", processed_frames);
+            seedvr2::RgbImage output_frame;
+            if (!seedvr2::run_image_inference(graphs, frame, resolution_plan, options.gpu_id, output_frame, error))
+            {
+                std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
+                             error.c_str());
+                return 1;
+            }
+            if (!writer.write_frame(output_frame, error))
+            {
+                std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n", processed_frames,
+                             error.c_str());
+                return 1;
+            }
+            processed_frames++;
+        }
+        if (!writer.close(error))
+        {
+            std::fprintf(stderr, "error: stage=video-encode failed: %s\n", error.c_str());
+            return 1;
+        }
+        if (processed_frames == 0)
+        {
+            std::fprintf(stderr, "error: stage=video-decode failed: video contains no decodable frames\n");
+            return 1;
+        }
+        std::fprintf(stderr, "output=%s frames=%d\n", options.output.string().c_str(), processed_frames);
+        std::puts("seedvr2-video-inference: ok");
+        return 0;
     }
 
     seedvr2::RgbImage input_image;

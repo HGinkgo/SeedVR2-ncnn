@@ -33,6 +33,7 @@ add_executable(seedvr2-ncnn
     src/io/image_io.cpp
     src/inference/image_inference.cpp
     src/model/model_registry.cpp
+    src/video/video_io.cpp
     src/awa/awa_layers.cpp
     src/resolution/resolution_plan.cpp
     src/sampler/sampler.cpp
@@ -187,6 +188,13 @@ if(SEEDVR2_BUILD_TESTS)
             "${CMAKE_CURRENT_BINARY_DIR}/third_party/ncnn/src")
         add_test(NAME seedvr2-image-inference-test COMMAND seedvr2-image-inference-test)
     endif()
+
+    add_executable(seedvr2-video-io-test
+        tests/unit/cpp/test_video_io.cpp
+        src/video/video_io.cpp)
+    target_include_directories(seedvr2-video-io-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME seedvr2-video-io-test COMMAND seedvr2-video-io-test)
 
     add_executable(seedvr2-awa-benchmark-test
         tests/unit/cpp/test_awa_benchmark.cpp
