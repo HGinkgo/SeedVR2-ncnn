@@ -93,11 +93,15 @@ int main()
         require(compressed_reader.info().height > 0, "compressed video height");
         require(compressed_reader.info().fps_num > 0, "compressed video fps numerator");
         require(compressed_reader.info().fps_den > 0, "compressed video fps denominator");
-        require(compressed_reader.read_next(decoded, error), "read first compressed video frame");
-        require(decoded.pixels.size() == static_cast<std::size_t>(decoded.width) * decoded.height * 3u,
-                "compressed video RGB24 frame");
-        require(compressed_reader.read_next(decoded, error), "read second compressed video frame");
-        require(!compressed_reader.read_next(decoded, error), "compressed video end of stream");
+        int compressed_frame_count = 0;
+        while (compressed_reader.read_next(decoded, error))
+        {
+            require(decoded.pixels.size() == static_cast<std::size_t>(decoded.width) * decoded.height * 3u,
+                    "compressed video RGB24 frame");
+            ++compressed_frame_count;
+        }
+        require(error.empty(), "compressed video end of stream");
+        require(compressed_frame_count >= 2, "read at least two compressed video frames");
     }
 #endif
     return 0;

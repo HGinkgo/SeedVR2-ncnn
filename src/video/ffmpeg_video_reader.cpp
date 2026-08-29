@@ -5,11 +5,14 @@
 #include <vector>
 
 #if defined(SEEDVR2_HAS_FFMPEG)
+extern "C"
+{
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
+}
 #endif
 
 namespace seedvr2
