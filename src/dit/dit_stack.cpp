@@ -240,10 +240,10 @@ bool DitStackSession::open(const std::string& stack_dir,
     candidate->blocks.reserve(32);
     for (int block_index = 0; block_index < 32; block_index++)
     {
-        char name[64];
-        std::snprintf(name, sizeof(name), "%s/dit_block_%02d", stack_dir.c_str(), block_index);
         std::unique_ptr<ncnn::Net> block(new ncnn::Net);
-        if (!load_graph(*block, name, vkdev, blob_allocator, staging_allocator))
+        const std::string block_name = stack_dir + "/dit_block_" +
+                                       (block_index < 10 ? "0" : "") + std::to_string(block_index);
+        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator))
             return false;
         candidate->blocks.push_back(std::move(block));
     }

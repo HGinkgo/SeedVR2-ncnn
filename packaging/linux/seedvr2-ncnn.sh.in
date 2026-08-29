@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -eu
+
+package_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+payload="$package_root/bin/seedvr2-ncnn"
+
+if [ ! -x "$payload" ]; then
+    printf '%s\n' "seedvr2-ncnn package is missing its executable payload: $payload" >&2
+    exit 1
+fi
+
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="$package_root/lib:$LD_LIBRARY_PATH"
+else
+    export LD_LIBRARY_PATH="$package_root/lib"
+fi
+
+exec "$payload" "$@"

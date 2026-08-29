@@ -231,6 +231,11 @@ if(SEEDVR2_BUILD_TESTS)
         target_link_libraries(seedvr2-video-io-test PRIVATE ${SEEDVR2_FFMPEG_LIBRARIES})
     endif()
     add_test(NAME seedvr2-video-io-test COMMAND seedvr2-video-io-test)
+    if(UNIX AND SEEDVR2_ENABLE_FFMPEG)
+        get_filename_component(SEEDVR2_FFMPEG_LIBRARY_DIR "${SEEDVR2_FFMPEG_AVFORMAT_LIBRARY}" DIRECTORY)
+        set_tests_properties(seedvr2-video-io-test PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${SEEDVR2_FFMPEG_LIBRARY_DIR}:$ENV{LD_LIBRARY_PATH}")
+    endif()
 
     add_executable(seedvr2-awa-benchmark-test
         tests/unit/cpp/test_awa_benchmark.cpp
