@@ -75,7 +75,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
 
       - name: Build Vulkan release executable
-        run: cmake --build build-release --target seedvr2-ncnn seedvr2-video-io-test --parallel 2
+        run: cmake --build build-release --target seedvr2-ncnn seedvr2-cli-test seedvr2-video-io-test --parallel 2
 
       - name: Run release build checks
         run: ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
