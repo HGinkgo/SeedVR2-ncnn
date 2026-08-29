@@ -41,3 +41,64 @@ jobs:
 
       - name: Smoke test
         run: bash tests/smoke.sh ./build/seedvr2-ncnn
+
+  linux-runtime-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan build prerequisites
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvulkan-dev nasm
+
+      - name: Build LGPL FFmpeg runtime
+        run: packaging/linux/build_ffmpeg_lgpl.sh --prefix "$RUNNER_TEMP/ffmpeg-prefix" --jobs 2
+
+      - name: Configure Vulkan release build
+        run: >-
+          cmake -S . -B build-release
+          -DSEEDVR2_ENABLE_VULKAN=ON
+          -DSEEDVR2_ENABLE_FFMPEG=ON
+          -DSEEDVR2_BUILD_TESTS=ON
+          -DNCNN_OPENMP=ON
+          -DSEEDVR2_FFMPEG_INCLUDE_DIR=$RUNNER_TEMP/ffmpeg-prefix/include
+          -DSEEDVR2_FFMPEG_AVFORMAT_LIBRARY=$RUNNER_TEMP/ffmpeg-prefix/lib/libavformat.so
+          -DSEEDVR2_FFMPEG_AVCODEC_LIBRARY=$RUNNER_TEMP/ffmpeg-prefix/lib/libavcodec.so
+          -DSEEDVR2_FFMPEG_AVUTIL_LIBRARY=$RUNNER_TEMP/ffmpeg-prefix/lib/libavutil.so
+          -DSEEDVR2_FFMPEG_SWSCALE_LIBRARY=$RUNNER_TEMP/ffmpeg-prefix/lib/libswscale.so
+          -DCMAKE_SKIP_RPATH=ON
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Vulkan release executable
+        run: cmake --build build-release --target seedvr2-ncnn seedvr2-video-io-test --parallel 2
+
+      - name: Run release build checks
+        run: ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
+
+      - name: Stage Linux runtime archive
+        run: >-
+          packaging/linux/package_runtime.sh
+          --binary "$GITHUB_WORKSPACE/build-release/seedvr2-ncnn"
+          --ffmpeg-prefix "$RUNNER_TEMP/ffmpeg-prefix"
+          --ffmpeg-source "$RUNNER_TEMP/ffmpeg-8.1.2.tar.xz"
+          --output "$RUNNER_TEMP/seedvr2-release"
+
+      - name: Validate staged archive contract
+        env:
+          SEEDVR2_PACKAGE_TEST_BINARY: ${{ github.workspace }}/build-release/seedvr2-ncnn
+          SEEDVR2_PACKAGE_TEST_FFMPEG_PREFIX: ${{ runner.temp }}/ffmpeg-prefix
+          SEEDVR2_PACKAGE_TEST_FFMPEG_SOURCE: ${{ runner.temp }}/ffmpeg-8.1.2.tar.xz
+        run: ./tests/manual/package/test_linux_runtime_package.sh --release-smoke
+
+      - name: Upload Linux runtime archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeedVR2-ncnn-linux-x86_64
+          path: ${{ runner.temp }}/seedvr2-release/SeedVR2-ncnn-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
