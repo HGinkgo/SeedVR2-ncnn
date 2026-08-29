@@ -36,11 +36,13 @@ int main()
     require(error.find("AVI") != std::string::npos, "malformed AVI error");
     std::remove(path.string().c_str());
 
+#if !defined(SEEDVR2_HAS_FFMPEG)
     seedvr2::VideoReader generic_reader;
     require(!seedvr2::VideoReader::open("sample.mp4", generic_reader, error),
             "reject compressed input without FFmpeg");
     require(error.find("SEEDVR2_ENABLE_FFMPEG") != std::string::npos,
             "explain FFmpeg build option");
+#endif
 
     const std::filesystem::path roundtrip = std::filesystem::temp_directory_path() / "seedvr2-roundtrip.avi";
     seedvr2::VideoInfo info;
@@ -72,6 +74,31 @@ int main()
     require(reader.read_next(decoded, error), "read second AVI frame");
     require(decoded.pixels == second.pixels, "second AVI frame pixels");
     require(!reader.read_next(decoded, error), "AVI end of stream");
+
+    seedvr2::VideoReader facade_reader;
+    require(seedvr2::VideoReader::open(roundtrip, facade_reader, error), "open AVI through video facade");
+    require(facade_reader.info().width == 2, "facade AVI width");
+    require(facade_reader.read_next(decoded, error), "read AVI through video facade");
+    require(decoded.pixels == first.pixels, "facade AVI pixels");
     std::remove(roundtrip.string().c_str());
+
+#if defined(SEEDVR2_HAS_FFMPEG)
+    const char* compressed_path = std::getenv("SEEDVR2_TEST_COMPRESSED_VIDEO");
+    if (compressed_path && *compressed_path)
+    {
+        seedvr2::VideoReader compressed_reader;
+        require(seedvr2::VideoReader::open(compressed_path, compressed_reader, error),
+                "open compressed video through video facade");
+        require(compressed_reader.info().width > 0, "compressed video width");
+        require(compressed_reader.info().height > 0, "compressed video height");
+        require(compressed_reader.info().fps_num > 0, "compressed video fps numerator");
+        require(compressed_reader.info().fps_den > 0, "compressed video fps denominator");
+        require(compressed_reader.read_next(decoded, error), "read first compressed video frame");
+        require(decoded.pixels.size() == static_cast<std::size_t>(decoded.width) * decoded.height * 3u,
+                "compressed video RGB24 frame");
+        require(compressed_reader.read_next(decoded, error), "read second compressed video frame");
+        require(!compressed_reader.read_next(decoded, error), "compressed video end of stream");
+    }
+#endif
     return 0;
 }

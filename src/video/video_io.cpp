@@ -1,5 +1,9 @@
 #include "video/video_io.h"
 
+#if defined(SEEDVR2_HAS_FFMPEG)
+#include "video/ffmpeg_video_reader.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -198,10 +202,16 @@ public:
     enum class Backend
     {
         Avi,
+#if defined(SEEDVR2_HAS_FFMPEG)
+        Ffmpeg,
+#endif
     };
 
     Backend backend = Backend::Avi;
     AviVideoReader avi;
+#if defined(SEEDVR2_HAS_FFMPEG)
+    std::unique_ptr<FfmpegVideoReader> ffmpeg;
+#endif
 };
 
 VideoReader::~VideoReader() = default;
@@ -218,13 +228,32 @@ bool VideoReader::open(const std::filesystem::path& path, VideoReader& reader, s
     error.clear();
     if (!has_avi_extension(path))
     {
+#if defined(SEEDVR2_HAS_FFMPEG)
+        auto implementation = std::make_unique<Impl>();
+        implementation->backend = Impl::Backend::Ffmpeg;
+        implementation->ffmpeg = std::make_unique<FfmpegVideoReader>();
+        if (!FfmpegVideoReader::open(path, *implementation->ffmpeg, error))
+            return false;
+        reader.impl_ = std::move(implementation);
+        return true;
+#else
         error = "compressed video input requires a build with SEEDVR2_ENABLE_FFMPEG=ON";
         return false;
+#endif
     }
 
     auto implementation = std::make_unique<Impl>();
     if (!AviVideoReader::open(path, implementation->avi, error))
+#if defined(SEEDVR2_HAS_FFMPEG)
+    {
+        implementation->backend = Impl::Backend::Ffmpeg;
+        implementation->ffmpeg = std::make_unique<FfmpegVideoReader>();
+        if (!FfmpegVideoReader::open(path, *implementation->ffmpeg, error))
+            return false;
+    }
+#else
         return false;
+#endif
     reader.impl_ = std::move(implementation);
     return true;
 }
@@ -232,7 +261,13 @@ bool VideoReader::open(const std::filesystem::path& path, VideoReader& reader, s
 const VideoInfo& VideoReader::info() const
 {
     static const VideoInfo empty_info;
-    return impl_ ? impl_->avi.info() : empty_info;
+    if (!impl_)
+        return empty_info;
+#if defined(SEEDVR2_HAS_FFMPEG)
+    if (impl_->backend == Impl::Backend::Ffmpeg)
+        return impl_->ffmpeg->info();
+#endif
+    return impl_->avi.info();
 }
 
 bool VideoReader::read_next(RgbImage& frame, std::string& error)
@@ -243,6 +278,10 @@ bool VideoReader::read_next(RgbImage& frame, std::string& error)
         error = "video reader is not open";
         return false;
     }
+#if defined(SEEDVR2_HAS_FFMPEG)
+    if (impl_->backend == Impl::Backend::Ffmpeg)
+        return impl_->ffmpeg->read_next(frame, error);
+#endif
     return impl_->avi.read_next(frame, error);
 }
 

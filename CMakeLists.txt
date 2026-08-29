@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 project(SeedVR2-ncnn VERSION 0.1.0 LANGUAGES CXX)
 
 option(SEEDVR2_ENABLE_VULKAN "Build ncnn with Vulkan compute support" OFF)
+option(SEEDVR2_ENABLE_FFMPEG "Enable optional FFmpeg video input" OFF)
 option(SEEDVR2_BUILD_TESTS "Build fast native unit and backend tests" OFF)
 option(SEEDVR2_BUILD_INTEGRATION_TESTS "Build model and end-to-end integration tests" OFF)
 option(SEEDVR2_BUILD_BENCHMARKS "Build focused native benchmarks" OFF)
@@ -14,6 +15,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/CMakeLists.txt")
     message(FATAL_ERROR
         "The ncnn submodule is missing. Run: git submodule update --init --recursive")
+endif()
+
+if(SEEDVR2_ENABLE_FFMPEG)
+    find_path(SEEDVR2_FFMPEG_INCLUDE_DIR NAMES libavformat/avformat.h)
+    find_library(SEEDVR2_FFMPEG_AVFORMAT_LIBRARY NAMES avformat)
+    find_library(SEEDVR2_FFMPEG_AVCODEC_LIBRARY NAMES avcodec)
+    find_library(SEEDVR2_FFMPEG_AVUTIL_LIBRARY NAMES avutil)
+    find_library(SEEDVR2_FFMPEG_SWSCALE_LIBRARY NAMES swscale)
+    if(NOT SEEDVR2_FFMPEG_INCLUDE_DIR OR NOT SEEDVR2_FFMPEG_AVFORMAT_LIBRARY OR
+       NOT SEEDVR2_FFMPEG_AVCODEC_LIBRARY OR NOT SEEDVR2_FFMPEG_AVUTIL_LIBRARY OR
+       NOT SEEDVR2_FFMPEG_SWSCALE_LIBRARY)
+        message(FATAL_ERROR
+            "SEEDVR2_ENABLE_FFMPEG=ON requires FFmpeg development headers and shared libraries "
+            "(libavformat, libavcodec, libavutil, libswscale). Install the development package "
+            "or configure with -DSEEDVR2_ENABLE_FFMPEG=OFF.")
+    endif()
+    set(SEEDVR2_FFMPEG_LIBRARIES
+        ${SEEDVR2_FFMPEG_AVFORMAT_LIBRARY}
+        ${SEEDVR2_FFMPEG_AVCODEC_LIBRARY}
+        ${SEEDVR2_FFMPEG_AVUTIL_LIBRARY}
+        ${SEEDVR2_FFMPEG_SWSCALE_LIBRARY})
 endif()
 
 # Keep the first application build focused on the library consumed by SeedVR2.
@@ -35,6 +57,7 @@ add_executable(seedvr2-ncnn
     src/inference/memory_diagnostics.cpp
     src/model/model_registry.cpp
     src/video/video_io.cpp
+    src/video/ffmpeg_video_reader.cpp
     src/awa/awa_layers.cpp
     src/resolution/resolution_plan.cpp
     src/sampler/sampler.cpp
@@ -47,6 +70,11 @@ target_include_directories(seedvr2-ncnn PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
 target_compile_definitions(seedvr2-ncnn PRIVATE
     SEEDVR2_VERSION="${PROJECT_VERSION}")
+if(SEEDVR2_ENABLE_FFMPEG)
+    target_compile_definitions(seedvr2-ncnn PRIVATE SEEDVR2_HAS_FFMPEG=1)
+    target_include_directories(seedvr2-ncnn PRIVATE "${SEEDVR2_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(seedvr2-ncnn PRIVATE ${SEEDVR2_FFMPEG_LIBRARIES})
+endif()
 
 if(SEEDVR2_ENABLE_VULKAN)
     target_sources(seedvr2-ncnn PRIVATE
@@ -193,9 +221,15 @@ if(SEEDVR2_BUILD_TESTS)
 
     add_executable(seedvr2-video-io-test
         tests/unit/cpp/test_video_io.cpp
-        src/video/video_io.cpp)
+        src/video/video_io.cpp
+        src/video/ffmpeg_video_reader.cpp)
     target_include_directories(seedvr2-video-io-test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    if(SEEDVR2_ENABLE_FFMPEG)
+        target_compile_definitions(seedvr2-video-io-test PRIVATE SEEDVR2_HAS_FFMPEG=1)
+        target_include_directories(seedvr2-video-io-test PRIVATE "${SEEDVR2_FFMPEG_INCLUDE_DIR}")
+        target_link_libraries(seedvr2-video-io-test PRIVATE ${SEEDVR2_FFMPEG_LIBRARIES})
+    endif()
     add_test(NAME seedvr2-video-io-test COMMAND seedvr2-video-io-test)
 
     add_executable(seedvr2-awa-benchmark-test
