@@ -102,3 +102,106 @@ jobs:
           path: ${{ runner.temp }}/seedvr2-release/SeedVR2-ncnn-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+  windows-runtime-package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The Windows package is built entirely with the MSYS2 UCRT64 MinGW
+      # toolchain: FFmpeg, ncnn and the runtime DLLs all share the MinGW ABI.
+      # Mixing MSVC and MinGW artefacts is not supported.
+      - name: Install MSYS2 UCRT64 MinGW toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-make \
+            mingw-w64-ucrt-x86_64-nasm \
+            mingw-w64-ucrt-x86_64-vulkan-headers \
+            mingw-w64-ucrt-x86_64-vulkan-loader
+
+      - name: Put the UCRT64 toolchain on PATH
+        id: msys2
+        shell: pwsh
+        run: |
+          $root = @('C:\msys64', 'C:\msys2', 'D:\msys64') |
+            Where-Object { Test-Path (Join-Path $_ 'ucrt64\bin\gcc.exe') } |
+            Select-Object -First 1
+          if (-not $root) { Write-Error 'MSYS2 UCRT64 MinGW toolchain not found'; exit 1 }
+          Write-Host "msys2 root: $root"
+          "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build LGPL FFmpeg runtime
+        shell: pwsh
+        run: |
+          .\packaging\windows\build_ffmpeg_lgpl.ps1 `
+            -Prefix "$env:RUNNER_TEMP\ffmpeg-prefix" `
+            -SourceTarball "$env:RUNNER_TEMP\ffmpeg-8.1.2.tar.xz" `
+            -Jobs 2
+
+      - name: Add the FFmpeg runtime to PATH
+        shell: pwsh
+        run: |
+          "$env:RUNNER_TEMP\ffmpeg-prefix\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Configure Vulkan release build
+        shell: pwsh
+        run: |
+          $prefix = "$env:RUNNER_TEMP\ffmpeg-prefix"
+          cmake -S . -B build-release -G Ninja `
+            -DSEEDVR2_ENABLE_VULKAN=ON `
+            -DSEEDVR2_ENABLE_FFMPEG=ON `
+            -DSEEDVR2_BUILD_TESTS=ON `
+            -DNCNN_OPENMP=ON `
+            -DSEEDVR2_FFMPEG_INCLUDE_DIR="$prefix\include" `
+            -DSEEDVR2_FFMPEG_AVFORMAT_LIBRARY="$prefix\lib\libavformat.dll.a" `
+            -DSEEDVR2_FFMPEG_AVCODEC_LIBRARY="$prefix\lib\libavcodec.dll.a" `
+            -DSEEDVR2_FFMPEG_AVUTIL_LIBRARY="$prefix\lib\libavutil.dll.a" `
+            -DSEEDVR2_FFMPEG_SWSCALE_LIBRARY="$prefix\lib\libswscale.dll.a" `
+            -DCMAKE_SKIP_RPATH=ON `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=gcc.exe `
+            -DCMAKE_CXX_COMPILER=g++.exe
+
+      - name: Build Vulkan release executable
+        shell: pwsh
+        run: |
+          cmake --build build-release --target seedvr2-ncnn seedvr2-cli-test seedvr2-video-io-test --parallel 2
+
+      - name: Run release build checks
+        shell: pwsh
+        run: |
+          ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
+
+      - name: Stage Windows runtime archive
+        shell: pwsh
+        run: |
+          .\packaging\windows\package_runtime.ps1 `
+            -Binary "$env:GITHUB_WORKSPACE\build-release\seedvr2-ncnn.exe" `
+            -FfmpegPrefix "$env:RUNNER_TEMP\ffmpeg-prefix" `
+            -FfmpegSource "$env:RUNNER_TEMP\ffmpeg-8.1.2.tar.xz" `
+            -Output "$env:RUNNER_TEMP\seedvr2-release"
+
+      - name: Validate staged archive contract
+        shell: pwsh
+        run: |
+          .\tests\manual\package\test_windows_runtime_package.ps1 `
+            -PackageDir "$env:RUNNER_TEMP\seedvr2-release\SeedVR2-ncnn-windows-x86_64" `
+            -Archive "$env:RUNNER_TEMP\seedvr2-release\SeedVR2-ncnn-windows-x86_64.zip"
+
+      - name: Upload Windows runtime archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeedVR2-ncnn-windows-x86_64
+          path: ${{ runner.temp }}/seedvr2-release/SeedVR2-ncnn-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7

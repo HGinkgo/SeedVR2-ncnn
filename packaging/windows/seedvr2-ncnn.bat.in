@@ -1,0 +1,29 @@
+@echo off
+rem SeedVR2-ncnn Windows runtime launcher.
+rem
+rem Every path below is resolved from this script's own location, so the
+rem package works regardless of the current working directory.
+
+setlocal
+set "SEEDVR2_PACKAGE_ROOT=%~dp0"
+if "%SEEDVR2_PACKAGE_ROOT:~-1%"=="\" set "SEEDVR2_PACKAGE_ROOT=%SEEDVR2_PACKAGE_ROOT:~0,-1%"
+
+set "SEEDVR2_PAYLOAD=%SEEDVR2_PACKAGE_ROOT%\bin\seedvr2-ncnn.exe"
+set "SEEDVR2_LIB_DIR=%SEEDVR2_PACKAGE_ROOT%\lib"
+
+if not exist "%SEEDVR2_PAYLOAD%" (
+    echo seedvr2-ncnn package is missing its executable payload: "%SEEDVR2_PAYLOAD%" 1>&2
+    exit /b 1
+)
+
+if not exist "%SEEDVR2_LIB_DIR%\" (
+    echo seedvr2-ncnn package is missing its library directory: "%SEEDVR2_LIB_DIR%" 1>&2
+    exit /b 1
+)
+
+rem Prepend the bundled private library directory so the packaged FFmpeg and
+rem MinGW runtime DLLs take precedence over anything else on PATH.
+set "PATH=%SEEDVR2_LIB_DIR%;%PATH%"
+
+"%SEEDVR2_PAYLOAD%" %*
+exit /b %ERRORLEVEL%
