@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,27 @@ private:
     std::uint64_t movi_size_offset_ = 0;
     std::uint64_t movi_data_offset_ = 0;
     std::uint32_t frame_count_ = 0;
+};
+
+class VideoReader final
+{
+public:
+    VideoReader();
+    ~VideoReader();
+
+    VideoReader(const VideoReader&) = delete;
+    VideoReader& operator=(const VideoReader&) = delete;
+    VideoReader(VideoReader&&) noexcept;
+    VideoReader& operator=(VideoReader&&) noexcept;
+
+    static bool open(const std::filesystem::path& path, VideoReader& reader, std::string& error);
+
+    const VideoInfo& info() const;
+    bool read_next(RgbImage& frame, std::string& error);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace seedvr2

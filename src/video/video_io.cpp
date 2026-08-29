@@ -7,12 +7,22 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace seedvr2
 {
 namespace
 {
+
+bool has_avi_extension(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    for (char& value : extension)
+        if (value >= 'A' && value <= 'Z')
+            value = static_cast<char>(value - 'A' + 'a');
+    return extension == ".avi";
+}
 
 bool read_exact(std::FILE* file, void* data, std::size_t size)
 {
@@ -181,6 +191,60 @@ bool patch_u32(std::FILE* file, std::uint64_t offset, std::uint32_t value)
 }
 
 } // namespace
+
+class VideoReader::Impl final
+{
+public:
+    enum class Backend
+    {
+        Avi,
+    };
+
+    Backend backend = Backend::Avi;
+    AviVideoReader avi;
+};
+
+VideoReader::~VideoReader() = default;
+
+VideoReader::VideoReader() = default;
+
+VideoReader::VideoReader(VideoReader&&) noexcept = default;
+
+VideoReader& VideoReader::operator=(VideoReader&&) noexcept = default;
+
+bool VideoReader::open(const std::filesystem::path& path, VideoReader& reader, std::string& error)
+{
+    reader.impl_.reset();
+    error.clear();
+    if (!has_avi_extension(path))
+    {
+        error = "compressed video input requires a build with SEEDVR2_ENABLE_FFMPEG=ON";
+        return false;
+    }
+
+    auto implementation = std::make_unique<Impl>();
+    if (!AviVideoReader::open(path, implementation->avi, error))
+        return false;
+    reader.impl_ = std::move(implementation);
+    return true;
+}
+
+const VideoInfo& VideoReader::info() const
+{
+    static const VideoInfo empty_info;
+    return impl_ ? impl_->avi.info() : empty_info;
+}
+
+bool VideoReader::read_next(RgbImage& frame, std::string& error)
+{
+    if (!impl_)
+    {
+        frame = RgbImage();
+        error = "video reader is not open";
+        return false;
+    }
+    return impl_->avi.read_next(frame, error);
+}
 
 AviVideoReader::~AviVideoReader()
 {

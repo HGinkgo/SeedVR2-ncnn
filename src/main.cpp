@@ -42,13 +42,14 @@ void print_version()
     std::printf("ncnn %s\n", NCNN_VERSION_STRING);
 }
 
-bool has_avi_extension(const std::filesystem::path& path)
+bool has_video_extension(const std::filesystem::path& path)
 {
     std::string extension = path.extension().string();
     for (char& value : extension)
         if (value >= 'A' && value <= 'Z')
             value = static_cast<char>(value - 'A' + 'a');
-    return extension == ".avi";
+    return extension == ".avi" || extension == ".mp4" || extension == ".m4v" || extension == ".mkv" ||
+           extension == ".mov" || extension == ".webm";
 }
 
 } // namespace
@@ -83,10 +84,10 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (has_avi_extension(options.input))
+    if (has_video_extension(options.input))
     {
-        seedvr2::AviVideoReader reader;
-        if (!seedvr2::AviVideoReader::open(options.input, reader, error))
+        seedvr2::VideoReader reader;
+        if (!seedvr2::VideoReader::open(options.input, reader, error))
         {
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
@@ -99,7 +100,7 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
         }
-        if (!has_avi_extension(options.output))
+        if (!has_video_extension(options.output) || options.output.extension() != ".avi")
         {
             std::fprintf(stderr, "error: AVI input requires an AVI output path\n");
             return 1;

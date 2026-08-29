@@ -36,6 +36,12 @@ int main()
     require(error.find("AVI") != std::string::npos, "malformed AVI error");
     std::remove(path.string().c_str());
 
+    seedvr2::VideoReader generic_reader;
+    require(!seedvr2::VideoReader::open("sample.mp4", generic_reader, error),
+            "reject compressed input without FFmpeg");
+    require(error.find("SEEDVR2_ENABLE_FFMPEG") != std::string::npos,
+            "explain FFmpeg build option");
+
     const std::filesystem::path roundtrip = std::filesystem::temp_directory_path() / "seedvr2-roundtrip.avi";
     seedvr2::VideoInfo info;
     info.width = 2;
