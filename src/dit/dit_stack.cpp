@@ -1,7 +1,10 @@
 #include "dit/dit_stack.h"
 
 #include <cstdio>
+#include <memory>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "awa/awa_layers.h"
 #include "datareader.h"
@@ -177,6 +180,79 @@ bool batch_to_matrix_gpu(const ncnn::VkMat& batch, ncnn::VulkanDevice* vkdev, co
 }
 
 } // namespace
+
+struct DitStackSession::Impl
+{
+    ncnn::VulkanDevice* vkdev = nullptr;
+    ncnn::VkAllocator* blob_allocator = nullptr;
+    ncnn::VkAllocator* staging_allocator = nullptr;
+    ncnn::Net dit_input;
+    ncnn::Net dit_embedding;
+    ncnn::Net packing;
+    std::vector<std::unique_ptr<ncnn::Net>> blocks;
+    ncnn::Net dit_output;
+
+    void clear()
+    {
+        dit_output.clear();
+        for (auto& block : blocks)
+            if (block)
+                block->clear();
+        blocks.clear();
+        packing.clear();
+        dit_embedding.clear();
+        dit_input.clear();
+    }
+};
+
+DitStackSession::DitStackSession() = default;
+
+DitStackSession::~DitStackSession()
+{
+    if (impl_)
+        impl_->clear();
+}
+
+DitStackSession::DitStackSession(DitStackSession&&) noexcept = default;
+
+DitStackSession& DitStackSession::operator=(DitStackSession&&) noexcept = default;
+
+bool DitStackSession::open(const std::string& stack_dir,
+                           const ResolutionPlan& plan,
+                           ncnn::VulkanDevice* vkdev,
+                           ncnn::VkAllocator* blob_allocator,
+                           ncnn::VkAllocator* staging_allocator,
+                           DitStackSession& session)
+{
+    if (!vkdev || !blob_allocator || !staging_allocator || plan.video_tokens <= 0)
+        return false;
+
+    std::unique_ptr<Impl> candidate(new Impl);
+    candidate->vkdev = vkdev;
+    candidate->blob_allocator = blob_allocator;
+    candidate->staging_allocator = staging_allocator;
+    if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator) ||
+        !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
+                    staging_allocator) ||
+        !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator))
+        return false;
+
+    candidate->blocks.reserve(32);
+    for (int block_index = 0; block_index < 32; block_index++)
+    {
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s/dit_block_%02d", stack_dir.c_str(), block_index);
+        std::unique_ptr<ncnn::Net> block(new ncnn::Net);
+        if (!load_graph(*block, name, vkdev, blob_allocator, staging_allocator))
+            return false;
+        candidate->blocks.push_back(std::move(block));
+    }
+    if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator))
+        return false;
+
+    session.impl_ = std::move(candidate);
+    return true;
+}
 
 bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
                                 const ncnn::VkMat& condition,
@@ -472,18 +548,18 @@ bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
                              staging_allocator, output_matrix_gpu);
 }
 
-bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       const ResolutionPlan& plan,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu)
+bool DitStackSession::run(const ncnn::VkMat& input_patches,
+                          const ncnn::Mat& text,
+                          float timestep_value,
+                          const ResolutionPlan& plan,
+                          ncnn::VkMat& output_matrix_gpu) const
 {
-    if (!vkdev || !blob_allocator || !staging_allocator)
+    if (!impl_ || !impl_->vkdev || !impl_->blob_allocator || !impl_->staging_allocator)
         return false;
+
+    ncnn::VulkanDevice* vkdev = impl_->vkdev;
+    ncnn::VkAllocator* blob_allocator = impl_->blob_allocator;
+    ncnn::VkAllocator* staging_allocator = impl_->staging_allocator;
 
     ncnn::Option input_opt;
     input_opt.use_vulkan_compute = true;
@@ -517,16 +593,9 @@ bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
 
     ncnn::Mat timestep(1);
     timestep[0] = timestep_value;
-    ncnn::Net dit_input;
-    ncnn::Net dit_embedding;
-    ncnn::Net packing;
-    if (!load_graph(dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator) ||
-        !load_graph(dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator, staging_allocator) ||
-        !load_packing_graph(packing, vkdev, blob_allocator, staging_allocator))
-    {
-        std::fprintf(stderr, "run_dit_stack_gpu: failed to load stack entry graphs\n");
-        return false;
-    }
+    ncnn::Net& dit_input = impl_->dit_input;
+    ncnn::Net& dit_embedding = impl_->dit_embedding;
+    ncnn::Net& packing = impl_->packing;
 
     ncnn::VkMat video_packed;
     ncnn::VkMat text_packed;
@@ -586,14 +655,7 @@ bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
 
     for (int block_index = 0; block_index < 32; block_index++)
     {
-        char name[64];
-        std::snprintf(name, sizeof(name), "%s/dit_block_%02d", stack_dir.c_str(), block_index);
-        ncnn::Net block;
-        if (!load_graph(block, name, vkdev, blob_allocator, staging_allocator))
-        {
-            std::fprintf(stderr, "run_dit_stack_gpu: failed to load block %d\n", block_index);
-            return false;
-        }
+        ncnn::Net& block = *impl_->blocks[block_index];
         ncnn::Extractor extractor = block.create_extractor();
         extractor.set_light_mode(false);
         ncnn::VkMat next_video;
@@ -618,12 +680,7 @@ bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
         text_gpu = next_text;
     }
 
-    ncnn::Net dit_output;
-    if (!load_graph(dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator))
-    {
-        std::fprintf(stderr, "run_dit_stack_gpu: failed to load output graph\n");
-        return false;
-    }
+    ncnn::Net& dit_output = impl_->dit_output;
     ncnn::VkMat video_unpacked;
     if (!unpack_to_pack1(packing, video_gpu, vkdev, video_unpacked))
     {
@@ -654,6 +711,21 @@ bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
         return false;
     }
     return true;
+}
+
+bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
+                       const ncnn::Mat& text,
+                       float timestep_value,
+                       const std::string& stack_dir,
+                       const ResolutionPlan& plan,
+                       ncnn::VulkanDevice* vkdev,
+                       ncnn::VkAllocator* blob_allocator,
+                       ncnn::VkAllocator* staging_allocator,
+                       ncnn::VkMat& output_matrix_gpu)
+{
+    DitStackSession session;
+    return DitStackSession::open(stack_dir, plan, vkdev, blob_allocator, staging_allocator, session) &&
+           session.run(input_patches, text, timestep_value, plan, output_matrix_gpu);
 }
 
 bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,

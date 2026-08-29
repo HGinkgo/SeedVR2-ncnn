@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <memory>
 
 #include "io/image_io.h"
 #include "model/model_registry.h"
@@ -9,6 +10,30 @@
 
 namespace seedvr2
 {
+
+class ImageInferenceSession final
+{
+public:
+    ImageInferenceSession();
+    ~ImageInferenceSession();
+    ImageInferenceSession(ImageInferenceSession&&) noexcept;
+    ImageInferenceSession& operator=(ImageInferenceSession&&) noexcept;
+    ImageInferenceSession(const ImageInferenceSession&) = delete;
+    ImageInferenceSession& operator=(const ImageInferenceSession&) = delete;
+
+    static bool open(const ModelGraphSet& graphs,
+                     const ResolutionPlan& plan,
+                     int gpu_id,
+                     ImageInferenceSession& session,
+                     std::string& error,
+                     std::uint32_t memory_budget_mib = 0);
+
+    bool run_frame(const RgbImage& input, RgbImage& output, std::string& error) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // Run the product single-image path for one resolved model variant.
 // The output is RGB8 in the requested target dimensions.

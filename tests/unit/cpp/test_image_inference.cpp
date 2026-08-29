@@ -23,5 +23,15 @@ int main()
     assert(!ok);
     assert(error == "image inference requires a Vulkan-enabled build");
 #endif
+
+    seedvr2::ImageInferenceSession session;
+    error.clear();
+    const bool session_ok = seedvr2::ImageInferenceSession::open(graphs, plan, -1, session, error);
+#if NCNN_VULKAN
+    (void)session_ok;
+#else
+    assert(!session_ok);
+    assert(error == "image inference requires a Vulkan-enabled build");
+#endif
     return 0;
 }

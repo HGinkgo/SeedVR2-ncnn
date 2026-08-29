@@ -124,6 +124,14 @@ int main(int argc, char** argv)
             return 1;
         }
 
+        seedvr2::ImageInferenceSession session;
+        if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
+                                                  options.memory_budget_mib))
+        {
+            std::fprintf(stderr, "error: stage=video-inference-init: %s\n", error.c_str());
+            return 1;
+        }
+
         int processed_frames = 0;
         for (;;)
         {
@@ -139,8 +147,7 @@ int main(int argc, char** argv)
             }
             std::fprintf(stderr, "stage=video-frame index=%d\n", processed_frames);
             seedvr2::RgbImage output_frame;
-            if (!seedvr2::run_image_inference(graphs, frame, resolution_plan, options.gpu_id, output_frame, error,
-                                              options.memory_budget_mib))
+            if (!session.run_frame(frame, output_frame, error))
             {
                 std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
                              error.c_str());
