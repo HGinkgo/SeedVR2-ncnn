@@ -34,6 +34,10 @@ The CLI supports PNG/JPEG images and frame-by-frame processing of uncompressed R
 
 Vulkan inference requires a Vulkan-capable GPU and driver. Model weights are distributed separately; the current FP32 model package needs roughly 10 GiB or more of Vulkan heap, and insufficient memory is reported as an allocation failure. Windows GPU drivers are not bundled.
 
+## Model
+
+The model package is hosted on [ModelScope](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn). Download `model-package-128-materialized.tar.zst`, extract it as described in the model repository `README.md`, and pass the extracted directory with `--model-dir`.
+
 ## Layout
 
 ```text
