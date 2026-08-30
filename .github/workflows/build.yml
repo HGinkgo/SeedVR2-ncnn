@@ -43,7 +43,8 @@ jobs:
         run: bash tests/smoke.sh ./build/seedvr2-ncnn
 
   linux-runtime-package:
-    runs-on: ubuntu-latest
+    # Build on the oldest supported glibc baseline for portable archives.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
       contents: read

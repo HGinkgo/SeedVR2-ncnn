@@ -34,6 +34,8 @@ bash tests/smoke.sh ./build/seedvr2-ncnn
 
 Vulkan 运行需要支持 Vulkan 的 GPU 和驱动。模型权重单独分发；当前 FP32 模型包需要约 10 GiB 以上的 Vulkan heap，显存不足时程序会报告分配失败。Windows GPU 驱动不随运行包分发。
 
+Linux x86_64 runtime 以 Ubuntu 22.04（glibc 2.35）为兼容基线构建；较旧发行版可能需要自行构建。
+
 ## 模型
 
 模型包托管在 [ModelScope](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)。下载 `model-package-128-materialized.tar.zst` 后，按模型仓库中的 `README.md` 解包并通过 `--model-dir` 指定。

@@ -149,6 +149,12 @@ case "$1" in
             exit 1
         fi
 
+        if readelf --version-info "$release_root/bin/seedvr2-ncnn" | \
+            grep -Eq 'GLIBC_2\.(3[6-9]|[4-9][0-9])'; then
+            printf '%s\n' "FAIL: staged executable requires glibc newer than the Ubuntu 22.04 release baseline" >&2
+            exit 1
+        fi
+
         if ! grep -Fq '  lib/libavformat.so' "$release_root/manifest.sha256"; then
             printf '%s\n' "FAIL: manifest does not cover FFmpeg library links" >&2
             exit 1
