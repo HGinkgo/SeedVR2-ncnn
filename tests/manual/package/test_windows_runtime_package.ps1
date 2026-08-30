@@ -7,9 +7,9 @@
 # packaging/windows/package_runtime.ps1.
 #
 # Usage:
-#   test_windows_runtime_package.ps1 -PackageDir <dir> -Archive <path> [-SkipGpuSmoke]
+#   test_windows_runtime_package.ps1 -PackageDir <dir> -Archive <path> [-Msys2Root <path>]
 #   test_windows_runtime_package.ps1 -ReleaseSmoke -Binary <path> -FfmpegPrefix <path>
-#                                    -FfmpegSource <path> -Output <dir>
+#                                    -FfmpegSource <path> -Output <dir> [-Msys2Root <path>]
 
 [CmdletBinding()]
 param(
@@ -19,6 +19,7 @@ param(
     [string]$FfmpegPrefix,
     [string]$FfmpegSource,
     [string]$Output,
+    [string]$Msys2Root,
     [switch]$ReleaseSmoke
 )
 
@@ -48,8 +49,14 @@ if ($ReleaseSmoke) {
     if (-not (Test-Path $packageScript)) { Fail "package script is missing: $packageScript" }
 
     Write-Host "staging release package"
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File $packageScript `
-        -Binary $Binary -FfmpegPrefix $FfmpegPrefix -FfmpegSource $FfmpegSource -Output $Output
+    $packageArguments = @(
+        '-Binary', $Binary,
+        '-FfmpegPrefix', $FfmpegPrefix,
+        '-FfmpegSource', $FfmpegSource,
+        '-Output', $Output
+    )
+    if ($Msys2Root) { $packageArguments += @('-Msys2Root', $Msys2Root) }
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $packageScript @packageArguments
     if ($LASTEXITCODE -ne 0) { Fail "package_runtime.ps1 exited with $LASTEXITCODE" }
 
     $PackageDir = Join-Path ([System.IO.Path]::GetFullPath($Output)) $PackageName
@@ -256,6 +263,68 @@ $modelReadme = Get-Content -LiteralPath (Join-Path $packageFull 'models/README.m
 if ($modelReadme -notmatch 'seedvr2-3b') { Fail "models/README.md does not reference seedvr2-3b" }
 if ($modelReadme -notmatch 'separately') { Fail "models/README.md does not state that weights ship separately" }
 Pass "models/README.md documents the separate model package"
+
+# ---------------------------------------------------------------------------
+# 7. The extracted ZIP is self-contained.
+#
+#    Every check above inspects the staged tree. Users receive the ZIP, so the
+#    archive is verified on its own: extract it to a fresh temporary directory
+#    and run the *extracted* launcher with a clean PATH from an unrelated
+#    working directory. ExtractToDirectory creates the destination itself and
+#    fails if it already exists, so it must not be pre-created.
+# ---------------------------------------------------------------------------
+$extractRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("seedvr2-zip-verify-" + [guid]::NewGuid().ToString('N'))
+
+try {
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($archiveFull, $extractRoot)
+
+    $extractedPackage = Join-Path $extractRoot $PackageName
+    $extractedLauncher = Join-Path $extractedPackage 'seedvr2-ncnn.bat'
+    $extractedPayload = Join-Path $extractedPackage 'bin/seedvr2-ncnn.exe'
+    $extractedLib = Join-Path $extractedPackage 'lib'
+
+    if (-not (Test-Path $extractedLauncher -PathType Leaf)) {
+        Fail "extracted archive is missing seedvr2-ncnn.bat: $extractedLauncher"
+    }
+    if (-not (Test-Path $extractedPayload -PathType Leaf)) {
+        Fail "extracted archive is missing bin/seedvr2-ncnn.exe"
+    }
+    if (-not (Test-Path $extractedLib -PathType Container)) {
+        Fail "extracted archive is missing lib/"
+    }
+
+    # The launcher alone proves nothing; the payload DLLs have to travel with it.
+    foreach ($library in @('avformat', 'avcodec', 'avutil', 'swscale')) {
+        if (-not (Get-ChildItem -Path $extractedLib -Filter "$library-*.dll" -File -ErrorAction SilentlyContinue)) {
+            Fail "extracted archive is missing $library-*.dll in lib/"
+        }
+    }
+
+    $savedPath = $env:PATH
+    $savedLocation = Get-Location
+    try {
+        $env:PATH = 'C:\Windows\System32;C:\Windows'
+        Set-Location 'C:\Windows'
+        $zipOutput = & cmd.exe /c "`"$extractedLauncher`" --help" 2>&1
+        $zipExit = $LASTEXITCODE
+    }
+    finally {
+        Set-Location $savedLocation
+        $env:PATH = $savedPath
+    }
+
+    if ($zipExit -ne 0) {
+        Fail "extracted seedvr2-ncnn.bat --help exited with $zipExit"
+    }
+    $zipText = $zipOutput -join "`n"
+    if ($zipText -notmatch 'Usage: seedvr2-ncnn') {
+        Fail "extracted launcher help output does not contain 'Usage: seedvr2-ncnn'"
+    }
+    Pass "extracted ZIP launcher runs from C:\Windows with a clean PATH"
+}
+finally {
+    Remove-Item -Recurse -Force $extractRoot -ErrorAction SilentlyContinue
+}
 
 Write-Host "PASS: Windows runtime package contract" -ForegroundColor Green
 exit 0

@@ -109,6 +109,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # MSYS2 tooling expects the line endings stored in the repository, so
+      # disable CRLF conversion before the checkout runs.
+      - name: Keep repository line endings
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
       - name: Check out source and submodules
         uses: actions/checkout@v4
         with:
@@ -117,35 +123,61 @@ jobs:
       # The Windows package is built entirely with the MSYS2 UCRT64 MinGW
       # toolchain: FFmpeg, ncnn and the runtime DLLs all share the MinGW ABI.
       # Mixing MSVC and MinGW artefacts is not supported.
-      - name: Install MSYS2 UCRT64 MinGW toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          pacman -Sy --noconfirm
-          pacman -S --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-gcc \
-            mingw-w64-ucrt-x86_64-make \
-            mingw-w64-ucrt-x86_64-nasm \
-            mingw-w64-ucrt-x86_64-vulkan-headers \
+      # ncnn compiles the glslang submodule it vendors, so no system glslang
+      # package is needed here.
+      - name: Set up MSYS2 UCRT64
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: minimal
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-headers
             mingw-w64-ucrt-x86_64-vulkan-loader
 
+      # setup-msys2 only exposes the MSYS2 userland on PATH; the UCRT64 MinGW
+      # binaries live under a location reported by the action.
       - name: Put the UCRT64 toolchain on PATH
-        id: msys2
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         shell: pwsh
         run: |
-          $root = @('C:\msys64', 'C:\msys2', 'D:\msys64') |
-            Where-Object { Test-Path (Join-Path $_ 'ucrt64\bin\gcc.exe') } |
-            Select-Object -First 1
-          if (-not $root) { Write-Error 'MSYS2 UCRT64 MinGW toolchain not found'; exit 1 }
-          Write-Host "msys2 root: $root"
-          "$root\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (-not $env:MSYS2_LOCATION) {
+            Write-Error 'setup-msys2 did not report msys2-location'; exit 1
+          }
+          $bin = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          if (-not (Test-Path (Join-Path $bin 'gcc.exe'))) {
+            Write-Error "UCRT64 gcc is missing under: $bin"; exit 1
+          }
+          Write-Host "ucrt64 bin: $bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Fail loudly rather than silently building with a foreign toolchain.
+      - name: Verify MinGW toolchain resolution
+        shell: pwsh
+        run: |
+          $machine = (gcc -dumpmachine).Trim()
+          Write-Host "gcc -dumpmachine: $machine"
+          if ($machine -ne 'x86_64-w64-mingw32') {
+            Write-Error "expected the UCRT64 MinGW compiler, resolved to: $machine"; exit 1
+          }
 
       - name: Build LGPL FFmpeg runtime
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         shell: pwsh
         run: |
           .\packaging\windows\build_ffmpeg_lgpl.ps1 `
             -Prefix "$env:RUNNER_TEMP\ffmpeg-prefix" `
             -SourceTarball "$env:RUNNER_TEMP\ffmpeg-8.1.2.tar.xz" `
+            -Msys2Root $env:MSYS2_LOCATION `
             -Jobs 2
 
       - name: Add the FFmpeg runtime to PATH
@@ -183,12 +215,15 @@ jobs:
           ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
 
       - name: Stage Windows runtime archive
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         shell: pwsh
         run: |
           .\packaging\windows\package_runtime.ps1 `
             -Binary "$env:GITHUB_WORKSPACE\build-release\seedvr2-ncnn.exe" `
             -FfmpegPrefix "$env:RUNNER_TEMP\ffmpeg-prefix" `
             -FfmpegSource "$env:RUNNER_TEMP\ffmpeg-8.1.2.tar.xz" `
+            -Msys2Root $env:MSYS2_LOCATION `
             -Output "$env:RUNNER_TEMP\seedvr2-release"
 
       - name: Validate staged archive contract
