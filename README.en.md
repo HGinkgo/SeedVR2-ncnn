@@ -30,6 +30,10 @@ bash tests/smoke.sh ./build/seedvr2-ncnn
 
 The CLI supports PNG/JPEG images and frame-by-frame processing of uncompressed RGB24 AVI. With FFmpeg enabled, common compressed video inputs are also accepted; video output remains RGB24 AVI. Image inference uses the Vulkan build and shape-aware model directories. Use `--memory-budget-mib` to require a minimum Vulkan heap budget before running (default `0`, disabled).
 
+## Hardware
+
+Vulkan inference requires a Vulkan-capable GPU and driver. Model weights are distributed separately; the current FP32 model package needs roughly 10 GiB or more of Vulkan heap, and insufficient memory is reported as an allocation failure. Windows GPU drivers are not bundled.
+
 ## Layout
 
 ```text

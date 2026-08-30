@@ -30,6 +30,10 @@ bash tests/smoke.sh ./build/seedvr2-ncnn
 
 当前 CLI 支持 PNG/JPEG 图片，以及逐帧处理未压缩 RGB24 AVI。启用 FFmpeg 后可读取常见压缩视频；视频输出仍为 RGB24 AVI。单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。可用 `--memory-budget-mib` 设置运行前的最小 Vulkan 显存预算（默认 `0`，不预检）。
 
+## 硬件要求
+
+Vulkan 运行需要支持 Vulkan 的 GPU 和驱动。模型权重单独分发；当前 FP32 模型包需要约 10 GiB 以上的 Vulkan heap，显存不足时程序会报告分配失败。Windows GPU 驱动不随运行包分发。
+
 ## 目录
 
 ```text
