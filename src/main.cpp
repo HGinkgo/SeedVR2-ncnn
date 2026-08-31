@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -9,6 +10,7 @@
 #include "awa/awa_layers.h"
 #include "cli/cli.h"
 #include "inference/image_inference.h"
+#include "inference/performance_profile.h"
 #include "io/image_io.h"
 #include "model/model_registry.h"
 #include "resolution/resolution_plan.h"
@@ -32,6 +34,7 @@ void print_usage()
     std::puts("  --height     Explicit output height (optional)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
     std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");
+    std::puts("  --profile     Print opt-in stage timings to stderr (default: off)");
 }
 
 void print_version()
@@ -78,6 +81,11 @@ int main(int argc, char** argv)
         print_version();
         return 0;
     }
+
+    // Profiling is opt-in. When it is off the profile object stays disabled and
+    // every measurement below becomes a no-op.
+    const seedvr2::PerformanceProfile profile(options.profile);
+    const auto run_start = seedvr2::PerformanceProfile::Clock::now();
 
     seedvr2::ModelRegistry registry;
     if (!seedvr2::ModelRegistry::open(options.model_dir, registry, error))
@@ -129,7 +137,7 @@ int main(int argc, char** argv)
 
         seedvr2::ImageInferenceSession session;
         if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
-                                                  options.memory_budget_mib))
+                                                  options.memory_budget_mib, &profile))
         {
             std::fprintf(stderr, "error: stage=video-inference-init: %s\n", error.c_str());
             return 1;
@@ -139,22 +147,25 @@ int main(int argc, char** argv)
         for (;;)
         {
             std::vector<seedvr2::RgbImage> input_frames;
-            for (std::size_t batch_index = 0; batch_index < seedvr2::ImageInferenceSession::kMaxBatchFrames;
-                 batch_index++)
             {
-                seedvr2::RgbImage frame;
-                if (!reader.read_next(frame, error))
+                const seedvr2::ProfileScope read_scope(profile, "video-read");
+                for (std::size_t batch_index = 0; batch_index < seedvr2::ImageInferenceSession::kMaxBatchFrames;
+                     batch_index++)
                 {
-                    if (!error.empty())
+                    seedvr2::RgbImage frame;
+                    if (!reader.read_next(frame, error))
                     {
-                        std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
-                        return 1;
+                        if (!error.empty())
+                        {
+                            std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
+                            return 1;
+                        }
+                        break;
                     }
-                    break;
+                    std::fprintf(stderr, "stage=video-frame index=%d\n",
+                                 processed_frames + static_cast<int>(input_frames.size()));
+                    input_frames.push_back(std::move(frame));
                 }
-                std::fprintf(stderr, "stage=video-frame index=%d\n",
-                             processed_frames + static_cast<int>(input_frames.size()));
-                input_frames.push_back(std::move(frame));
             }
 
             if (input_frames.empty())
@@ -162,11 +173,19 @@ int main(int argc, char** argv)
 
             std::fprintf(stderr, "stage=video-batch start=%d frames=%zu\n", processed_frames, input_frames.size());
             std::vector<seedvr2::RgbImage> output_frames;
-            if (!session.run_batch(input_frames, output_frames, error))
             {
-                std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
-                             error.c_str());
-                return 1;
+                const auto batch_start = seedvr2::PerformanceProfile::Clock::now();
+                const bool batch_ok =
+                    session.run_batch(input_frames, output_frames, error,
+                                      static_cast<std::size_t>(processed_frames));
+                profile.report_batch("video-batch", input_frames.size(),
+                                     profile.elapsed_ms(batch_start));
+                if (!batch_ok)
+                {
+                    std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
+                                 error.c_str());
+                    return 1;
+                }
             }
             if (output_frames.size() != input_frames.size())
             {
@@ -174,13 +193,16 @@ int main(int argc, char** argv)
                              processed_frames);
                 return 1;
             }
-            for (std::size_t frame_index = 0; frame_index < output_frames.size(); frame_index++)
             {
-                if (!writer.write_frame(output_frames[frame_index], error))
+                const seedvr2::ProfileScope write_scope(profile, "video-write");
+                for (std::size_t frame_index = 0; frame_index < output_frames.size(); frame_index++)
                 {
-                    std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n",
-                                 processed_frames + static_cast<int>(frame_index), error.c_str());
-                    return 1;
+                    if (!writer.write_frame(output_frames[frame_index], error))
+                    {
+                        std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n",
+                                     processed_frames + static_cast<int>(frame_index), error.c_str());
+                        return 1;
+                    }
                 }
             }
             processed_frames += static_cast<int>(output_frames.size());
@@ -196,15 +218,19 @@ int main(int argc, char** argv)
             return 1;
         }
         std::fprintf(stderr, "output=%s frames=%d\n", options.output.string().c_str(), processed_frames);
+        profile.report_total(profile.elapsed_ms(run_start));
         std::puts("seedvr2-video-inference: ok");
         return 0;
     }
 
     seedvr2::RgbImage input_image;
-    if (!seedvr2::load_rgb_image(options.input, input_image, error))
     {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
+        const seedvr2::ProfileScope read_scope(profile, "image-read");
+        if (!seedvr2::load_rgb_image(options.input, input_image, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
     }
 
     seedvr2::ResolutionPlan resolution_plan;
@@ -226,18 +252,22 @@ int main(int argc, char** argv)
 
     seedvr2::RgbImage output_image;
     if (!seedvr2::run_image_inference(graphs, input_image, resolution_plan, options.gpu_id, output_image, error,
-                                      options.memory_budget_mib))
+                                      options.memory_budget_mib, &profile))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
-    if (!seedvr2::save_rgb_image(options.output, output_image, error))
     {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
+        const seedvr2::ProfileScope write_scope(profile, "image-write");
+        if (!seedvr2::save_rgb_image(options.output, output_image, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
     }
 
     std::fprintf(stderr, "output=%s\n", options.output.string().c_str());
+    profile.report_total(profile.elapsed_ms(run_start));
     std::puts("seedvr2-image-inference: ok");
     return 0;
 }
