@@ -1,4 +1,8 @@
 import json
+import struct
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -13,10 +17,25 @@ from tools.reference.awa_window import AwaWindowPartition, AwaWindowReverse
 from tools.reference.seedvr2_baseline import (
     awa_round_trip,
     build_manifest,
+    configure_vae_precision,
     make_reference_input,
     make_windows,
     save_tensor,
 )
+
+
+def _read_portable_records(path: Path):
+    with path.open("rb") as source:
+        magic, version, record_count = struct.unpack("<8sII", source.read(16))
+        assert magic == b"SVR2F32\0"
+        assert version == 1
+        records = {}
+        for _ in range(record_count):
+            name_length, rank, _reserved, value_count, *shape = struct.unpack("<HBBQ4Q", source.read(44))
+            name = source.read(name_length).decode("utf-8")
+            values = torch.frombuffer(bytearray(source.read(value_count * 4)), dtype=torch.float32).clone()
+            records[name] = (tuple(shape[:rank]), values)
+    return records
 
 
 def test_awa_window_contract_includes_clipped_boundaries():
@@ -135,3 +154,53 @@ def test_reference_artifacts_are_deterministic_and_checksummed(tmp_path):
     assert digest == manifest["artifacts"]["tensor"]["sha256"]
     assert manifest["artifacts"]["tensor"]["shape"] == [1, 2]
     json.dumps(manifest)
+
+
+def test_export_fp32_precision_converts_the_loaded_vae_before_reference_execution():
+    vae = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.bfloat16)
+
+    execution_dtype = configure_vae_precision(vae, "export-fp32")
+
+    assert execution_dtype == torch.float32
+    assert next(vae.parameters()).dtype == torch.float32
+
+
+def test_vae_records_command_converts_thwc_latent_to_cthw_portable_golden(tmp_path):
+    input_tensor = torch.arange(3 * 1 * 2 * 3, dtype=torch.float32).reshape(3, 1, 2, 3)
+    latent_thwc = torch.arange(1 * 1 * 2 * 16, dtype=torch.float32).reshape(1, 1, 2, 16)
+    reconstruction = torch.arange(100, 100 + 3 * 1 * 2 * 3, dtype=torch.float32).reshape(3, 1, 2, 3)
+    input_path = tmp_path / "input.pt"
+    latent_path = tmp_path / "latent.pt"
+    reconstruction_path = tmp_path / "reconstruction.pt"
+    output_path = tmp_path / "vae_golden.f32"
+    torch.save(input_tensor, input_path)
+    torch.save(latent_thwc, latent_path)
+    torch.save(reconstruction, reconstruction_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/reference/seedvr2_baseline.py",
+            "vae-records",
+            "--input",
+            str(input_path),
+            "--latent",
+            str(latent_path),
+            "--reconstruction",
+            str(reconstruction_path),
+            "--output",
+            str(output_path),
+        ],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    records = _read_portable_records(output_path)
+    assert records["input"][0] == (3, 1, 2, 3)
+    assert torch.equal(records["input"][1], input_tensor.reshape(-1))
+    assert records["latent"][0] == (16, 1, 1, 2)
+    assert torch.equal(records["latent"][1], latent_thwc.permute(3, 0, 1, 2).reshape(-1))
+    assert records["reconstruction"][0] == (3, 1, 2, 3)
+    assert torch.equal(records["reconstruction"][1], reconstruction.reshape(-1))
