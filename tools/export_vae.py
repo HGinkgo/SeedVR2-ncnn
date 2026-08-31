@@ -12,6 +12,26 @@ import torch
 from torch import nn
 
 
+def migrate_legacy_depth_to_space_params(param_path: Path) -> bool:
+    """Correct the asymmetric upsample axis order emitted by older exports."""
+
+    param_path = Path(param_path)
+    lines = param_path.read_text().splitlines()
+    changed = False
+    rewritten: list[str] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 9 and fields[0] == "SeedVR2DepthToSpace":
+            parameters = {field.partition("=")[0]: field.partition("=")[2] for field in fields[6:] if "=" in field}
+            if parameters.get("0") == "1" and parameters.get("1") == "2" and parameters.get("2") == "2":
+                fields = ["0=2" if field == "0=1" else "2=1" if field == "2=2" else field for field in fields]
+                changed = True
+        rewritten.append(" ".join(fields) if fields else line)
+    if changed:
+        param_path.write_text("\n".join(rewritten) + "\n")
+    return changed
+
+
 def rewrite_ncnn_param(param_path: Path) -> None:
     """Replace fixed-shape causal tile/concat triples with one custom layer.
 
@@ -20,6 +40,7 @@ def rewrite_ncnn_param(param_path: Path) -> None:
     generated ncnn binary remains valid without rewriting its data order.
     """
 
+    migrate_legacy_depth_to_space_params(param_path)
     lines = param_path.read_text().splitlines()
     if len(lines) < 2 or lines[0] != "7767517":
         raise ValueError(f"unexpected ncnn param header: {param_path}")
@@ -133,7 +154,9 @@ def rewrite_ncnn_param(param_path: Path) -> None:
             and tile[4] == split[6]
         )
         if is_depth_to_space:
-            _, _, _, _, x, y, z = depth_shape
+            # PNNX stores the trailing rearrange factors as temporal, width,
+            # height. SeedVR2DepthToSpace consumes height, width, temporal.
+            _, _, _, _, z, y, x = depth_shape
             rewritten.append(
                 f"SeedVR2DepthToSpace depth_to_space_{depth_to_space_replacements} 1 1 "
                 f"{reshape[4]} {output_reshape[5]} 0={x} 1={y} 2={z}"
@@ -228,6 +251,141 @@ def rewrite_ncnn_param(param_path: Path) -> None:
     fused.insert(0, lines[0])
     fused.insert(1, f"{layer_count} {header[1]}")
     param_path.write_text("\n".join(fused) + "\n")
+
+
+def normalize_dynamic_vae_template(param_path: Path) -> None:
+    """Replace VAE spatial reshapes with expressions evaluated by ncnn at runtime."""
+
+    param_path = Path(param_path)
+    lines = param_path.read_text().splitlines()
+    if len(lines) < 2 or lines[0] != "7767517":
+        raise ValueError(f"unexpected ncnn param header: {param_path}")
+
+    def parse_layer(line: str) -> dict[str, object]:
+        fields = line.split()
+        if len(fields) < 4:
+            raise ValueError(f"invalid ncnn layer line: {line}")
+        try:
+            bottom_count = int(fields[2])
+            top_count = int(fields[3])
+        except ValueError as exc:
+            raise ValueError(f"invalid ncnn blob counts: {line}") from exc
+        parameter_start = 4 + bottom_count + top_count
+        if bottom_count < 0 or top_count < 0 or len(fields) < parameter_start:
+            raise ValueError(f"invalid ncnn blob declaration: {line}")
+        return {
+            "fields": fields,
+            "bottom_count": bottom_count,
+            "top_count": top_count,
+            "bottoms": tuple(fields[4 : 4 + bottom_count]),
+            "tops": tuple(fields[4 + bottom_count : parameter_start]),
+            "parameter_start": parameter_start,
+        }
+
+    def parameters(layer: dict[str, object]) -> dict[str, str]:
+        fields = layer["fields"]
+        parameter_start = layer["parameter_start"]
+        assert isinstance(fields, list) and isinstance(parameter_start, int)
+        values: dict[str, str] = {}
+        for field in fields[parameter_start:]:
+            key, separator, value = field.partition("=")
+            if separator:
+                values[key] = value
+        return values
+
+    def set_shape_expr(layer: dict[str, object], expression: str, shape_reference: str | None = None) -> None:
+        fields = layer["fields"]
+        bottom_count = layer["bottom_count"]
+        top_count = layer["top_count"]
+        bottoms = layer["bottoms"]
+        tops = layer["tops"]
+        parameter_start = layer["parameter_start"]
+        assert isinstance(fields, list) and isinstance(bottom_count, int) and isinstance(top_count, int)
+        assert isinstance(bottoms, tuple) and isinstance(tops, tuple) and isinstance(parameter_start, int)
+        parameter_fields = [field for field in fields[parameter_start:] if not field.startswith("6=")]
+        if shape_reference is not None:
+            bottoms = (*bottoms, shape_reference)
+            bottom_count += 1
+            layer["bottom_count"] = bottom_count
+            layer["bottoms"] = bottoms
+        layer["fields"] = [
+            fields[0],
+            fields[1],
+            str(bottom_count),
+            str(top_count),
+            *bottoms,
+            *tops,
+            *parameter_fields,
+            f'6="{expression}"',
+        ]
+        layer["parameter_start"] = 4 + bottom_count + top_count
+
+    layers = [parse_layer(line) for line in lines[2:]]
+    producers: dict[str, int] = {}
+    consumers: dict[str, list[int]] = {}
+    for layer_index, layer in enumerate(layers):
+        tops = layer["tops"]
+        bottoms = layer["bottoms"]
+        assert isinstance(tops, tuple) and isinstance(bottoms, tuple)
+        for top in tops:
+            if top in producers:
+                raise ValueError(f"duplicate ncnn blob producer for {top}")
+            producers[top] = layer_index
+        for bottom in bottoms:
+            consumers.setdefault(bottom, []).append(layer_index)
+
+    reshape_count = 0
+    dynamic_reshape_count = 0
+    replacements = 0
+    for layer_index, layer in enumerate(layers):
+        fields = layer["fields"]
+        bottoms = layer["bottoms"]
+        tops = layer["tops"]
+        assert isinstance(fields, list) and isinstance(bottoms, tuple) and isinstance(tops, tuple)
+        if fields[0] != "Reshape":
+            continue
+        reshape_count += 1
+        if "6" in parameters(layer):
+            dynamic_reshape_count += 1
+            continue
+        if len(bottoms) != 1 or len(tops) != 1:
+            raise ValueError(f"unsupported VAE reshape boundary: {fields[1]}")
+
+        shape = parameters(layer)
+        rank3 = {"0", "1", "2"}.issubset(shape) and "11" not in shape
+        rank4 = {"0", "1", "2", "11"}.issubset(shape)
+        rank2 = {"0", "1"}.issubset(shape) and "2" not in shape and "11" not in shape
+        producer_index = producers.get(bottoms[0])
+        producer = layers[producer_index] if producer_index is not None else None
+        producer_params = parameters(producer) if producer is not None else {}
+
+        if rank4:
+            set_shape_expr(layer, "0w,0h,0c,1")
+        elif rank2:
+            set_shape_expr(layer, "*(0w,0h),0c")
+        elif rank3 and producer is not None and producer["fields"][0] == "Permute" and producer_params.get("0") == "6":
+            set_shape_expr(layer, "0w,0h,0d")
+        elif rank3 and producer is not None and producer["fields"][0] == "Permute" and producer_params.get("0") == "1":
+            next_layers = consumers.get(tops[0], [])
+            if len(next_layers) != 1:
+                raise ValueError(f"ambiguous VAE attention reshape consumer: {fields[1]}")
+            residual_add = layers[next_layers[0]]
+            residual_fields = residual_add["fields"]
+            residual_bottoms = residual_add["bottoms"]
+            assert isinstance(residual_fields, list) and isinstance(residual_bottoms, tuple)
+            if residual_fields[0] != "BinaryOp" or len(residual_bottoms) != 2 or tops[0] not in residual_bottoms:
+                raise ValueError(f"unsupported VAE attention reshape consumer: {fields[1]}")
+            residual_blob = residual_bottoms[0] if residual_bottoms[1] == tops[0] else residual_bottoms[1]
+            set_shape_expr(layer, "1w,1h,1c", residual_blob)
+        else:
+            raise ValueError(f"unsupported static VAE reshape: {fields[1]}")
+        replacements += 1
+
+    if replacements == 0:
+        if reshape_count > 0 and dynamic_reshape_count == reshape_count:
+            return
+        raise ValueError(f"no static VAE reshapes found in {param_path}")
+    param_path.write_text("\n".join((lines[0], lines[1], *(" ".join(layer["fields"]) for layer in layers))) + "\n")
 
 
 class VaeEncodeWrapper(nn.Module):
@@ -372,6 +530,7 @@ def main() -> None:
                 check=True,
             )
             rewrite_ncnn_param(args.output_dir / f"{model_path.stem}.ncnn.param")
+            normalize_dynamic_vae_template(args.output_dir / f"{model_path.stem}.ncnn.param")
 
 
 if __name__ == "__main__":

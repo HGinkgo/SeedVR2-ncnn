@@ -8,6 +8,7 @@ checkout selected by ``SEEDVR2_UPSTREAM_ROOT``.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -17,6 +18,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import torch
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from tools.reference.portable_f32 import write_portable_golden
 
 Window = Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]
 
@@ -146,6 +153,30 @@ def build_manifest(paths: Mapping[str, Path], metadata: Mapping[str, object]) ->
     return {"metadata": dict(metadata), "artifacts": artifacts}
 
 
+def write_vae_portable_golden(
+    path: Path, input_cthw: torch.Tensor, latent_thwc: torch.Tensor, reconstruction_cthw: torch.Tensor
+) -> Dict[str, object]:
+    """Write VAE records with the latent converted from upstream THWC to CTHW."""
+
+    if input_cthw.ndim != 4 or input_cthw.shape[0] != 3 or input_cthw.shape[1] != 1:
+        raise ValueError("VAE input must have CTHW shape with three channels and one frame")
+    if latent_thwc.ndim != 4 or latent_thwc.shape[-1] != 16 or latent_thwc.shape[0] != 1:
+        raise ValueError("VAE latent must have THWC shape with one frame and sixteen channels")
+    if reconstruction_cthw.ndim != 4 or reconstruction_cthw.shape[0] != 3 or reconstruction_cthw.shape[1] != 1:
+        raise ValueError("VAE reconstruction must have CTHW shape with three channels and one frame")
+    if latent_thwc.shape[1] <= 0 or latent_thwc.shape[2] <= 0:
+        raise ValueError("VAE latent spatial dimensions must be positive")
+
+    return write_portable_golden(
+        path,
+        [
+            ("input", input_cthw),
+            ("latent", latent_thwc.permute(3, 0, 1, 2)),
+            ("reconstruction", reconstruction_cthw),
+        ],
+    )
+
+
 def _parse_triple(value: str) -> Tuple[int, int, int]:
     try:
         return _triple([int(item.strip()) for item in value.split(",")], "argument")
@@ -196,6 +227,17 @@ def _load_reference_vae(upstream_root: Path, checkpoint: Path, device: torch.dev
         os.chdir(previous_cwd)
 
 
+def configure_vae_precision(vae: torch.nn.Module, precision: str) -> torch.dtype:
+    """Match either the ncnn export path or upstream BF16 inference."""
+
+    if precision == "export-fp32":
+        vae.float()
+        return torch.float32
+    if precision == "upstream-bf16":
+        return torch.bfloat16
+    raise ValueError(f"unsupported VAE reference precision: {precision}")
+
+
 def _run_vae(args: argparse.Namespace) -> None:
     upstream_root = Path(os.environ.get("SEEDVR2_UPSTREAM_ROOT", "")).expanduser()
     checkpoint_dir = Path(os.environ.get("SEEDVR2_CKPT_DIR", "ckpts")).expanduser()
@@ -219,10 +261,11 @@ def _run_vae(args: argparse.Namespace) -> None:
     source = make_reference_input(args.size, seed=args.seed)
     device = torch.device("cuda")
     vae, config, loading_info = _load_reference_vae(upstream_root, checkpoint, device)
-    dtype = getattr(torch, config.vae.dtype)
+    dtype = configure_vae_precision(vae, args.precision)
     scale = float(config.vae.scaling_factor)
     sample = source.unsqueeze(0).to(device=device, dtype=dtype)
-    with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+    autocast = torch.autocast("cuda", dtype=dtype) if dtype != torch.float32 else nullcontext()
+    with torch.inference_mode(), autocast:
         encoded = vae.encode(vae.preprocess(sample))
         latent = encoded.posterior.mode().squeeze(2)
         latent = (latent - float(config.vae.get("shifting_factor", 0.0))) * scale
@@ -242,10 +285,13 @@ def _run_vae(args: argparse.Namespace) -> None:
     save_tensor(paths["input"], source)
     save_tensor(paths["latent"], latent_thwc)
     save_tensor(paths["reconstruction"], reconstruction_cthw)
+    golden_path = output_dir / "vae_golden.f32"
+    golden_layout = write_vae_portable_golden(golden_path, source, latent_thwc, reconstruction_cthw)
     metadata = {
         "kind": "vae",
         "seed": int(args.seed),
         "input_shape": list(source.shape),
+        "precision": args.precision,
         "dtype": str(dtype),
         "scaling_factor": scale,
         "upstream_root": str(upstream_root),
@@ -255,9 +301,22 @@ def _run_vae(args: argparse.Namespace) -> None:
         "loading_info": loading_info,
     }
     manifest = build_manifest(paths, metadata)
+    manifest["portable_golden"] = {
+        "path": str(golden_path),
+        "sha256": _file_sha256(golden_path),
+        **golden_layout,
+    }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if owns_process_group:
         torch.distributed.destroy_process_group()
+
+
+def _run_vae_records(args: argparse.Namespace) -> None:
+    input_cthw = torch.load(Path(args.input), map_location="cpu", weights_only=True)
+    latent_thwc = torch.load(Path(args.latent), map_location="cpu", weights_only=True)
+    reconstruction_cthw = torch.load(Path(args.reconstruction), map_location="cpu", weights_only=True)
+    layout = write_vae_portable_golden(Path(args.output), input_cthw, latent_thwc, reconstruction_cthw)
+    print(json.dumps(layout, sort_keys=True))
 
 
 def main() -> None:
@@ -273,6 +332,12 @@ def main() -> None:
     vae.add_argument("--size", type=_parse_triple, default=(1, 128, 128))
     vae.add_argument("--seed", type=int, default=666)
     vae.add_argument("--output-dir", required=True)
+    vae.add_argument("--precision", choices=("export-fp32", "upstream-bf16"), default="export-fp32")
+    vae_records = subparsers.add_parser("vae-records", help="convert saved VAE tensors into native float32 records")
+    vae_records.add_argument("--input", required=True)
+    vae_records.add_argument("--latent", required=True)
+    vae_records.add_argument("--reconstruction", required=True)
+    vae_records.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.command == "awa":
         if args.channels <= 0:
@@ -280,6 +345,8 @@ def main() -> None:
         _run_awa(args)
     elif args.command == "vae":
         _run_vae(args)
+    elif args.command == "vae-records":
+        _run_vae_records(args)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,16 @@
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
+#include <fstream>
+#include <limits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "allocator.h"
 #include "command.h"
@@ -13,6 +21,149 @@
 
 namespace
 {
+
+constexpr char kGoldenMagic[8] = {'S', 'V', 'R', '2', 'F', '3', '2', '\0'};
+constexpr std::uint32_t kGoldenVersion = 1;
+constexpr float kAbsoluteTolerance = 2.e-2f;
+constexpr float kRelativeTolerance = 2.e-2f;
+
+struct GoldenRecord
+{
+    std::vector<std::uint64_t> shape;
+    std::vector<float> values;
+};
+
+bool read_bytes(std::istream& input, void* destination, std::size_t size)
+{
+    return size == 0 || static_cast<bool>(input.read(static_cast<char*>(destination), static_cast<std::streamsize>(size)));
+}
+
+std::uint16_t read_u16(const std::uint8_t* bytes)
+{
+    return static_cast<std::uint16_t>(bytes[0]) | (static_cast<std::uint16_t>(bytes[1]) << 8);
+}
+
+std::uint32_t read_u32(const std::uint8_t* bytes)
+{
+    return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+std::uint64_t read_u64(const std::uint8_t* bytes)
+{
+    std::uint64_t value = 0;
+    for (int index = 0; index < 8; index++)
+        value |= static_cast<std::uint64_t>(bytes[index]) << (index * 8);
+    return value;
+}
+
+bool load_golden(const char* path, std::unordered_map<std::string, GoldenRecord>& records)
+{
+    std::ifstream input(path, std::ios::binary);
+    std::uint8_t header[16];
+    if (!input || !read_bytes(input, header, sizeof(header)) ||
+        std::memcmp(header, kGoldenMagic, sizeof(kGoldenMagic)) != 0 || read_u32(header + 8) != kGoldenVersion)
+        return false;
+
+    const std::uint32_t record_count = read_u32(header + 12);
+    if (record_count != 3)
+        return false;
+    for (std::uint32_t record_index = 0; record_index < record_count; record_index++)
+    {
+        std::uint8_t record_header[44];
+        if (!read_bytes(input, record_header, sizeof(record_header)))
+            return false;
+        const std::uint16_t name_length = read_u16(record_header);
+        const std::uint8_t rank = record_header[2];
+        const std::uint64_t count = read_u64(record_header + 4);
+        if (name_length == 0 || rank != 4 || count == 0 || count > (1ull << 31))
+            return false;
+
+        std::string name(name_length, '\0');
+        if (!read_bytes(input, name.data(), name.size()) || records.count(name) != 0)
+            return false;
+        std::uint64_t expected_count = 1;
+        GoldenRecord record;
+        record.shape.resize(rank);
+        for (std::uint8_t dimension = 0; dimension < rank; dimension++)
+        {
+            record.shape[dimension] = read_u64(record_header + 12 + dimension * 8);
+            if (record.shape[dimension] == 0 ||
+                expected_count > std::numeric_limits<std::uint64_t>::max() / record.shape[dimension])
+                return false;
+            expected_count *= record.shape[dimension];
+        }
+        if (expected_count != count || count > std::numeric_limits<std::size_t>::max() / sizeof(float))
+            return false;
+        std::vector<std::uint8_t> raw(static_cast<std::size_t>(count) * sizeof(float));
+        if (!read_bytes(input, raw.data(), raw.size()))
+            return false;
+        record.values.resize(static_cast<std::size_t>(count));
+        for (std::size_t value_index = 0; value_index < record.values.size(); value_index++)
+        {
+            const std::uint32_t bits = read_u32(raw.data() + value_index * sizeof(float));
+            std::memcpy(&record.values[value_index], &bits, sizeof(float));
+        }
+        records.emplace(std::move(name), std::move(record));
+    }
+    return records.count("input") == 1 && records.count("latent") == 1 && records.count("reconstruction") == 1;
+}
+
+bool make_cthw_mat(const GoldenRecord& record, ncnn::Mat& matrix)
+{
+    if (record.shape.size() != 4 || record.shape[0] == 0 || record.shape[1] != 1 || record.shape[2] == 0 ||
+        record.shape[3] == 0 || record.shape[0] > static_cast<std::uint64_t>(INT_MAX) ||
+        record.shape[2] > static_cast<std::uint64_t>(INT_MAX) || record.shape[3] > static_cast<std::uint64_t>(INT_MAX) ||
+        record.values.size() != static_cast<std::size_t>(record.shape[0] * record.shape[1] * record.shape[2] * record.shape[3]))
+        return false;
+
+    matrix.create(static_cast<int>(record.shape[3]), static_cast<int>(record.shape[2]), 1,
+                  static_cast<int>(record.shape[0]));
+    if (matrix.empty())
+        return false;
+    std::copy(record.values.begin(), record.values.end(), static_cast<float*>(matrix.data));
+    return true;
+}
+
+bool compare_cthw(const char* name, const ncnn::Mat& actual, const GoldenRecord& expected, float absolute_tolerance,
+                  float relative_tolerance)
+{
+    if (expected.shape.size() != 4 || expected.shape[1] != 1 || actual.empty() || actual.dims != 3 ||
+        actual.w != static_cast<int>(expected.shape[3]) || actual.h != static_cast<int>(expected.shape[2]) ||
+        actual.c != static_cast<int>(expected.shape[0]) || actual.elemsize != 4u ||
+        actual.total() != expected.values.size())
+    {
+        std::fprintf(stderr, "%s golden shape mismatch\n", name);
+        return false;
+    }
+
+    const float* values = static_cast<const float*>(actual.data);
+    float maximum = 0.f;
+    float maximum_ratio = 0.f;
+    std::size_t maximum_index = 0;
+    bool matched = true;
+    for (std::size_t index = 0; index < expected.values.size(); index++)
+    {
+        if (!std::isfinite(values[index]))
+        {
+            std::fprintf(stderr, "%s output is non-finite at %zu\n", name, index);
+            return false;
+        }
+        const float delta = std::fabs(values[index] - expected.values[index]);
+        const float allowed = absolute_tolerance + relative_tolerance * std::fabs(expected.values[index]);
+        if (delta > maximum)
+        {
+            maximum = delta;
+            maximum_index = index;
+        }
+        maximum_ratio = std::max(maximum_ratio, delta / allowed);
+        if (delta > allowed)
+            matched = false;
+    }
+    std::fprintf(stderr, "%s golden values=%zu max_abs_error=%g at %zu max_ratio=%g\n", name,
+                 expected.values.size(), maximum, maximum_index, maximum_ratio);
+    return matched;
+}
 
 ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator)
 {
@@ -74,19 +225,27 @@ bool finite(const ncnn::Mat& values)
 
 int main(int argc, char** argv)
 {
-    if (argc != 5 && argc != 7)
+    if (argc != 5 && argc != 7 && argc != 8)
     {
         std::fprintf(stderr,
-                     "usage: test_vae_end_to_end_vulkan <encode.param> <encode.bin> <decode.param> <decode.bin> [height width]\n");
+                     "usage: test_vae_end_to_end_vulkan <encode.param> <encode.bin> <decode.param> <decode.bin> "
+                     "[height width [golden.f32]]\n");
         return 2;
     }
 
     int sample_height = 128;
     int sample_width = 128;
-    if (argc == 7 &&
+    if (argc >= 7 &&
         (!parse_dimension(argv[5], sample_height) || !parse_dimension(argv[6], sample_width)))
     {
         std::fprintf(stderr, "height and width must be positive integers\n");
+        return 2;
+    }
+    std::unordered_map<std::string, GoldenRecord> golden_records;
+    const bool verify_golden = argc == 8;
+    if (verify_golden && !load_golden(argv[7], golden_records))
+    {
+        std::fprintf(stderr, "failed to load VAE golden: %s\n", argv[7]);
         return 2;
     }
 
@@ -103,7 +262,19 @@ int main(int argc, char** argv)
         return 1;
 
     ncnn::Mat sample(sample_width, sample_height, 1, 3);
-    sample.fill(0.f);
+    if (verify_golden && !make_cthw_mat(golden_records.at("input"), sample))
+    {
+        std::fprintf(stderr, "VAE golden input has an incompatible CTHW shape\n");
+        return 2;
+    }
+    if (!verify_golden)
+        sample.fill(0.f);
+    if (sample.dims != 4 || sample.w != sample_width || sample.h != sample_height || sample.d != 1 || sample.c != 3 ||
+        !finite(sample))
+    {
+        std::fprintf(stderr, "VAE sample shape does not match the requested resolution\n");
+        return 2;
+    }
     ncnn::VkMat sample_gpu;
     {
         std::fprintf(stderr, "stage=upload-sample\n");
@@ -116,11 +287,23 @@ int main(int argc, char** argv)
     ncnn::VkMat latent_gpu;
     {
         ncnn::Extractor encode_extractor = encode.create_extractor();
+        encode_extractor.set_light_mode(false);
         if (encode_extractor.input("in0", sample_gpu) != 0)
             return 1;
         std::fprintf(stderr, "stage=encode-extract\n");
         ncnn::VkCompute compute(vkdev);
         if (encode_extractor.extract("out0", latent_gpu, compute) != 0 || compute.submit_and_wait() != 0)
+            return 1;
+    }
+
+    ncnn::Mat latent;
+    if (verify_golden)
+    {
+        std::fprintf(stderr, "stage=download-latent\n");
+        ncnn::VkCompute download(vkdev);
+        download.record_download(latent_gpu, latent, encode.opt);
+        if (download.submit_and_wait() != 0 ||
+            !compare_cthw("latent", latent, golden_records.at("latent"), kAbsoluteTolerance, kRelativeTolerance))
             return 1;
     }
 
@@ -150,6 +333,7 @@ int main(int argc, char** argv)
     ncnn::Mat reconstruction;
     {
         ncnn::Extractor decode_extractor = decode.create_extractor();
+        decode_extractor.set_light_mode(false);
         if (decode_extractor.input("in0", decode_latent_gpu) != 0)
             return 1;
         std::fprintf(stderr, "stage=decode-extract\n");
@@ -170,6 +354,10 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "unexpected Vulkan reconstruction shape\n");
         return 1;
     }
+    if (verify_golden &&
+        !compare_cthw("reconstruction", reconstruction, golden_records.at("reconstruction"), kAbsoluteTolerance,
+                      kRelativeTolerance))
+        return 1;
 
     decode_latent_gpu.release();
     decode.clear();

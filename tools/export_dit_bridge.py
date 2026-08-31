@@ -14,7 +14,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from tools.export_dit_block import rewrite_ncnn_param
+from tools.export_dit_block import (
+    normalize_dynamic_awa_template,
+    normalize_dynamic_dit_gemm_rows,
+    rewrite_ncnn_param,
+)
 from tools.reference.dit_block import FixedDitBlock
 from tools.reference.dit_bridge import FixedDitInputProjection, FixedDitOutputProjection
 from tools.reference.dit_pipeline import DIT_PIPELINE_CONTRACT
@@ -95,12 +99,15 @@ def export_bridge(checkpoint: Path, output_dir: Path, pnnx: Path | None, seed: i
     _run_pnnx(pnnx, output_dir / "dit_patch_in.pt", output_dir, "[64,132],[58,5120]")
     _run_pnnx(pnnx, output_dir / "dit_block0.pt", output_dir, "[64,2560],[58,2560],[1,15360]")
     _run_pnnx(pnnx, output_dir / "dit_patch_out.pt", output_dir, "[64,2560]")
+    normalize_dynamic_dit_gemm_rows(output_dir / "dit_patch_in.ncnn.param")
+    normalize_dynamic_dit_gemm_rows(output_dir / "dit_patch_out.ncnn.param")
     rewrite_ncnn_param(
         output_dir / "dit_block0.ncnn.param",
         size=contract.source_shape,
         windows=(4, 3, 3),
         text_tokens=contract.text_tokens,
     )
+    normalize_dynamic_awa_template(output_dir / "dit_block0.ncnn.param")
     print(f"rewritten {output_dir / 'dit_block0.ncnn.param'}")
 
 

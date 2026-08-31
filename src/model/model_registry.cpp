@@ -45,6 +45,13 @@ std::string variant_name(const ResolutionPlan& plan)
     return std::to_string(plan.image_height) + "x" + std::to_string(plan.image_width);
 }
 
+bool has_flat_graph_artifact(const std::filesystem::path& model_dir)
+{
+    const std::filesystem::path encode = model_dir / "vae_encode";
+    return is_regular_model_file(encode.string() + ".ncnn.param") ||
+           is_regular_model_file(encode.string() + ".ncnn.bin");
+}
+
 } // namespace
 
 bool ModelRegistry::open(const std::filesystem::path& model_dir, ModelRegistry& registry, std::string& error)
@@ -82,17 +89,21 @@ bool ModelRegistry::resolve(const ResolutionPlan& plan, ModelGraphSet& graphs, s
         return false;
     }
 
-    const std::filesystem::path variant = model_dir_ / variant_name(plan);
-    std::error_code filesystem_error;
-    if (!std::filesystem::is_directory(variant, filesystem_error))
+    std::filesystem::path graph_dir = model_dir_;
+    if (!has_flat_graph_artifact(model_dir_))
     {
-        error = "model variant is missing for target " + variant_name(plan) + ": " + variant.string();
-        return false;
+        graph_dir /= variant_name(plan);
+        std::error_code filesystem_error;
+        if (!std::filesystem::is_directory(graph_dir, filesystem_error))
+        {
+            error = "model variant is missing for target " + variant_name(plan) + ": " + graph_dir.string();
+            return false;
+        }
     }
 
-    const std::filesystem::path vae_encode = variant / "vae_encode";
-    const std::filesystem::path vae_decode = variant / "vae_decode";
-    const std::filesystem::path dit_stack = variant;
+    const std::filesystem::path vae_encode = graph_dir / "vae_encode";
+    const std::filesystem::path vae_decode = graph_dir / "vae_decode";
+    const std::filesystem::path dit_stack = graph_dir;
     if (!graph_exists(vae_encode, error) || !graph_exists(vae_decode, error))
         return false;
 

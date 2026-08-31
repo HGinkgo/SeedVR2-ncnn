@@ -16,7 +16,7 @@ std::string format_vulkan_stage_error(const std::string& stage,
     message << ", heap-budget-mib=" << diagnostics.heap_budget_mib
             << ", max-allocation-mib=" << diagnostics.max_allocation_mib << ", target="
             << diagnostics.target_width << 'x' << diagnostics.target_height
-            << "; possible Vulkan memory exhaustion; reduce --width/--height, choose a smaller model variant, or select another GPU)";
+            << "; possible Vulkan memory exhaustion; reduce --width/--height or select another GPU)";
     return message.str();
 }
 

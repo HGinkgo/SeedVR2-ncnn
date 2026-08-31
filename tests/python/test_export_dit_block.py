@@ -312,6 +312,53 @@ def test_rewrite_existing_stack_param_preserves_dynamic_text_batch(tmp_path):
     assert any(line.startswith("InnerProduct project_txt") and " text_flat " in line for line in lines)
 
 
+def test_normalize_dynamic_awa_template_only_rewrites_awa_shape_metadata(tmp_path):
+    param_path = tmp_path / "dit_block_0.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "8 10\n"
+        "Input vid 0 1 vid\n"
+        "Input txt 0 1 txt\n"
+        "SeedVR2AWAPack awa_pack 2 2 vid txt packed cu 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0\n"
+        "SeedVR2MMRoPE mmrope 1 1 packed rotated 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0 8=126\n"
+        "SeedVR2WindowAttention awa_attention 1 1 rotated attended 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0\n"
+        "SeedVR2AWAUnpack awa_unpack 1 2 attended video_out text_out 0=1 1=45 2=80 3=4 4=3 5=3 6=58 7=0\n"
+        "Reshape reshape_awa_video_batch 1 1 video_out video_batch 0=2560 1=3600 12=233 13=0\n"
+        "Reshape unrelated_static_reshape 1 1 text_out text_batch 0=2560 1=58 12=233 13=0\n"
+    )
+
+    exporter.normalize_dynamic_awa_template(param_path)
+
+    lines = param_path.read_text().splitlines()
+    awa_lines = [line for line in lines if line.startswith("SeedVR2")]
+    assert len(awa_lines) == 4
+    assert all("0=-1" in line and "1=-1" in line and "2=-1" in line for line in awa_lines)
+    assert any(
+        line.startswith("Reshape reshape_awa_video_batch") and "0=2560 1=-1 12=233 13=0" in line
+        for line in lines
+    )
+    assert any(
+        line.startswith("Reshape unrelated_static_reshape") and "0=2560 1=58 12=233 13=0" in line
+        for line in lines
+    )
+
+
+def test_normalize_dynamic_dit_gemm_rows_keeps_weight_dimensions(tmp_path):
+    param_path = tmp_path / "dit_input.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "2 2\n"
+        "Input in0 0 1 in0\n"
+        "Gemm projection 1 1 in0 out0 10=4 2=0 3=1 4=0 5=1 6=1 7=256 8=2560 9=132\n"
+    )
+
+    exporter.normalize_dynamic_dit_gemm_rows(param_path)
+
+    line = param_path.read_text().splitlines()[3]
+    assert "7=0" in line
+    assert "8=2560" in line and "9=132" in line
+
+
 def test_rewrite_dit_param_replaces_pnnx_mmrope_without_consuming_its_weights(tmp_path):
     param_path = tmp_path / "dit_block_0.ncnn.param"
     param_path.write_text(
