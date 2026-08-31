@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "net.h"
 #include "platform.h"
@@ -136,31 +138,52 @@ int main(int argc, char** argv)
         int processed_frames = 0;
         for (;;)
         {
-            seedvr2::RgbImage frame;
-            if (!reader.read_next(frame, error))
+            std::vector<seedvr2::RgbImage> input_frames;
+            for (std::size_t batch_index = 0; batch_index < seedvr2::ImageInferenceSession::kMaxBatchFrames;
+                 batch_index++)
             {
-                if (!error.empty())
+                seedvr2::RgbImage frame;
+                if (!reader.read_next(frame, error))
                 {
-                    std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
-                    return 1;
+                    if (!error.empty())
+                    {
+                        std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
+                        return 1;
+                    }
+                    break;
                 }
-                break;
+                std::fprintf(stderr, "stage=video-frame index=%d\n",
+                             processed_frames + static_cast<int>(input_frames.size()));
+                input_frames.push_back(std::move(frame));
             }
-            std::fprintf(stderr, "stage=video-frame index=%d\n", processed_frames);
-            seedvr2::RgbImage output_frame;
-            if (!session.run_frame(frame, output_frame, error))
+
+            if (input_frames.empty())
+                break;
+
+            std::fprintf(stderr, "stage=video-batch start=%d frames=%zu\n", processed_frames, input_frames.size());
+            std::vector<seedvr2::RgbImage> output_frames;
+            if (!session.run_batch(input_frames, output_frames, error))
             {
                 std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
                              error.c_str());
                 return 1;
             }
-            if (!writer.write_frame(output_frame, error))
+            if (output_frames.size() != input_frames.size())
             {
-                std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n", processed_frames,
-                             error.c_str());
+                std::fprintf(stderr, "error: stage=video-inference frame=%d: batch returned an unexpected frame count\n",
+                             processed_frames);
                 return 1;
             }
-            processed_frames++;
+            for (std::size_t frame_index = 0; frame_index < output_frames.size(); frame_index++)
+            {
+                if (!writer.write_frame(output_frames[frame_index], error))
+                {
+                    std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n",
+                                 processed_frames + static_cast<int>(frame_index), error.c_str());
+                    return 1;
+                }
+            }
+            processed_frames += static_cast<int>(output_frames.size());
         }
         if (!writer.close(error))
         {
