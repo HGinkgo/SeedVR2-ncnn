@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "platform.h"
 
@@ -586,6 +587,48 @@ bool ImageInferenceSession::run_frame(const RgbImage& input, RgbImage& output, s
     return run_vulkan_image_frame(input, impl_->context.plan, impl_->context, output, error);
 #else
     (void)input;
+    error = "image inference requires a Vulkan-enabled build";
+    return false;
+#endif
+}
+
+bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
+                                      std::vector<RgbImage>& outputs,
+                                      std::string& error) const
+{
+    outputs.clear();
+    error.clear();
+    if (inputs.empty() || inputs.size() > kMaxBatchFrames)
+    {
+        error = "inference batch must contain 1 or 2 frames";
+        return false;
+    }
+
+#if NCNN_VULKAN
+    if (!impl_)
+    {
+        error = "inference session is not open";
+        return false;
+    }
+    for (const RgbImage& input : inputs)
+    {
+        if (!valid_rgb_image(input))
+        {
+            error = "input image or resolution plan is invalid";
+            return false;
+        }
+
+        RgbImage output;
+        if (!run_vulkan_image_frame(input, impl_->context.plan, impl_->context, output, error))
+        {
+            outputs.clear();
+            return false;
+        }
+        outputs.push_back(std::move(output));
+    }
+    return true;
+#else
+    (void)inputs;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif

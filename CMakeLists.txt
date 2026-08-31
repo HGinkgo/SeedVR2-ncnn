@@ -212,7 +212,8 @@ if(SEEDVR2_BUILD_TESTS)
     if(NOT SEEDVR2_ENABLE_VULKAN)
         add_executable(seedvr2-image-inference-test
             tests/unit/cpp/test_image_inference.cpp
-            src/inference/image_inference.cpp)
+            src/inference/image_inference.cpp
+            src/resolution/resolution_plan.cpp)
         target_include_directories(seedvr2-image-inference-test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${CMAKE_CURRENT_BINARY_DIR}/third_party/ncnn/src")

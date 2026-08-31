@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <string>
+#include <vector>
 
 int main()
 {
@@ -33,5 +34,19 @@ int main()
     assert(!session_ok);
     assert(error == "image inference requires a Vulkan-enabled build");
 #endif
+
+    std::vector<seedvr2::RgbImage> batch;
+    std::vector<seedvr2::RgbImage> outputs(1);
+    error.clear();
+    assert(!session.run_batch(batch, outputs, error));
+    assert(outputs.empty());
+    assert(error == "inference batch must contain 1 or 2 frames");
+
+    batch.resize(3);
+    outputs.assign(1, seedvr2::RgbImage());
+    error.clear();
+    assert(!session.run_batch(batch, outputs, error));
+    assert(outputs.empty());
+    assert(error == "inference batch must contain 1 or 2 frames");
     return 0;
 }
