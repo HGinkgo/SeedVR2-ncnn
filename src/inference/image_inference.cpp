@@ -269,7 +269,8 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
                                int gpu_id,
                                std::uint32_t memory_budget_mib,
                                VulkanInferenceContext& context,
-                               std::string& error)
+                               std::string& error,
+                               const PerformanceProfile& profile)
 {
     if (gpu_id < -1)
     {
@@ -277,6 +278,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         return false;
     }
 
+    const ProfileScope initialize_scope(profile, "initialize-vulkan");
     std::fprintf(stderr, "stage=initialize-vulkan\n");
     if (!context.instance.open(error))
         return false;
@@ -336,7 +338,9 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
                          const ResolutionPlan& plan,
                          VulkanInferenceContext& context,
                          std::vector<ncnn::Mat>& condition_latents,
-                         std::string& error)
+                         std::string& error,
+                         const PerformanceProfile& profile,
+                         std::size_t frame_offset)
 {
     condition_latents.clear();
     const auto stage_error = [&](std::size_t frame_index, const char* stage, const char* detail) {
@@ -345,17 +349,21 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
     };
     {
         ncnn::Net encode;
-        std::fprintf(stderr, "stage=load-encode\n");
-        if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
-                      context.encode_staging_allocator, false))
         {
-            stage_error(0, "load-encode", "ncnn graph load returned failure");
-            return false;
+            const ProfileScope load_scope(profile, "load-encode");
+            std::fprintf(stderr, "stage=load-encode\n");
+            if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
+                          context.encode_staging_allocator, false))
+            {
+                stage_error(0, "load-encode", "ncnn graph load returned failure");
+                return false;
+            }
         }
         const ncnn::Option encode_opt = encode.opt;
 
         for (std::size_t frame_index = 0; frame_index < inputs.size(); frame_index++)
         {
+            const ProfileScope frame_scope(profile, "vae-encode", frame_offset + frame_index);
             ncnn::Mat sample;
             if (!prepare_input(inputs[frame_index], plan, sample))
             {
@@ -412,7 +420,9 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                           const ResolutionPlan& plan,
                           VulkanInferenceContext& context,
                           std::vector<ncnn::Mat>& output_latents,
-                          std::string& error)
+                          std::string& error,
+                          const PerformanceProfile& profile,
+                          std::size_t frame_offset)
 {
     output_latents.clear();
     const auto stage_error = [&](std::size_t frame_index, const char* stage, const char* detail) {
@@ -432,16 +442,20 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
 
     {
         DitStackSession dit;
-        std::fprintf(stderr, "stage=load-dit-stack\n");
-        if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                   context.dit_blob_allocator, context.dit_staging_allocator, dit))
         {
-            stage_error(0, "load-dit-stack", "ncnn graph load returned failure");
-            return false;
+            const ProfileScope load_scope(profile, "load-dit-stack");
+            std::fprintf(stderr, "stage=load-dit-stack\n");
+            if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
+                                       context.dit_blob_allocator, context.dit_staging_allocator, dit))
+            {
+                stage_error(0, "load-dit-stack", "ncnn graph load returned failure");
+                return false;
+            }
         }
 
         for (std::size_t frame_index = 0; frame_index < condition_latents.size(); frame_index++)
         {
+            const ProfileScope frame_scope(profile, "dit-stack", frame_offset + frame_index);
             ncnn::VkMat condition_gpu;
             ncnn::VkMat noise_gpu;
             {
@@ -526,7 +540,9 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
                          const ResolutionPlan& plan,
                          VulkanInferenceContext& context,
                          std::vector<RgbImage>& outputs,
-                         std::string& error)
+                         std::string& error,
+                         const PerformanceProfile& profile,
+                         std::size_t frame_offset)
 {
     outputs.clear();
     const auto stage_error = [&](std::size_t frame_index, const char* stage, const char* detail) {
@@ -535,16 +551,20 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
     };
     {
         ncnn::Net decode;
-        std::fprintf(stderr, "stage=load-decode\n");
-        if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
-                      context.decode_staging_allocator.get(), true))
         {
-            stage_error(0, "load-decode", "ncnn graph load returned failure");
-            return false;
+            const ProfileScope load_scope(profile, "load-decode");
+            std::fprintf(stderr, "stage=load-decode\n");
+            if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
+                          context.decode_staging_allocator.get(), true))
+            {
+                stage_error(0, "load-decode", "ncnn graph load returned failure");
+                return false;
+            }
         }
 
         for (std::size_t frame_index = 0; frame_index < output_latents.size(); frame_index++)
         {
+            const ProfileScope frame_scope(profile, "vae-decode", frame_offset + frame_index);
             ncnn::VkMat decode_latent_gpu;
             {
                 ncnn::VkCompute compute(context.vkdev);
@@ -583,7 +603,9 @@ bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
                             const ResolutionPlan& plan,
                             VulkanInferenceContext& context,
                             std::vector<RgbImage>& outputs,
-                            std::string& error)
+                            std::string& error,
+                            const PerformanceProfile& profile,
+                            std::size_t frame_offset)
 {
     struct FrameCleanup final
     {
@@ -593,9 +615,9 @@ bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
 
     std::vector<ncnn::Mat> condition_latents;
     std::vector<ncnn::Mat> output_latents;
-    if (!encode_batch_vulkan(inputs, plan, context, condition_latents, error) ||
-        !denoise_batch_vulkan(condition_latents, plan, context, output_latents, error) ||
-        !decode_batch_vulkan(output_latents, plan, context, outputs, error))
+    if (!encode_batch_vulkan(inputs, plan, context, condition_latents, error, profile, frame_offset) ||
+        !denoise_batch_vulkan(condition_latents, plan, context, output_latents, error, profile, frame_offset) ||
+        !decode_batch_vulkan(output_latents, plan, context, outputs, error, profile, frame_offset))
     {
         outputs.clear();
         return false;
@@ -612,6 +634,8 @@ struct ImageInferenceSession::Impl
 #if NCNN_VULKAN
     VulkanInferenceContext context;
 #endif
+    // Borrowed from the caller; null when profiling is disabled.
+    const PerformanceProfile* profile = nullptr;
 };
 
 ImageInferenceSession::ImageInferenceSession() = default;
@@ -627,7 +651,8 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
                                  int gpu_id,
                                  ImageInferenceSession& session,
                                  std::string& error,
-                                 std::uint32_t memory_budget_mib)
+                                 std::uint32_t memory_budget_mib,
+                                 const PerformanceProfile* profile)
 {
     error.clear();
 #if NCNN_VULKAN
@@ -636,8 +661,11 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
         error = "input image or resolution plan is invalid";
         return false;
     }
+    static const PerformanceProfile kDisabledProfile;
     std::unique_ptr<Impl> candidate(new Impl);
-    if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error))
+    candidate->profile = profile ? profile : &kDisabledProfile;
+    if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
+                                  *candidate->profile))
         return false;
     session.impl_ = std::move(candidate);
     return true;
@@ -646,6 +674,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     (void)plan;
     (void)gpu_id;
     (void)memory_budget_mib;
+    (void)profile;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif
@@ -666,7 +695,8 @@ bool ImageInferenceSession::run_frame(const RgbImage& input, RgbImage& output, s
 
 bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
                                       std::vector<RgbImage>& outputs,
-                                      std::string& error) const
+                                      std::string& error,
+                                      std::size_t frame_offset) const
 {
     outputs.clear();
     error.clear();
@@ -690,9 +720,11 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
             return false;
         }
     }
-    return run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error);
+    return run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error,
+                                  *impl_->profile, frame_offset);
 #else
     (void)inputs;
+    (void)frame_offset;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif
@@ -704,7 +736,8 @@ bool run_image_inference(const ModelGraphSet& graphs,
                          int gpu_id,
                          RgbImage& output,
                          std::string& error,
-                         std::uint32_t memory_budget_mib)
+                         std::uint32_t memory_budget_mib,
+                         const PerformanceProfile* profile)
 {
     output = RgbImage();
     error.clear();
@@ -716,7 +749,7 @@ bool run_image_inference(const ModelGraphSet& graphs,
         return false;
     }
     ImageInferenceSession session;
-    if (!ImageInferenceSession::open(graphs, plan, gpu_id, session, error, memory_budget_mib))
+    if (!ImageInferenceSession::open(graphs, plan, gpu_id, session, error, memory_budget_mib, profile))
         return false;
     return session.run_frame(input, output, error);
 #else
@@ -725,6 +758,7 @@ bool run_image_inference(const ModelGraphSet& graphs,
     (void)plan;
     (void)gpu_id;
     (void)memory_budget_mib;
+    (void)profile;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif

@@ -26,6 +26,7 @@ struct CliOptions final
     int height = 0;
     int gpu_id = -1;
     std::uint32_t memory_budget_mib = 0;
+    bool profile = false;
 };
 
 bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::string& error);

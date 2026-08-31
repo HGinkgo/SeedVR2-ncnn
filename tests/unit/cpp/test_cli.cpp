@@ -7,6 +7,7 @@
 
 #include "cli/cli.h"
 #include "inference/memory_diagnostics.h"
+#include "inference/performance_profile.h"
 #include "resolution/resolution_plan.h"
 
 namespace
@@ -62,6 +63,26 @@ int main()
         {"seedvr2-ncnn", "--input", "input.png", "--memory-budget-mib", "4096"}, error);
     require(memory_budget.memory_budget_mib == 4096, "explicit memory budget");
 
+    // --profile is opt-in and must not perturb any other default.
+    require(!options.profile && !explicit_size.profile, "profile disabled by default");
+
+    const seedvr2::CliOptions profiling = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--profile"}, error);
+    require(profiling.action == seedvr2::CliAction::Run, "profile keeps the run action");
+    require(profiling.profile, "profile enabled on request");
+    require(profiling.model_dir == options.model_dir, "profile keeps the default model directory");
+    require(profiling.input == options.input, "profile keeps the input path");
+    require(profiling.width == 0 && profiling.height == 0, "profile keeps automatic resolution");
+    require(profiling.gpu_id == options.gpu_id, "profile keeps the automatic GPU default");
+    require(profiling.memory_budget_mib == 0, "profile keeps the automatic memory budget");
+
+    const seedvr2::CliOptions profile_with_resolution = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--width", "128", "--height", "128", "--profile"},
+        error);
+    require(profile_with_resolution.profile, "profile enabled next to explicit dimensions");
+    require(profile_with_resolution.width == 128 && profile_with_resolution.height == 128,
+            "profile keeps explicit dimensions");
+
     seedvr2::ResolutionPlan automatic_plan;
     require(seedvr2::make_image_resolution_plan(options, 1280, 720, automatic_plan, error), error.c_str());
     require(automatic_plan.image_width == 1280 && automatic_plan.image_height == 720,
@@ -90,6 +111,9 @@ int main()
     require(!seedvr2::parse_cli(5, negative_budget, rejected, error), "negative memory budget rejected");
     require(error.find("memory-budget-mib") != std::string::npos, "memory budget error");
 
+    const char* profile_with_value[] = {"seedvr2-ncnn", "--input", "input.png", "--profile", "yes"};
+    require(!seedvr2::parse_cli(5, profile_with_value, rejected, error), "--profile takes no value");
+
     seedvr2::VulkanMemoryDiagnostics diagnostics;
     diagnostics.gpu_id = 0;
     diagnostics.device_name = "Test GPU";
@@ -110,6 +134,30 @@ int main()
     require(preflight.find("requested minimum 4096 MiB") != std::string::npos, "preflight request");
     require(preflight.find("device heap budget 2048 MiB") != std::string::npos, "preflight budget");
     require(preflight.find("lower --memory-budget-mib") != std::string::npos, "preflight advice");
+
+    // The profile lines use `name=` rather than `stage=` so that they can never be
+    // mistaken for the existing `stage=` progress lines of the product path.
+    const std::string stage_line = seedvr2::format_profile_line("vae-encode", 123.5);
+    require(stage_line == "profile name=vae-encode ms=123.5", "profile stage line");
+    require(stage_line.find("stage=") == std::string::npos, "profile line avoids the stage= keyword");
+
+    // Times print with one decimal place ("%.1f"); 45.25 rounds to 45.2.
+    const std::string frame_line = seedvr2::format_profile_line("vae-encode", "frame", 7, 45.25);
+    require(frame_line == "profile name=vae-encode frame=7 ms=45.2", "profile frame line");
+
+    const std::string batch_line = seedvr2::format_profile_line("video-batch", "frames", 2, 9876.5);
+    require(batch_line == "profile name=video-batch frames=2 ms=9876.5", "profile batch line");
+
+    const std::string total_line = seedvr2::format_profile_total_line(13579.0, 2913);
+    require(total_line == "profile name=total ms=13579.0 peak-rss-mib=2913", "profile total line");
+
+    seedvr2::PerformanceProfile disabled;
+    require(!disabled.enabled(), "profile construct disabled by default");
+
+    const seedvr2::PerformanceProfile enabled(true);
+    require(enabled.enabled(), "profile construct enabled on request");
+    require(enabled.elapsed_ms(seedvr2::PerformanceProfile::Clock::now()) >= 0.0,
+            "profile elapsed is non-negative");
 
     require(seedvr2::validate_model_directory(std::filesystem::current_path(), error), "existing model directory");
     const std::filesystem::path missing = std::filesystem::temp_directory_path() / "seedvr2-ncnn-missing-model-dir";

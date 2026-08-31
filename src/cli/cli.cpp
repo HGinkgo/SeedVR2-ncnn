@@ -71,6 +71,11 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
             options.action = CliAction::Version;
             continue;
         }
+        if (std::strcmp(argument, "--profile") == 0)
+        {
+            options.profile = true;
+            continue;
+        }
 
         const char* value = nullptr;
         if (std::strcmp(argument, "--model-dir") == 0)
