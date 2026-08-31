@@ -10,6 +10,8 @@
 namespace seedvr2
 {
 
+class PerformanceProfile;
+
 class DitStackSession final
 {
 public:
@@ -25,7 +27,8 @@ public:
                      ncnn::VulkanDevice* vkdev,
                      ncnn::VkAllocator* blob_allocator,
                      ncnn::VkAllocator* staging_allocator,
-                     DitStackSession& session);
+                     DitStackSession& session,
+                     const PerformanceProfile* profile = nullptr);
 
     bool run(const ncnn::VkMat& input_patches,
              const ncnn::Mat& text,

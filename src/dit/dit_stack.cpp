@@ -1,5 +1,6 @@
 #include "dit/dit_stack.h"
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <sstream>
@@ -9,6 +10,7 @@
 #include "awa/awa_layers.h"
 #include "datareader.h"
 #include "net.h"
+#include "inference/performance_profile.h"
 
 namespace seedvr2
 {
@@ -20,6 +22,45 @@ constexpr int kPatchSize = 2;
 constexpr int kVideoPatchWidth = 132;
 constexpr int kTextInputWidth = 5120;
 constexpr int kOutputPatchWidth = 64;
+
+struct DitLoadProfile
+{
+    explicit DitLoadProfile(const PerformanceProfile* profile_in) : profile(profile_in) {}
+
+    int load_param(ncnn::Net& net, const char* path)
+    {
+        const auto start = PerformanceProfile::Clock::now();
+        const int result = net.load_param(path);
+        param_ms += profile->elapsed_ms(start);
+        return result;
+    }
+
+    int load_param_mem(ncnn::Net& net, const char* param)
+    {
+        const auto start = PerformanceProfile::Clock::now();
+        const int result = net.load_param_mem(param);
+        param_ms += profile->elapsed_ms(start);
+        return result;
+    }
+
+    int load_model(ncnn::Net& net, const char* path)
+    {
+        const auto start = PerformanceProfile::Clock::now();
+        const int result = net.load_model(path);
+        bin_ms += profile->elapsed_ms(start);
+        return result;
+    }
+
+    void report() const
+    {
+        std::fprintf(stderr, "%s\n", format_profile_dit_load_line("param", param_ms).c_str());
+        std::fprintf(stderr, "%s\n", format_profile_dit_load_line("bin", bin_ms).c_str());
+    }
+
+    const PerformanceProfile* profile = nullptr;
+    double param_ms = 0.0;
+    double bin_ms = 0.0;
+};
 
 void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blob_allocator,
                ncnn::VkAllocator* staging_allocator)
@@ -37,18 +78,22 @@ void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blo
 
 bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkdev,
                 ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator,
-                const AwaRuntimeSpec* runtime_spec)
+                const AwaRuntimeSpec* runtime_spec, DitLoadProfile* load_profile)
 {
     configure(net, vkdev, blob_allocator, staging_allocator);
     register_seedvr2_awa_layers(net, runtime_spec);
     const std::string param_path = stem + ".ncnn.param";
     const std::string model_path = stem + ".ncnn.bin";
-    if (net.load_param(param_path.c_str()) != 0)
+    const int param_status = load_profile ? load_profile->load_param(net, param_path.c_str())
+                                          : net.load_param(param_path.c_str());
+    if (param_status != 0)
     {
         std::fprintf(stderr, "load_graph: failed to load %s\n", param_path.c_str());
         return false;
     }
-    if (net.load_model(model_path.c_str()) != 0)
+    const int model_status = load_profile ? load_profile->load_model(net, model_path.c_str())
+                                          : net.load_model(model_path.c_str());
+    if (model_status != 0)
     {
         std::fprintf(stderr, "load_graph: failed to load %s\n", model_path.c_str());
         return false;
@@ -57,7 +102,7 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
 }
 
 bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blob_allocator,
-                        ncnn::VkAllocator* staging_allocator)
+                        ncnn::VkAllocator* staging_allocator, DitLoadProfile* load_profile)
 {
     static const char kPackingParam[] =
         "7767517\n"
@@ -65,7 +110,9 @@ bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAlloc
         "Input in0 0 1 in0\n"
         "Packing unpack 1 1 in0 out0 0=1\n";
     configure(net, vkdev, blob_allocator, staging_allocator);
-    if (net.load_param_mem(kPackingParam) != 0)
+    const int param_status = load_profile ? load_profile->load_param_mem(net, kPackingParam)
+                                          : net.load_param_mem(kPackingParam);
+    if (param_status != 0)
         return false;
     const unsigned char* empty_model = nullptr;
     ncnn::DataReaderFromMemory model_reader(empty_model);
@@ -223,7 +270,8 @@ bool DitStackSession::open(const std::string& stack_dir,
                            ncnn::VulkanDevice* vkdev,
                            ncnn::VkAllocator* blob_allocator,
                            ncnn::VkAllocator* staging_allocator,
-                           DitStackSession& session)
+                           DitStackSession& session,
+                           const PerformanceProfile* profile)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || plan.video_tokens <= 0)
         return false;
@@ -235,11 +283,13 @@ bool DitStackSession::open(const std::string& stack_dir,
     candidate->vkdev = vkdev;
     candidate->blob_allocator = blob_allocator;
     candidate->staging_allocator = staging_allocator;
+    DitLoadProfile load_profile(profile && profile->enabled() ? profile : nullptr);
+    DitLoadProfile* load_profile_ptr = load_profile.profile ? &load_profile : nullptr;
     if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator,
-                    &runtime_spec) ||
+                    &runtime_spec, load_profile_ptr) ||
         !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
-                    staging_allocator, &runtime_spec) ||
-        !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator))
+                    staging_allocator, &runtime_spec, load_profile_ptr) ||
+        !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator, load_profile_ptr))
         return false;
 
     candidate->blocks.reserve(32);
@@ -248,13 +298,17 @@ bool DitStackSession::open(const std::string& stack_dir,
         std::unique_ptr<ncnn::Net> block(new ncnn::Net);
         const std::string block_name = stack_dir + "/dit_block_" +
                                        (block_index < 10 ? "0" : "") + std::to_string(block_index);
-        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator, &runtime_spec))
+        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator, &runtime_spec,
+                        load_profile_ptr))
             return false;
         candidate->blocks.push_back(std::move(block));
     }
     if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator,
-                    &runtime_spec))
+                    &runtime_spec, load_profile_ptr))
         return false;
+
+    if (load_profile_ptr)
+        load_profile_ptr->report();
 
     session.impl_ = std::move(candidate);
     return true;

@@ -446,7 +446,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             const ProfileScope load_scope(profile, "load-dit-stack");
             std::fprintf(stderr, "stage=load-dit-stack\n");
             if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                       context.dit_blob_allocator, context.dit_staging_allocator, dit))
+                                       context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile))
             {
                 stage_error(0, "load-dit-stack", "ncnn graph load returned failure");
                 return false;
