@@ -33,6 +33,8 @@ def _make_plan(image_height: int, image_width: int, resized_height: int, resized
                crop_top: int, crop_left: int) -> ResolutionPlan:
     if image_height <= 0 or image_width <= 0 or image_height % 16 or image_width % 16:
         raise ValueError(f"image dimensions must be positive multiples of 16, got {image_height}x{image_width}")
+    if image_height * image_width > DEFAULT_AREA:
+        raise ValueError(f"image area must not exceed {DEFAULT_AREA}, got {image_height}x{image_width}")
     source_shape = (1, image_height // 16, image_width // 16)
     return ResolutionPlan(
         image_height=image_height,

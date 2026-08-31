@@ -35,6 +35,143 @@ def _shape(value: str) -> tuple[int, int, int]:
     return parts
 
 
+def normalize_dynamic_awa_template(param_path: Path) -> None:
+    """Replace static AWA grid metadata with the session-provided sentinel.
+
+    Only the three grid parameters on SeedVR2 AWA layers and the reshape fed
+    directly by the AWA unpack video output are eligible for rewriting.
+    """
+
+    param_path = Path(param_path)
+    lines = param_path.read_text().splitlines()
+    if len(lines) < 2 or not lines[0].startswith("7767517"):
+        raise ValueError(f"unexpected ncnn param header: {param_path}")
+
+    def parse_layer(line: str) -> tuple[list[str], int, int, int]:
+        fields = line.split()
+        if len(fields) < 4:
+            raise ValueError(f"invalid ncnn layer line: {line}")
+        try:
+            bottom_count = int(fields[2])
+            top_count = int(fields[3])
+        except ValueError as exc:
+            raise ValueError(f"invalid ncnn blob counts: {line}") from exc
+        parameter_start = 4 + bottom_count + top_count
+        if bottom_count < 0 or top_count < 0 or len(fields) < parameter_start:
+            raise ValueError(f"invalid ncnn blob declaration: {line}")
+        return fields, bottom_count, top_count, parameter_start
+
+    awa_layer_types = {
+        "SeedVR2AWAPack",
+        "SeedVR2AWAUnpack",
+        "SeedVR2MMRoPE",
+        "SeedVR2WindowAttention",
+    }
+    rewritten = list(lines)
+    unpack_video_blobs: list[str] = []
+    awa_layer_count = 0
+    for line_index, line in enumerate(lines[2:], start=2):
+        fields, bottom_count, top_count, parameter_start = parse_layer(line)
+        if fields[0] not in awa_layer_types:
+            continue
+        awa_layer_count += 1
+        if fields[0] == "SeedVR2AWAUnpack":
+            if top_count != 2:
+                raise ValueError("SeedVR2AWAUnpack must expose video and text outputs")
+            unpack_video_blobs.append(fields[4 + bottom_count])
+
+        parameter_indexes: dict[str, int] = {}
+        for field_index in range(parameter_start, len(fields)):
+            key, separator, _ = fields[field_index].partition("=")
+            if separator and key in {"0", "1", "2"}:
+                if key in parameter_indexes:
+                    raise ValueError(f"duplicate AWA parameter {key} in {fields[1]}")
+                parameter_indexes[key] = field_index
+        if set(parameter_indexes) != {"0", "1", "2"}:
+            raise ValueError(f"incomplete AWA grid metadata in {fields[1]}")
+        for key in ("0", "1", "2"):
+            fields[parameter_indexes[key]] = f"{key}=-1"
+        rewritten[line_index] = " ".join(fields)
+
+    if awa_layer_count == 0:
+        raise ValueError(f"no SeedVR2 AWA layers found in {param_path}")
+    if len(unpack_video_blobs) != 1:
+        raise ValueError(f"expected one SeedVR2AWAUnpack layer, found {len(unpack_video_blobs)}")
+
+    reshape_matches: list[int] = []
+    for line_index, line in enumerate(rewritten[2:], start=2):
+        fields, bottom_count, top_count, parameter_start = parse_layer(line)
+        if (
+            fields[0] == "Reshape"
+            and fields[1] == "reshape_awa_video_batch"
+            and bottom_count == 1
+            and top_count == 1
+            and fields[4] == unpack_video_blobs[0]
+        ):
+            reshape_matches.append(line_index)
+            height_parameter = [
+                field_index
+                for field_index in range(parameter_start, len(fields))
+                if fields[field_index].startswith("1=")
+            ]
+            if len(height_parameter) != 1:
+                raise ValueError("reshape_awa_video_batch must have exactly one height parameter")
+            fields[height_parameter[0]] = "1=-1"
+            rewritten[line_index] = " ".join(fields)
+    if len(reshape_matches) != 1:
+        raise ValueError(f"expected one AWA video batch reshape, found {len(reshape_matches)}")
+
+    param_path.write_text("\n".join(rewritten) + "\n")
+
+
+def normalize_dynamic_dit_gemm_rows(param_path: Path) -> None:
+    """Let DiT projection Gemm layers infer their token-row count at runtime.
+
+    PNNX records the traced token count as ncnn Gemm parameter ``7``
+    (``constantM``).  Clearing only that parameter preserves the serialized
+    weight dimensions while allowing the same graph to serve another source
+    resolution.
+    """
+
+    param_path = Path(param_path)
+    lines = param_path.read_text().splitlines()
+    if len(lines) < 2 or not lines[0].startswith("7767517"):
+        raise ValueError(f"unexpected ncnn param header: {param_path}")
+
+    rewritten = list(lines)
+    gemm_count = 0
+    for line_index, line in enumerate(lines[2:], start=2):
+        fields = line.split()
+        if len(fields) < 4:
+            raise ValueError(f"invalid ncnn layer line: {line}")
+        if fields[0] != "Gemm":
+            continue
+        try:
+            bottom_count = int(fields[2])
+            top_count = int(fields[3])
+        except ValueError as exc:
+            raise ValueError(f"invalid ncnn blob counts: {line}") from exc
+        parameter_start = 4 + bottom_count + top_count
+        if bottom_count < 0 or top_count < 0 or len(fields) < parameter_start:
+            raise ValueError(f"invalid ncnn blob declaration: {line}")
+
+        parameter_indexes = [
+            field_index
+            for field_index in range(parameter_start, len(fields))
+            if fields[field_index].startswith("7=")
+        ]
+        if len(parameter_indexes) != 1:
+            raise ValueError(f"Gemm layer {fields[1]} must have exactly one constantM parameter")
+        fields[parameter_indexes[0]] = "7=0"
+        rewritten[line_index] = " ".join(fields)
+        gemm_count += 1
+
+    if gemm_count == 0:
+        raise ValueError(f"no Gemm layers found in {param_path}")
+
+    param_path.write_text("\n".join(rewritten) + "\n")
+
+
 def rewrite_ncnn_param(
     param_path: Path,
     *,
@@ -657,6 +794,7 @@ def main() -> None:
     run_pnnx(args.pnnx, model_path, args.output_dir, source_shape=args.size)
     param_path = Path(args.output_dir).resolve() / "dit_block_0.ncnn.param"
     rewrite_ncnn_param(param_path, size=args.size)
+    normalize_dynamic_awa_template(param_path)
     custom_layers = sum(
         line.startswith(
             (

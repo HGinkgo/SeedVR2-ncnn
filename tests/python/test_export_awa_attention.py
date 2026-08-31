@@ -136,6 +136,37 @@ def test_vae_trace_disables_memory_slicing():
     assert vae.calls == [{"conv_max_mem": None, "norm_max_mem": None}]
 
 
+def test_normalize_dynamic_vae_template_rewrites_spatial_and_attention_reshapes(tmp_path):
+    param_path = tmp_path / "vae_decode.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "12 13\n"
+        "Input input 0 1 input\n"
+        "Permute to_norm 1 1 input permuted 0=6\n"
+        "Reshape spatial_norm 1 1 permuted norm_input 0=32 1=32 2=512\n"
+        "GroupNorm norm 1 1 norm_input norm_output 0=32 1=512\n"
+        "Reshape spatial_restore 1 1 norm_output restored 0=32 1=32 11=512 2=1\n"
+        "Split residual_split 1 2 restored residual other\n"
+        "Reshape attention_flat 1 1 residual attention_input 0=1024 1=512\n"
+        "MultiHeadAttention attention 1 1 attention_input attention_output 0=512\n"
+        "Permute attention_transpose 1 1 attention_output attention_transposed 0=1\n"
+        "Reshape attention_restore 1 1 attention_transposed attention_spatial 0=32 1=32 2=512\n"
+        "BinaryOp residual_add 2 1 residual attention_spatial out0 0=0\n"
+    )
+
+    vae_exporter.normalize_dynamic_vae_template(param_path)
+
+    lines = param_path.read_text().splitlines()
+    assert any(line.startswith("Reshape spatial_norm") and '6="0w,0h,0d"' in line for line in lines)
+    assert any(line.startswith("Reshape spatial_restore") and '6="0w,0h,0c,1"' in line for line in lines)
+    assert any(line.startswith("Reshape attention_flat") and '6="*(0w,0h),0c"' in line for line in lines)
+    assert any(
+        line.startswith("Reshape attention_restore 2 1 attention_transposed residual attention_spatial")
+        and '6="1w,1h,1c"' in line
+        for line in lines
+    )
+
+
 def test_rewrite_vae_param_replaces_causal_temporal_tile(tmp_path):
     param_path = tmp_path / "vae_encode.ncnn.param"
     param_path.write_text(
@@ -227,6 +258,25 @@ def test_rewrite_vae_param_replaces_upsample_depth_to_space_triplet(tmp_path):
     assert not any(line.startswith("Reshape reshape_218") for line in lines)
     assert not any(line.startswith("Permute permute_153") for line in lines)
     assert not any(line.startswith("Reshape reshape_219") for line in lines)
+
+
+def test_rewrite_vae_param_maps_asymmetric_upsample_axes(tmp_path):
+    param_path = tmp_path / "vae_decode.ncnn.param"
+    param_path.write_text(
+        "7767517\n"
+        "6 8\n"
+        "Input in0 0 1 in0\n"
+        "Convolution3D conv 1 1 in0 conv_out 0=1024\n"
+        "Reshape reshape_246 1 1 conv_out reshaped 6=\"64,64,1,256,1,2,2\"\n"
+        "Permute permute_179 1 1 reshaped permuted 0=0\n"
+        "Reshape reshape_247 1 1 permuted out0 0=128 1=128 11=1 2=256\n"
+        "Split splitncnn_39 1 2 out0 a b\n"
+    )
+
+    vae_exporter.rewrite_ncnn_param(param_path)
+
+    lines = param_path.read_text().splitlines()
+    assert "SeedVR2DepthToSpace depth_to_space_0 1 1 conv_out out0 0=2 1=2 2=1" in lines
 
 
 def test_rewrite_vae_param_fixes_fixed_temporal_slice_start(tmp_path):

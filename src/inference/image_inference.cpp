@@ -139,17 +139,12 @@ struct VulkanInferenceContext final
     ncnn::VkAllocator* dit_staging_allocator = nullptr;
     ncnn::VkAllocator* decode_blob_allocator = nullptr;
     std::unique_ptr<TransientVkStagingAllocator> decode_staging_allocator;
-    ncnn::Net encode;
-    DitStackSession dit;
-    ncnn::Net decode;
     ncnn::Mat text;
     ResolutionPlan plan;
+    ModelGraphSet graphs;
 
     void clear()
     {
-        dit = DitStackSession();
-        decode.clear();
-        encode.clear();
         decode_staging_allocator.reset();
         if (vkdev)
         {
@@ -178,6 +173,12 @@ struct VulkanInferenceContext final
 
 void clear_frame_staging_allocators(VulkanInferenceContext& context)
 {
+    if (context.encode_blob_allocator)
+        context.encode_blob_allocator->clear();
+    if (context.dit_blob_allocator)
+        context.dit_blob_allocator->clear();
+    if (context.decode_blob_allocator)
+        context.decode_blob_allocator->clear();
     if (context.encode_staging_allocator)
         context.encode_staging_allocator->clear();
     if (context.dit_staging_allocator)
@@ -330,30 +331,6 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         return false;
     }
 
-    std::fprintf(stderr, "stage=load-encode\n");
-    if (!load_vae(context.encode, graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
-                  context.encode_staging_allocator, false))
-    {
-        stage_error("load-encode", "ncnn graph load returned failure");
-        return false;
-    }
-
-    std::fprintf(stderr, "stage=load-dit-stack\n");
-    if (!DitStackSession::open(graphs.dit_stack_dir.string(), plan, context.vkdev, context.dit_blob_allocator,
-                               context.dit_staging_allocator, context.dit))
-    {
-        stage_error("load-dit-stack", "ncnn graph load returned failure");
-        return false;
-    }
-
-    std::fprintf(stderr, "stage=load-decode\n");
-    if (!load_vae(context.decode, graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
-                  context.decode_staging_allocator.get(), true))
-    {
-        stage_error("load-decode", "ncnn graph load returned failure");
-        return false;
-    }
-
     std::fprintf(stderr, "stage=conditioning-load\n");
     if (!load_conditioning_f32(graphs.conditioning_path.string().c_str(), graphs.text_tokens, context.text))
     {
@@ -361,6 +338,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         return false;
     }
     context.plan = plan;
+    context.graphs = graphs;
     return true;
 }
 
@@ -386,121 +364,146 @@ bool run_vulkan_image_frame(const RgbImage& input,
         return false;
     }
 
-    const ncnn::Option encode_opt = context.encode.opt;
     const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator);
-
-    ncnn::VkMat sample_gpu;
-    {
-        ncnn::VkCompute compute(context.vkdev);
-        compute.record_upload(sample, sample_gpu, encode_opt);
-        if (compute.submit_and_wait() != 0)
-        {
-            stage_error("input-upload", "Vulkan command submission returned failure");
-            return false;
-        }
-    }
-
-    ncnn::VkMat latent_gpu;
-    std::fprintf(stderr, "stage=vae-encode\n");
-    {
-        ncnn::Extractor extractor = context.encode.create_extractor();
-        ncnn::VkCompute compute(context.vkdev);
-        if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
-            compute.submit_and_wait() != 0)
-        {
-            stage_error("vae-encode", "ncnn extraction or Vulkan command submission returned failure");
-            return false;
-        }
-    }
-    sample_gpu.release();
-
-    ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
-    if (noise.empty())
-    {
-        error = "stage=noise-create failed";
-        return false;
-    }
-    for (std::size_t index = 0; index < noise.total(); index++)
-        noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
-
-    ncnn::VkMat noise_gpu;
-    std::fprintf(stderr, "stage=noise-upload\n");
-    {
-        ncnn::VkCompute compute(context.vkdev);
-        compute.record_upload(noise, noise_gpu, dit_opt);
-        if (compute.submit_and_wait() != 0)
-        {
-            stage_error("noise-upload", "Vulkan command submission returned failure");
-            return false;
-        }
-    }
-
-    ncnn::VkMat input_patches_gpu;
-    std::fprintf(stderr, "stage=dit-input-patchify\n");
-    if (!make_dit_input_patches_gpu(noise_gpu, latent_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                    context.dit_staging_allocator, input_patches_gpu))
-    {
-        stage_error("dit-input-patchify", "GPU patch assembly returned failure");
-        return false;
-    }
-
-    ncnn::VkMat prediction_gpu;
-    std::fprintf(stderr, "stage=dit-stack\n");
-    if (!context.dit.run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
-    {
-        stage_error("dit-stack", "GPU DiT execution returned failure");
-        return false;
-    }
-
-    ncnn::VkMat noise_patches_gpu;
-    std::fprintf(stderr, "stage=noise-patchify\n");
-    if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                         context.dit_staging_allocator, noise_patches_gpu))
-    {
-        stage_error("noise-patchify", "GPU patch assembly returned failure");
-        return false;
-    }
-
-    ncnn::VkMat endpoint_patches_gpu;
-    std::fprintf(stderr, "stage=v-lerp-endpoint\n");
-    if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                          context.dit_blob_allocator, context.dit_staging_allocator,
-                                          endpoint_patches_gpu))
-    {
-        stage_error("v-lerp-endpoint", "GPU sampler endpoint returned failure");
-        return false;
-    }
-
-    ncnn::VkMat output_latent_gpu;
-    std::fprintf(stderr, "stage=latent-unpatch\n");
-    if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                context.dit_staging_allocator, output_latent_gpu))
-    {
-        stage_error("latent-unpatch", "GPU patch removal returned failure");
-        return false;
-    }
-
     ncnn::VkMat decode_latent_gpu;
-    std::fprintf(stderr, "stage=handoff-latent\n");
-    if (!clone_to_allocator(output_latent_gpu, decode_latent_gpu, context.vkdev, context.decode_blob_allocator,
-                            context.decode_staging_allocator.get()))
     {
-        stage_error("handoff-latent", "GPU latent handoff returned failure");
-        return false;
-    }
+        ncnn::Net encode;
+        std::fprintf(stderr, "stage=load-encode\n");
+        if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
+                      context.encode_staging_allocator, false))
+        {
+            stage_error("load-encode", "ncnn graph load returned failure");
+            return false;
+        }
+        const ncnn::Option encode_opt = encode.opt;
 
-    latent_gpu.release();
-    noise_gpu.release();
-    input_patches_gpu.release();
-    prediction_gpu.release();
-    noise_patches_gpu.release();
-    endpoint_patches_gpu.release();
-    output_latent_gpu.release();
+        ncnn::VkMat sample_gpu;
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_upload(sample, sample_gpu, encode_opt);
+            if (compute.submit_and_wait() != 0)
+            {
+                stage_error("input-upload", "Vulkan command submission returned failure");
+                return false;
+            }
+        }
+
+        ncnn::VkMat latent_gpu;
+        std::fprintf(stderr, "stage=vae-encode\n");
+        {
+            ncnn::Extractor extractor = encode.create_extractor();
+            extractor.set_light_mode(false);
+            ncnn::VkCompute compute(context.vkdev);
+            if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
+                compute.submit_and_wait() != 0)
+            {
+                stage_error("vae-encode", "ncnn extraction or Vulkan command submission returned failure");
+                return false;
+            }
+        }
+        sample_gpu.release();
+
+        ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
+        if (noise.empty())
+        {
+            error = "stage=noise-create failed";
+            return false;
+        }
+        for (std::size_t index = 0; index < noise.total(); index++)
+            noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
+
+        ncnn::VkMat noise_gpu;
+        std::fprintf(stderr, "stage=noise-upload\n");
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_upload(noise, noise_gpu, dit_opt);
+            if (compute.submit_and_wait() != 0)
+            {
+                stage_error("noise-upload", "Vulkan command submission returned failure");
+                return false;
+            }
+        }
+
+        ncnn::VkMat input_patches_gpu;
+        std::fprintf(stderr, "stage=dit-input-patchify\n");
+        if (!make_dit_input_patches_gpu(noise_gpu, latent_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                        context.dit_staging_allocator, input_patches_gpu))
+        {
+            stage_error("dit-input-patchify", "GPU patch assembly returned failure");
+            return false;
+        }
+
+        DitStackSession dit;
+        std::fprintf(stderr, "stage=load-dit-stack\n");
+        if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
+                                   context.dit_blob_allocator, context.dit_staging_allocator, dit))
+        {
+            stage_error("load-dit-stack", "ncnn graph load returned failure");
+            return false;
+        }
+
+        ncnn::VkMat prediction_gpu;
+        std::fprintf(stderr, "stage=dit-stack\n");
+        if (!dit.run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
+        {
+            stage_error("dit-stack", "GPU DiT execution returned failure");
+            return false;
+        }
+
+        ncnn::VkMat noise_patches_gpu;
+        std::fprintf(stderr, "stage=noise-patchify\n");
+        if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                             context.dit_staging_allocator, noise_patches_gpu))
+        {
+            stage_error("noise-patchify", "GPU patch assembly returned failure");
+            return false;
+        }
+
+        ncnn::VkMat endpoint_patches_gpu;
+        std::fprintf(stderr, "stage=v-lerp-endpoint\n");
+        if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                              context.dit_blob_allocator, context.dit_staging_allocator,
+                                              endpoint_patches_gpu))
+        {
+            stage_error("v-lerp-endpoint", "GPU sampler endpoint returned failure");
+            return false;
+        }
+
+        ncnn::VkMat output_latent_gpu;
+        std::fprintf(stderr, "stage=latent-unpatch\n");
+        if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                    context.dit_staging_allocator, output_latent_gpu))
+        {
+            stage_error("latent-unpatch", "GPU patch removal returned failure");
+            return false;
+        }
+
+        std::fprintf(stderr, "stage=handoff-latent\n");
+        if (!clone_to_allocator(output_latent_gpu, decode_latent_gpu, context.vkdev, context.decode_blob_allocator,
+                                context.decode_staging_allocator.get()))
+        {
+            stage_error("handoff-latent", "GPU latent handoff returned failure");
+            return false;
+        }
+    }
+    context.encode_blob_allocator->clear();
+    context.encode_staging_allocator->clear();
+    context.dit_blob_allocator->clear();
+    context.dit_staging_allocator->clear();
 
     ncnn::Mat reconstruction;
-    std::fprintf(stderr, "stage=vae-decode\n");
     {
-        ncnn::Extractor extractor = context.decode.create_extractor();
+        ncnn::Net decode;
+        std::fprintf(stderr, "stage=load-decode\n");
+        if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
+                      context.decode_staging_allocator.get(), true))
+        {
+            stage_error("load-decode", "ncnn graph load returned failure");
+            return false;
+        }
+        std::fprintf(stderr, "stage=vae-decode\n");
+        ncnn::Extractor extractor = decode.create_extractor();
+        extractor.set_light_mode(false);
         if (extractor.input("in0", decode_latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
         {
             stage_error("vae-decode", "ncnn extraction returned failure");

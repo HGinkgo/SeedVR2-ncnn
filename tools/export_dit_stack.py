@@ -17,7 +17,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from tools.export_dit_block import rewrite_ncnn_param
+from tools.export_dit_block import (
+    normalize_dynamic_awa_template,
+    normalize_dynamic_dit_gemm_rows,
+    rewrite_ncnn_param,
+)
 from tools.reference.dit_stack import (
     DIT_STACK_CONTRACT,
     FixedDitEmbedding,
@@ -284,6 +288,7 @@ def export_stack(
         output_dir,
         f"[{contract.video_tokens},{contract.patch_width}],[{contract.text_tokens},5120]",
     )
+    normalize_dynamic_dit_gemm_rows(output_dir / "dit_input.ncnn.param")
     _run_pnnx(pnnx, output_dir / "dit_embedding.pt", output_dir, "[1]")
     for block_index in range(contract.block_count):
         block_name = f"dit_block_{block_index:02d}"
@@ -301,12 +306,14 @@ def export_stack(
             text_tokens=contract.text_tokens,
             shifted=contract.block_shifted(block_index),
         )
+        normalize_dynamic_awa_template(param_path)
     _run_pnnx(
         pnnx,
         output_dir / "dit_output.pt",
         output_dir,
         f"[{contract.video_tokens},2560],[1,15360]",
     )
+    normalize_dynamic_dit_gemm_rows(output_dir / "dit_output.ncnn.param")
 
     _attach_ncnn_artifacts(manifest, output_dir, graph_records, contract)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

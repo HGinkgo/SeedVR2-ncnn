@@ -27,6 +27,17 @@ struct AwaWindow final
     int w1 = 0;
 };
 
+// Resolution metadata owned by one loaded ncnn::Net session.
+struct AwaRuntimeSpec final
+{
+    int source_t = 0;
+    int source_h = 0;
+    int source_w = 0;
+    int video_tokens = 0;
+
+    bool valid() const;
+};
+
 // Build clipped windows in the same order used by the custom AWA layers.
 std::vector<AwaWindow> make_awa_windows(int source_t, int source_h, int source_w,
                                         int windows_t, int windows_h, int windows_w, bool shifted);
@@ -37,6 +48,7 @@ class SeedVR2AWAPack final : public ncnn::Layer
 {
 public:
     SeedVR2AWAPack();
+    explicit SeedVR2AWAPack(const seedvr2::AwaRuntimeSpec& runtime_spec);
 
     int load_param(const ncnn::ParamDict& pd) override;
     int forward(const std::vector<ncnn::Mat>& bottom_blobs,
@@ -54,6 +66,8 @@ public:
 #endif
 
 private:
+    bool has_runtime_spec_ = false;
+    seedvr2::AwaRuntimeSpec runtime_spec_;
     int source_t_ = 0;
     int source_h_ = 0;
     int source_w_ = 0;
@@ -77,6 +91,7 @@ class SeedVR2AWAUnpack final : public ncnn::Layer
 {
 public:
     SeedVR2AWAUnpack();
+    explicit SeedVR2AWAUnpack(const seedvr2::AwaRuntimeSpec& runtime_spec);
 
     int load_param(const ncnn::ParamDict& pd) override;
     int forward(const std::vector<ncnn::Mat>& bottom_blobs,
@@ -94,6 +109,8 @@ public:
 #endif
 
 private:
+    bool has_runtime_spec_ = false;
+    seedvr2::AwaRuntimeSpec runtime_spec_;
     int source_t_ = 0;
     int source_h_ = 0;
     int source_w_ = 0;
@@ -120,6 +137,7 @@ class SeedVR2MMRoPE final : public ncnn::Layer
 {
 public:
     SeedVR2MMRoPE();
+    explicit SeedVR2MMRoPE(const seedvr2::AwaRuntimeSpec& runtime_spec);
 
     int load_param(const ncnn::ParamDict& pd) override;
     int forward(const std::vector<ncnn::Mat>& bottom_blobs,
@@ -137,6 +155,8 @@ public:
 #endif
 
 private:
+    bool has_runtime_spec_ = false;
+    seedvr2::AwaRuntimeSpec runtime_spec_;
     int source_t_ = 0;
     int source_h_ = 0;
     int source_w_ = 0;
@@ -159,6 +179,7 @@ class SeedVR2WindowAttention final : public ncnn::Layer
 {
 public:
     SeedVR2WindowAttention();
+    explicit SeedVR2WindowAttention(const seedvr2::AwaRuntimeSpec& runtime_spec);
 
     int load_param(const ncnn::ParamDict& pd) override;
     int forward(const std::vector<ncnn::Mat>& bottom_blobs,
@@ -175,6 +196,8 @@ public:
 #endif
 
 private:
+    bool has_runtime_spec_ = false;
+    seedvr2::AwaRuntimeSpec runtime_spec_;
     int source_t_ = 0;
     int source_h_ = 0;
     int source_w_ = 0;
@@ -194,3 +217,4 @@ private:
 };
 
 void register_seedvr2_awa_layers(ncnn::Net& net);
+void register_seedvr2_awa_layers(ncnn::Net& net, const seedvr2::AwaRuntimeSpec* runtime_spec);

@@ -35,7 +35,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Run the product single-image path for one resolved model variant.
+// Run the product single-image path for one resolved model package.
 // The output is RGB8 in the requested target dimensions.
 bool run_image_inference(const ModelGraphSet& graphs,
                          const RgbImage& input,

@@ -36,10 +36,11 @@ void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blo
 }
 
 bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkdev,
-                ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator)
+                ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator,
+                const AwaRuntimeSpec* runtime_spec)
 {
     configure(net, vkdev, blob_allocator, staging_allocator);
-    register_seedvr2_awa_layers(net);
+    register_seedvr2_awa_layers(net, runtime_spec);
     const std::string param_path = stem + ".ncnn.param";
     const std::string model_path = stem + ".ncnn.bin";
     if (net.load_param(param_path.c_str()) != 0)
@@ -226,14 +227,18 @@ bool DitStackSession::open(const std::string& stack_dir,
 {
     if (!vkdev || !blob_allocator || !staging_allocator || plan.video_tokens <= 0)
         return false;
+    const AwaRuntimeSpec runtime_spec = {plan.source_t, plan.source_height, plan.source_width, plan.video_tokens};
+    if (!runtime_spec.valid())
+        return false;
 
     std::unique_ptr<Impl> candidate(new Impl);
     candidate->vkdev = vkdev;
     candidate->blob_allocator = blob_allocator;
     candidate->staging_allocator = staging_allocator;
-    if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator) ||
+    if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator,
+                    &runtime_spec) ||
         !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
-                    staging_allocator) ||
+                    staging_allocator, &runtime_spec) ||
         !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator))
         return false;
 
@@ -243,11 +248,12 @@ bool DitStackSession::open(const std::string& stack_dir,
         std::unique_ptr<ncnn::Net> block(new ncnn::Net);
         const std::string block_name = stack_dir + "/dit_block_" +
                                        (block_index < 10 ? "0" : "") + std::to_string(block_index);
-        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator))
+        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator, &runtime_spec))
             return false;
         candidate->blocks.push_back(std::move(block));
     }
-    if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator))
+    if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator,
+                    &runtime_spec))
         return false;
 
     session.impl_ = std::move(candidate);

@@ -48,6 +48,7 @@ int main()
     seedvr2::ResolutionPlan invalid;
     require(!seedvr2::ResolutionPlan::from_explicit(0, 128, invalid), "zero height rejected");
     require(!seedvr2::ResolutionPlan::from_explicit(128, 127, invalid), "unaligned width rejected");
+    require(!seedvr2::ResolutionPlan::from_explicit(736, 1280, invalid), "over-area explicit target rejected");
     require(!seedvr2::ResolutionPlan::from_input_area(-1, 128, invalid), "negative input rejected");
 
     std::puts("seedvr2-resolution: ok");

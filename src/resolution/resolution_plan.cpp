@@ -33,6 +33,15 @@ bool fill_plan(int image_height, int image_width, int resized_height, int resize
         set_error(error, message.str());
         return false;
     }
+    const long long image_area = static_cast<long long>(image_height) * image_width;
+    if (image_area > ResolutionPlan::kDefaultArea)
+    {
+        std::ostringstream message;
+        message << "image area must not exceed " << ResolutionPlan::kDefaultArea << ", got "
+                << image_height << "x" << image_width;
+        set_error(error, message.str());
+        return false;
+    }
     plan.image_height = image_height;
     plan.image_width = image_width;
     plan.resized_height = resized_height;

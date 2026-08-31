@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "net.h"
 
@@ -84,19 +85,30 @@ std::vector<Window> make_windows(int source_t, int source_h, int source_w,
     return windows;
 }
 
-bool load_common(const ncnn::ParamDict& pd, int& source_t, int& source_h, int& source_w,
-                 int& windows_t, int& windows_h, int& windows_w, int& text_tokens, bool& shifted)
+bool load_common(const ncnn::ParamDict& pd, const seedvr2::AwaRuntimeSpec* runtime_spec,
+                 int& source_t, int& source_h, int& source_w, int& windows_t, int& windows_h,
+                 int& windows_w, int& text_tokens, bool& shifted)
 {
     source_t = pd.get(0, 0);
     source_h = pd.get(1, 0);
     source_w = pd.get(2, 0);
+    if (source_t == -1 && source_h == -1 && source_w == -1)
+    {
+        if (!runtime_spec || !runtime_spec->valid())
+            return false;
+        source_t = runtime_spec->source_t;
+        source_h = runtime_spec->source_h;
+        source_w = runtime_spec->source_w;
+    }
     windows_t = pd.get(3, 0);
     windows_h = pd.get(4, 0);
     windows_w = pd.get(5, 0);
     text_tokens = pd.get(6, 0);
     shifted = pd.get(7, 0) != 0;
+    const long long source_tokens = static_cast<long long>(source_t) * source_h * source_w;
     return source_t > 0 && source_h > 0 && source_w > 0 && windows_t > 0 &&
-           windows_h > 0 && windows_w > 0 && text_tokens > 0;
+           windows_h > 0 && windows_w > 0 && text_tokens > 0 &&
+           source_tokens <= std::numeric_limits<int>::max();
 }
 
 struct QkvLayout
@@ -192,6 +204,13 @@ int create_awa_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data
 namespace seedvr2
 {
 
+bool AwaRuntimeSpec::valid() const
+{
+    const long long computed_video_tokens = static_cast<long long>(source_t) * source_h * source_w;
+    return source_t > 0 && source_h > 0 && source_w > 0 && video_tokens > 0 &&
+           computed_video_tokens == video_tokens && computed_video_tokens <= std::numeric_limits<int>::max();
+}
+
 std::vector<AwaWindow> make_awa_windows(int source_t, int source_h, int source_w,
                                         int windows_t, int windows_h, int windows_w, bool shifted)
 {
@@ -220,9 +239,17 @@ SeedVR2AWAPack::SeedVR2AWAPack()
     support_vulkan_any_packing = false;
 }
 
+SeedVR2AWAPack::SeedVR2AWAPack(const seedvr2::AwaRuntimeSpec& runtime_spec)
+    : SeedVR2AWAPack()
+{
+    has_runtime_spec_ = true;
+    runtime_spec_ = runtime_spec;
+}
+
 int SeedVR2AWAPack::load_param(const ncnn::ParamDict& pd)
 {
-    if (!load_common(pd, source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, text_tokens_, shifted_))
+    if (!load_common(pd, has_runtime_spec_ ? &runtime_spec_ : nullptr, source_t_, source_h_, source_w_, windows_t_,
+                     windows_h_, windows_w_, text_tokens_, shifted_))
         return -1;
     source_tokens_ = source_t_ * source_h_ * source_w_;
     sequence_index_.clear();
@@ -388,9 +415,17 @@ SeedVR2AWAUnpack::SeedVR2AWAUnpack()
     support_vulkan_any_packing = false;
 }
 
+SeedVR2AWAUnpack::SeedVR2AWAUnpack(const seedvr2::AwaRuntimeSpec& runtime_spec)
+    : SeedVR2AWAUnpack()
+{
+    has_runtime_spec_ = true;
+    runtime_spec_ = runtime_spec;
+}
+
 int SeedVR2AWAUnpack::load_param(const ncnn::ParamDict& pd)
 {
-    if (!load_common(pd, source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, text_tokens_, shifted_))
+    if (!load_common(pd, has_runtime_spec_ ? &runtime_spec_ : nullptr, source_t_, source_h_, source_w_, windows_t_,
+                     windows_h_, windows_w_, text_tokens_, shifted_))
         return -1;
     source_tokens_ = source_t_ * source_h_ * source_w_;
     video_positions_.clear();
@@ -603,9 +638,17 @@ SeedVR2MMRoPE::SeedVR2MMRoPE()
     support_vulkan_any_packing = false;
 }
 
+SeedVR2MMRoPE::SeedVR2MMRoPE(const seedvr2::AwaRuntimeSpec& runtime_spec)
+    : SeedVR2MMRoPE()
+{
+    has_runtime_spec_ = true;
+    runtime_spec_ = runtime_spec;
+}
+
 int SeedVR2MMRoPE::load_param(const ncnn::ParamDict& pd)
 {
-    if (!load_common(pd, source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, text_tokens_, shifted_))
+    if (!load_common(pd, has_runtime_spec_ ? &runtime_spec_ : nullptr, source_t_, source_h_, source_w_, windows_t_,
+                     windows_h_, windows_w_, text_tokens_, shifted_))
         return -1;
     rope_dim_ = pd.get(8, 126);
     if (rope_dim_ <= 0 || rope_dim_ % 6 != 0)
@@ -764,9 +807,17 @@ SeedVR2WindowAttention::SeedVR2WindowAttention()
     support_vulkan_any_packing = false;
 }
 
+SeedVR2WindowAttention::SeedVR2WindowAttention(const seedvr2::AwaRuntimeSpec& runtime_spec)
+    : SeedVR2WindowAttention()
+{
+    has_runtime_spec_ = true;
+    runtime_spec_ = runtime_spec;
+}
+
 int SeedVR2WindowAttention::load_param(const ncnn::ParamDict& pd)
 {
-    if (!load_common(pd, source_t_, source_h_, source_w_, windows_t_, windows_h_, windows_w_, text_tokens_, shifted_))
+    if (!load_common(pd, has_runtime_spec_ ? &runtime_spec_ : nullptr, source_t_, source_h_, source_w_, windows_t_,
+                     windows_h_, windows_w_, text_tokens_, shifted_))
         return -1;
     window_offsets_.clear();
     window_offsets_.push_back(0);
@@ -950,10 +1001,53 @@ DEFINE_LAYER_CREATOR(SeedVR2AWAUnpack)
 DEFINE_LAYER_CREATOR(SeedVR2MMRoPE)
 DEFINE_LAYER_CREATOR(SeedVR2WindowAttention)
 
+namespace
+{
+
+ncnn::Layer* seedvr2_awa_pack_runtime_creator(void* userdata)
+{
+    return new SeedVR2AWAPack(*static_cast<const seedvr2::AwaRuntimeSpec*>(userdata));
+}
+
+ncnn::Layer* seedvr2_awa_unpack_runtime_creator(void* userdata)
+{
+    return new SeedVR2AWAUnpack(*static_cast<const seedvr2::AwaRuntimeSpec*>(userdata));
+}
+
+ncnn::Layer* seedvr2_mmrope_runtime_creator(void* userdata)
+{
+    return new SeedVR2MMRoPE(*static_cast<const seedvr2::AwaRuntimeSpec*>(userdata));
+}
+
+ncnn::Layer* seedvr2_window_attention_runtime_creator(void* userdata)
+{
+    return new SeedVR2WindowAttention(*static_cast<const seedvr2::AwaRuntimeSpec*>(userdata));
+}
+
+} // namespace
+
 void register_seedvr2_awa_layers(ncnn::Net& net)
 {
     net.register_custom_layer("SeedVR2AWAPack", SeedVR2AWAPack_layer_creator);
     net.register_custom_layer("SeedVR2AWAUnpack", SeedVR2AWAUnpack_layer_creator);
     net.register_custom_layer("SeedVR2MMRoPE", SeedVR2MMRoPE_layer_creator);
     net.register_custom_layer("SeedVR2WindowAttention", SeedVR2WindowAttention_layer_creator);
+}
+
+void register_seedvr2_awa_layers(ncnn::Net& net, const seedvr2::AwaRuntimeSpec* runtime_spec)
+{
+    if (!runtime_spec)
+    {
+        register_seedvr2_awa_layers(net);
+        return;
+    }
+
+    net.register_custom_layer("SeedVR2AWAPack", seedvr2_awa_pack_runtime_creator, nullptr,
+                              const_cast<seedvr2::AwaRuntimeSpec*>(runtime_spec));
+    net.register_custom_layer("SeedVR2AWAUnpack", seedvr2_awa_unpack_runtime_creator, nullptr,
+                              const_cast<seedvr2::AwaRuntimeSpec*>(runtime_spec));
+    net.register_custom_layer("SeedVR2MMRoPE", seedvr2_mmrope_runtime_creator, nullptr,
+                              const_cast<seedvr2::AwaRuntimeSpec*>(runtime_spec));
+    net.register_custom_layer("SeedVR2WindowAttention", seedvr2_window_attention_runtime_creator, nullptr,
+                              const_cast<seedvr2::AwaRuntimeSpec*>(runtime_spec));
 }

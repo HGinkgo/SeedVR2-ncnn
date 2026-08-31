@@ -27,7 +27,7 @@ def test_auto_plan_upsamples_small_image_before_alignment():
     assert (plan.latent_height, plan.latent_width) == (120, 120)
 
 
-@pytest.mark.parametrize("height,width", [(0, 128), (-1, 128), (128, 127)])
+@pytest.mark.parametrize("height,width", [(0, 128), (-1, 128), (128, 127), (736, 1280)])
 def test_invalid_dimensions_are_rejected(height, width):
     with pytest.raises(ValueError):
         plan_from_explicit(height, width)

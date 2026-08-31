@@ -116,6 +116,7 @@ int main(int argc, char** argv)
     ncnn::VkMat latent_gpu;
     {
         ncnn::Extractor encode_extractor = encode.create_extractor();
+        encode_extractor.set_light_mode(false);
         if (encode_extractor.input("in0", sample_gpu) != 0)
             return 1;
         std::fprintf(stderr, "stage=encode-extract\n");
@@ -150,6 +151,7 @@ int main(int argc, char** argv)
     ncnn::Mat reconstruction;
     {
         ncnn::Extractor decode_extractor = decode.create_extractor();
+        decode_extractor.set_light_mode(false);
         if (decode_extractor.input("in0", decode_latent_gpu) != 0)
             return 1;
         std::fprintf(stderr, "stage=decode-extract\n");
