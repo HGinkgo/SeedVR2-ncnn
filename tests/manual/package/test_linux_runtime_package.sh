@@ -266,6 +266,17 @@ case "$1" in
             exit 1
         fi
 
+        dit_load_stages=$(grep -c '^stage=load-dit-stack$' "$temp_dir/release-video.log" || true)
+        encode_stages=$(grep -c '^stage=vae-encode$' "$temp_dir/release-video.log" || true)
+        dit_stages=$(grep -c '^stage=dit-stack$' "$temp_dir/release-video.log" || true)
+        decode_stages=$(grep -c '^stage=vae-decode$' "$temp_dir/release-video.log" || true)
+        if [ "$dit_load_stages" -ne 1 ] || [ "$encode_stages" -ne 2 ] || [ "$dit_stages" -ne 2 ] || \
+            [ "$decode_stages" -ne 2 ]; then
+            printf '%s\n' "FAIL: packaged video smoke did not reuse the DiT stack across two frames" >&2
+            cat "$temp_dir/release-video.log" >&2
+            exit 1
+        fi
+
         printf '%s\n' "seedvr2 Linux runtime package video smoke: ok"
         ;;
     *)
