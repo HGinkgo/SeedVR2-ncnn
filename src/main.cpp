@@ -30,8 +30,8 @@ void print_usage()
     std::puts("  --model-dir  Model directory (default: models/seedvr2-3b)");
     std::puts("  --input      Input image path");
     std::puts("  --output     Output image path (default: out.png)");
-    std::puts("  --width      Explicit output width (optional)");
-    std::puts("  --height     Explicit output height (optional)");
+    std::puts("  --width      Explicit output width (optional; target area <= 256x256)");
+    std::puts("  --height     Explicit output height (optional; target area <= 256x256)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
     std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");
     std::puts("  --profile     Print opt-in stage timings to stderr (default: off)");

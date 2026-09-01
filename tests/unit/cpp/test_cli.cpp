@@ -50,9 +50,9 @@ int main()
     require(options.memory_budget_mib == 0, "automatic memory budget default");
 
     const seedvr2::CliOptions explicit_size = parse(
-        {"seedvr2-ncnn", "--input", "input.png", "--width", "720", "--height", "1280", "--gpu-id", "1"},
+        {"seedvr2-ncnn", "--input", "input.png", "--width", "256", "--height", "256", "--gpu-id", "1"},
         error);
-    require(explicit_size.width == 720 && explicit_size.height == 1280, "explicit dimensions");
+    require(explicit_size.width == 256 && explicit_size.height == 256, "explicit dimensions");
     require(explicit_size.gpu_id == 1, "explicit GPU id");
 
     const seedvr2::CliOptions automatic_gpu = parse(
@@ -85,13 +85,30 @@ int main()
 
     seedvr2::ResolutionPlan automatic_plan;
     require(seedvr2::make_image_resolution_plan(options, 1280, 720, automatic_plan, error), error.c_str());
-    require(automatic_plan.image_width == 1280 && automatic_plan.image_height == 720,
-            "automatic CLI resolution plan");
+    require(automatic_plan.image_width == 336 && automatic_plan.image_height == 192,
+            "automatic CLI low-resolution plan");
+
+    seedvr2::ResolutionPlan small_automatic_plan;
+    require(seedvr2::make_image_resolution_plan(options, 128, 128, small_automatic_plan, error), error.c_str());
+    require(small_automatic_plan.image_width == 128 && small_automatic_plan.image_height == 128,
+            "automatic CLI does not upscale small input");
+
+    seedvr2::ResolutionPlan tiny_automatic_plan;
+    require(seedvr2::make_image_resolution_plan(options, 2, 1, tiny_automatic_plan, error), error.c_str());
+    require(tiny_automatic_plan.image_width == 32 && tiny_automatic_plan.image_height == 16,
+            "automatic CLI preserves legal alignment for tiny input");
 
     seedvr2::ResolutionPlan explicit_plan;
     require(seedvr2::make_image_resolution_plan(explicit_size, 100, 100, explicit_plan, error), error.c_str());
-    require(explicit_plan.image_width == 720 && explicit_plan.image_height == 1280,
+    require(explicit_plan.image_width == 256 && explicit_plan.image_height == 256,
             "explicit CLI resolution plan");
+
+    const seedvr2::CliOptions over_limit = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--width", "320", "--height", "256"}, error);
+    seedvr2::ResolutionPlan rejected_plan;
+    require(!seedvr2::make_image_resolution_plan(over_limit, 100, 100, rejected_plan, error),
+            "explicit low-resolution limit");
+    require(error.find("65536") != std::string::npos, "low-resolution limit error");
 
     seedvr2::CliOptions rejected;
     const char* missing_height[] = {"seedvr2-ncnn", "--input", "input.png", "--width", "720"};
