@@ -197,7 +197,16 @@ bool make_image_resolution_plan(const CliOptions& options, int input_width, int 
     if (options.width == 0 && options.height == 0)
     {
         const long long input_area = static_cast<long long>(input_height) * input_width;
-        const long long bounded_area = std::max<long long>(16 * 16, std::min<long long>(kProductMaxArea, input_area));
+        const long long min_dimension = std::min(input_height, input_width);
+        const long long max_dimension = std::max(input_height, input_width);
+        const long long minimum_legal_area = (max_dimension * 16 * 16 + min_dimension - 1) / min_dimension;
+        const long long bounded_area = std::max<long long>(minimum_legal_area,
+                                                           std::min<long long>(kProductMaxArea, input_area));
+        if (bounded_area > kProductMaxArea)
+        {
+            error = "input aspect ratio cannot fit the 256x256 low-resolution product limit";
+            return false;
+        }
         if (ResolutionPlan::from_input_area(input_height, input_width, plan, &error,
                                             static_cast<int>(bounded_area)))
             return true;

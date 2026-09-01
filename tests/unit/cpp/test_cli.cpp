@@ -93,6 +93,11 @@ int main()
     require(small_automatic_plan.image_width == 128 && small_automatic_plan.image_height == 128,
             "automatic CLI does not upscale small input");
 
+    seedvr2::ResolutionPlan tiny_automatic_plan;
+    require(seedvr2::make_image_resolution_plan(options, 2, 1, tiny_automatic_plan, error), error.c_str());
+    require(tiny_automatic_plan.image_width == 32 && tiny_automatic_plan.image_height == 16,
+            "automatic CLI preserves legal alignment for tiny input");
+
     seedvr2::ResolutionPlan explicit_plan;
     require(seedvr2::make_image_resolution_plan(explicit_size, 100, 100, explicit_plan, error), error.c_str());
     require(explicit_plan.image_width == 256 && explicit_plan.image_height == 256,
