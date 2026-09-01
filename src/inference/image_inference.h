@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <string>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -43,6 +44,17 @@ public:
     // whole clip, used only to label profile lines.
     bool run_batch(const std::vector<RgbImage>& inputs,
                    std::vector<RgbImage>& outputs,
+                   std::string& error,
+                   std::size_t frame_offset = 0) const;
+
+    using VideoFrameReader = std::function<bool(RgbImage&, std::string&)>;
+    using VideoFrameWriter = std::function<bool(const RgbImage&, std::string&)>;
+
+    // Process a sequential video stream while loading each model group only
+    // once. A reader returning false with an empty error denotes end-of-file.
+    bool run_video(const VideoFrameReader& reader,
+                   const VideoFrameWriter& writer,
+                   std::size_t& frame_count,
                    std::string& error,
                    std::size_t frame_offset = 0) const;
 

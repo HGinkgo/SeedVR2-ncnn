@@ -1,10 +1,12 @@
 #include "inference/image_inference.h"
 #include "inference/memory_diagnostics.h"
+#include "inference/latent_spool.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -599,6 +601,453 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
     return true;
 }
 
+bool ncnn_mat_to_latent_frame(const ncnn::Mat& latent, LatentFrame& frame)
+{
+    if (latent.empty() || !latent.data || (latent.dims != 3 && latent.dims != 4) || latent.d != 1 ||
+        latent.w <= 0 || latent.h <= 0 || latent.c <= 0 || latent.elempack != 1 || latent.elemsize != 4u)
+        return false;
+    frame.width = latent.w;
+    frame.height = latent.h;
+    frame.channels = latent.c;
+    const std::size_t count = latent.total();
+    frame.values.resize(count);
+    std::memcpy(frame.values.data(), latent.data, count * sizeof(float));
+    return true;
+}
+
+bool latent_frame_to_ncnn_mat(const LatentFrame& frame, ncnn::Mat& latent)
+{
+    if (frame.width <= 0 || frame.height <= 0 || frame.channels <= 0 ||
+        frame.values.size() != static_cast<std::size_t>(frame.width) * frame.height * frame.channels)
+        return false;
+    latent.create(frame.width, frame.height, 1, frame.channels);
+    if (latent.empty())
+        return false;
+    std::memcpy(latent.data, frame.values.data(), frame.values.size() * sizeof(float));
+    return true;
+}
+
+bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
+                         const ResolutionPlan& plan,
+                         VulkanInferenceContext& context,
+                         LatentSpool& condition_spool,
+                         std::size_t& frame_count,
+                         std::string& error,
+                         const PerformanceProfile& profile,
+                         std::size_t frame_offset)
+{
+    frame_count = 0;
+    if (!LatentSpool::create(condition_spool, error))
+        return false;
+
+    ncnn::Net encode;
+    {
+        const ProfileScope load_scope(profile, "load-encode");
+        std::fprintf(stderr, "stage=load-encode\n");
+        if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
+                      context.encode_staging_allocator, false))
+        {
+            error = format_vulkan_stage_error("load-encode", context.diagnostics,
+                                              "ncnn graph load returned failure");
+            return false;
+        }
+    }
+    const ncnn::Option encode_opt = encode.opt;
+    double read_ms = 0.0;
+    for (;;)
+    {
+        RgbImage input;
+        const auto read_start = PerformanceProfile::Clock::now();
+        std::string read_error;
+        const bool has_frame = reader(input, read_error);
+        read_ms += profile.elapsed_ms(read_start);
+        if (!has_frame)
+        {
+            if (!read_error.empty())
+            {
+                profile.report("video-read", read_ms);
+                error = "stage=video-decode failed: " + read_error;
+                return false;
+            }
+            break;
+        }
+        const std::size_t absolute_index = frame_offset + frame_count;
+        std::fprintf(stderr, "stage=video-frame index=%zu\n", absolute_index);
+        const ProfileScope frame_scope(profile, "vae-encode", absolute_index);
+        ncnn::Mat sample;
+        if (!prepare_input(input, plan, sample))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " failed to prepare the input image";
+            profile.report("video-read", read_ms);
+            return false;
+        }
+
+        ncnn::VkMat sample_gpu;
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_upload(sample, sample_gpu, encode_opt);
+            if (compute.submit_and_wait() != 0)
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("input-upload", context.diagnostics,
+                                                  "Vulkan command submission returned failure");
+                profile.report("video-read", read_ms);
+                return false;
+            }
+        }
+
+        ncnn::VkMat latent_gpu;
+        std::fprintf(stderr, "stage=vae-encode\n");
+        {
+            ncnn::Extractor extractor = encode.create_extractor();
+            extractor.set_light_mode(false);
+            ncnn::VkCompute compute(context.vkdev);
+            if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
+                compute.submit_and_wait() != 0)
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("vae-encode", context.diagnostics,
+                                                  "ncnn extraction or Vulkan command submission returned failure");
+                profile.report("video-read", read_ms);
+                return false;
+            }
+        }
+        sample_gpu.release();
+
+        ncnn::Mat latent;
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_download(latent_gpu, latent, encode_opt);
+            if (compute.submit_and_wait() != 0 || latent.empty())
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("vae-encode", context.diagnostics,
+                                                  "latent download returned failure");
+                profile.report("video-read", read_ms);
+                return false;
+            }
+        }
+        LatentFrame stored;
+        if (!ncnn_mat_to_latent_frame(latent, stored) || !condition_spool.append(stored, error))
+        {
+            if (error.empty())
+                error = "frame=" + std::to_string(absolute_index) + " stage=vae-encode latent spool append failed";
+            profile.report("video-read", read_ms);
+            return false;
+        }
+        frame_count++;
+    }
+    profile.report("video-read", read_ms);
+    if (frame_count == 0)
+    {
+        error = "stage=video-decode failed: video contains no decodable frames";
+        return false;
+    }
+    if (!condition_spool.rewind(error))
+        return false;
+    context.encode_blob_allocator->clear();
+    context.encode_staging_allocator->clear();
+    return true;
+}
+
+bool denoise_video_vulkan(LatentSpool& condition_spool,
+                          const ResolutionPlan& plan,
+                          VulkanInferenceContext& context,
+                          LatentSpool& output_spool,
+                          std::size_t& frame_count,
+                          std::string& error,
+                          const PerformanceProfile& profile,
+                          std::size_t frame_offset)
+{
+    frame_count = 0;
+    if (!LatentSpool::create(output_spool, error))
+        return false;
+
+    const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator);
+    ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
+    if (noise.empty())
+    {
+        error = "stage=noise-create failed";
+        return false;
+    }
+    for (std::size_t index = 0; index < noise.total(); index++)
+        noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
+
+    DitStackSession dit;
+    {
+        const ProfileScope load_scope(profile, "load-dit-stack");
+        std::fprintf(stderr, "stage=load-dit-stack\n");
+        if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
+                                   context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile))
+        {
+            error = format_vulkan_stage_error("load-dit-stack", context.diagnostics,
+                                              "ncnn graph load returned failure");
+            return false;
+        }
+    }
+
+    for (;;)
+    {
+        LatentFrame stored;
+        if (!condition_spool.read_next(stored, error))
+        {
+            if (!error.empty())
+                return false;
+            break;
+        }
+        const std::size_t absolute_index = frame_offset + frame_count;
+        const ProfileScope frame_scope(profile, "dit-stack", absolute_index);
+        ncnn::Mat condition_latent;
+        if (!latent_frame_to_ncnn_mat(stored, condition_latent))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool record is invalid";
+            return false;
+        }
+        ncnn::VkMat condition_gpu;
+        ncnn::VkMat noise_gpu;
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_upload(condition_latent, condition_gpu, dit_opt);
+            compute.record_upload(noise, noise_gpu, dit_opt);
+            std::fprintf(stderr, "stage=noise-upload\n");
+            if (compute.submit_and_wait() != 0)
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("noise-upload", context.diagnostics,
+                                                  "Vulkan command submission returned failure");
+                return false;
+            }
+        }
+
+        ncnn::VkMat input_patches_gpu;
+        std::fprintf(stderr, "stage=dit-input-patchify\n");
+        if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
+                                        context.dit_blob_allocator, context.dit_staging_allocator, input_patches_gpu))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
+                                              "GPU patch assembly returned failure");
+            return false;
+        }
+
+        ncnn::VkMat prediction_gpu;
+        std::fprintf(stderr, "stage=dit-stack\n");
+        if (!dit.run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("dit-stack", context.diagnostics,
+                                              "GPU DiT execution returned failure");
+            return false;
+        }
+
+        ncnn::VkMat noise_patches_gpu;
+        std::fprintf(stderr, "stage=noise-patchify\n");
+        if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                             context.dit_staging_allocator, noise_patches_gpu))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("noise-patchify", context.diagnostics,
+                                              "GPU patch assembly returned failure");
+            return false;
+        }
+
+        ncnn::VkMat endpoint_patches_gpu;
+        std::fprintf(stderr, "stage=v-lerp-endpoint\n");
+        if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                               context.dit_blob_allocator, context.dit_staging_allocator,
+                                               endpoint_patches_gpu))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
+                                              "GPU sampler endpoint returned failure");
+            return false;
+        }
+
+        ncnn::VkMat output_latent_gpu;
+        std::fprintf(stderr, "stage=latent-unpatch\n");
+        if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                    context.dit_staging_allocator, output_latent_gpu))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("latent-unpatch", context.diagnostics,
+                                              "GPU patch removal returned failure");
+            return false;
+        }
+
+        ncnn::Mat output_latent;
+        std::fprintf(stderr, "stage=handoff-latent\n");
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_download(output_latent_gpu, output_latent, dit_opt);
+            if (compute.submit_and_wait() != 0 || output_latent.empty())
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("handoff-latent", context.diagnostics,
+                                                  "latent download returned failure");
+                return false;
+            }
+        }
+        LatentFrame output_stored;
+        if (!ncnn_mat_to_latent_frame(output_latent, output_stored) || !output_spool.append(output_stored, error))
+        {
+            if (error.empty())
+                error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool append failed";
+            return false;
+        }
+        frame_count++;
+    }
+
+    if (!output_spool.rewind(error))
+        return false;
+    context.dit_blob_allocator->clear();
+    context.dit_staging_allocator->clear();
+    return true;
+}
+
+bool decode_video_vulkan(LatentSpool& output_spool,
+                         const ResolutionPlan& plan,
+                         VulkanInferenceContext& context,
+                         const ImageInferenceSession::VideoFrameWriter& writer,
+                         std::size_t expected_frames,
+                         std::size_t& frame_count,
+                         std::string& error,
+                         const PerformanceProfile& profile,
+                         std::size_t frame_offset)
+{
+    frame_count = 0;
+    ncnn::Net decode;
+    {
+        const ProfileScope load_scope(profile, "load-decode");
+        std::fprintf(stderr, "stage=load-decode\n");
+        if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
+                      context.decode_staging_allocator.get(), true))
+        {
+            error = format_vulkan_stage_error("load-decode", context.diagnostics,
+                                              "ncnn graph load returned failure");
+            return false;
+        }
+    }
+
+    double write_ms = 0.0;
+    for (;;)
+    {
+        LatentFrame stored;
+        if (!output_spool.read_next(stored, error))
+        {
+            if (!error.empty())
+                return false;
+            break;
+        }
+        const std::size_t absolute_index = frame_offset + frame_count;
+        const ProfileScope frame_scope(profile, "vae-decode", absolute_index);
+        ncnn::Mat output_latent;
+        if (!latent_frame_to_ncnn_mat(stored, output_latent))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool record is invalid";
+            return false;
+        }
+        ncnn::VkMat decode_latent_gpu;
+        {
+            ncnn::VkCompute compute(context.vkdev);
+            compute.record_upload(output_latent, decode_latent_gpu, decode.opt);
+            if (compute.submit_and_wait() != 0)
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("handoff-latent", context.diagnostics,
+                                                  "latent upload returned failure");
+                return false;
+            }
+        }
+
+        ncnn::Mat reconstruction;
+        std::fprintf(stderr, "stage=vae-decode\n");
+        ncnn::Extractor extractor = decode.create_extractor();
+        extractor.set_light_mode(false);
+        if (extractor.input("in0", decode_latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
+        {
+            error = "frame=" + std::to_string(absolute_index) + " " +
+                    format_vulkan_stage_error("vae-decode", context.diagnostics,
+                                              "ncnn extraction returned failure");
+            return false;
+        }
+        RgbImage output;
+        if (!reconstruction_to_rgb(reconstruction, plan, output))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " stage=output-postprocess failed";
+            return false;
+        }
+        const auto write_start = PerformanceProfile::Clock::now();
+        std::string write_error;
+        const bool write_ok = writer(output, write_error);
+        write_ms += profile.elapsed_ms(write_start);
+        if (!write_ok)
+        {
+            profile.report("video-write", write_ms);
+            error = "stage=video-encode frame=" + std::to_string(absolute_index) + ": " + write_error;
+            return false;
+        }
+        frame_count++;
+    }
+    profile.report("video-write", write_ms);
+    if (frame_count != expected_frames)
+    {
+        error = "stage=video-inference: staged frame count changed during processing";
+        return false;
+    }
+    context.decode_blob_allocator->clear();
+    context.decode_staging_allocator->clear();
+    return true;
+}
+
+bool run_vulkan_image_video(const ImageInferenceSession::VideoFrameReader& reader,
+                            const ImageInferenceSession::VideoFrameWriter& writer,
+                            const ResolutionPlan& plan,
+                            VulkanInferenceContext& context,
+                            std::size_t& frame_count,
+                            std::string& error,
+                            const PerformanceProfile& profile,
+                            std::size_t frame_offset)
+{
+    struct FrameCleanup final
+    {
+        VulkanInferenceContext& context;
+        ~FrameCleanup() { clear_frame_staging_allocators(context); }
+    } cleanup{context};
+
+    frame_count = 0;
+    const auto batch_start = PerformanceProfile::Clock::now();
+    LatentSpool condition_spool;
+    LatentSpool output_spool;
+    std::size_t encoded_frames = 0;
+    if (!encode_video_vulkan(reader, plan, context, condition_spool, encoded_frames, error, profile, frame_offset))
+    {
+        profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
+        return false;
+    }
+    std::size_t denoised_frames = 0;
+    if (!denoise_video_vulkan(condition_spool, plan, context, output_spool, denoised_frames, error, profile,
+                              frame_offset))
+    {
+        frame_count = denoised_frames;
+        profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
+        return false;
+    }
+    if (denoised_frames != encoded_frames)
+    {
+        error = "stage=video-inference: staged frame count changed after DiT";
+        profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
+        return false;
+    }
+    if (!decode_video_vulkan(output_spool, plan, context, writer, denoised_frames, frame_count, error, profile,
+                             frame_offset))
+    {
+        profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
+        return false;
+    }
+    profile.report_batch("video-batch", frame_count, profile.elapsed_ms(batch_start));
+    return true;
+}
+
 bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
                             const ResolutionPlan& plan,
                             VulkanInferenceContext& context,
@@ -724,6 +1173,34 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
                                   *impl_->profile, frame_offset);
 #else
     (void)inputs;
+    (void)frame_offset;
+    error = "image inference requires a Vulkan-enabled build";
+    return false;
+#endif
+}
+
+bool ImageInferenceSession::run_video(const VideoFrameReader& reader,
+                                      const VideoFrameWriter& writer,
+                                      std::size_t& frame_count,
+                                      std::string& error,
+                                      std::size_t frame_offset) const
+{
+    frame_count = 0;
+    error.clear();
+    if (!reader || !writer)
+    {
+        error = "video reader and writer callbacks are required";
+        return false;
+    }
+#if NCNN_VULKAN
+    if (!impl_)
+    {
+        error = "inference session is not open";
+        return false;
+    }
+    return run_vulkan_image_video(reader, writer, impl_->context.plan, impl_->context, frame_count, error,
+                                  *impl_->profile, frame_offset);
+#else
     (void)frame_offset;
     error = "image inference requires a Vulkan-enabled build";
     return false;

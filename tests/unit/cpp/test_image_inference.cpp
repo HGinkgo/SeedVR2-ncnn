@@ -1,11 +1,35 @@
 #include "inference/image_inference.h"
+#include "inference/latent_spool.h"
 
 #include <cassert>
+#include <cstdio>
 #include <string>
 #include <vector>
 
 int main()
 {
+    seedvr2::LatentSpool spool;
+    std::string spool_error;
+    assert(seedvr2::LatentSpool::create(spool, spool_error));
+    seedvr2::LatentFrame first;
+    first.width = 2;
+    first.height = 1;
+    first.channels = 2;
+    first.values = {1.0f, 2.0f, 3.0f, 4.0f};
+    seedvr2::LatentFrame second = first;
+    second.values = {-1.0f, -2.0f, -3.0f, -4.0f};
+    assert(spool.append(first, spool_error));
+    assert(spool.append(second, spool_error));
+    assert(spool.rewind(spool_error));
+    seedvr2::LatentFrame decoded;
+    assert(spool.read_next(decoded, spool_error));
+    assert(decoded.width == first.width && decoded.height == first.height &&
+           decoded.channels == first.channels && decoded.values == first.values);
+    assert(spool.read_next(decoded, spool_error));
+    assert(decoded.values == second.values);
+    assert(!spool.read_next(decoded, spool_error));
+    assert(spool_error.empty());
+
     seedvr2::ModelGraphSet graphs;
     seedvr2::RgbImage input;
     input.width = 16;

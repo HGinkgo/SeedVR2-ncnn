@@ -143,69 +143,19 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        int processed_frames = 0;
-        for (;;)
+        std::fprintf(stderr, "stage=video-batch start=0 frames=%d\n", reader.info().frame_count);
+        std::size_t processed_frames = 0;
+        const bool video_ok = session.run_video(
+            [&](seedvr2::RgbImage& frame, std::string& read_error) {
+                return reader.read_next(frame, read_error);
+            },
+            [&](const seedvr2::RgbImage& frame, std::string& write_error) {
+                return writer.write_frame(frame, write_error);
+            }, processed_frames, error);
+        if (!video_ok)
         {
-            std::vector<seedvr2::RgbImage> input_frames;
-            {
-                const seedvr2::ProfileScope read_scope(profile, "video-read");
-                for (std::size_t batch_index = 0; batch_index < seedvr2::ImageInferenceSession::kMaxBatchFrames;
-                     batch_index++)
-                {
-                    seedvr2::RgbImage frame;
-                    if (!reader.read_next(frame, error))
-                    {
-                        if (!error.empty())
-                        {
-                            std::fprintf(stderr, "error: stage=video-decode failed: %s\n", error.c_str());
-                            return 1;
-                        }
-                        break;
-                    }
-                    std::fprintf(stderr, "stage=video-frame index=%d\n",
-                                 processed_frames + static_cast<int>(input_frames.size()));
-                    input_frames.push_back(std::move(frame));
-                }
-            }
-
-            if (input_frames.empty())
-                break;
-
-            std::fprintf(stderr, "stage=video-batch start=%d frames=%zu\n", processed_frames, input_frames.size());
-            std::vector<seedvr2::RgbImage> output_frames;
-            {
-                const auto batch_start = seedvr2::PerformanceProfile::Clock::now();
-                const bool batch_ok =
-                    session.run_batch(input_frames, output_frames, error,
-                                      static_cast<std::size_t>(processed_frames));
-                profile.report_batch("video-batch", input_frames.size(),
-                                     profile.elapsed_ms(batch_start));
-                if (!batch_ok)
-                {
-                    std::fprintf(stderr, "error: stage=video-inference frame=%d: %s\n", processed_frames,
-                                 error.c_str());
-                    return 1;
-                }
-            }
-            if (output_frames.size() != input_frames.size())
-            {
-                std::fprintf(stderr, "error: stage=video-inference frame=%d: batch returned an unexpected frame count\n",
-                             processed_frames);
-                return 1;
-            }
-            {
-                const seedvr2::ProfileScope write_scope(profile, "video-write");
-                for (std::size_t frame_index = 0; frame_index < output_frames.size(); frame_index++)
-                {
-                    if (!writer.write_frame(output_frames[frame_index], error))
-                    {
-                        std::fprintf(stderr, "error: stage=video-encode frame=%d: %s\n",
-                                     processed_frames + static_cast<int>(frame_index), error.c_str());
-                        return 1;
-                    }
-                }
-            }
-            processed_frames += static_cast<int>(output_frames.size());
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
         }
         if (!writer.close(error))
         {
@@ -217,7 +167,7 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "error: stage=video-decode failed: video contains no decodable frames\n");
             return 1;
         }
-        std::fprintf(stderr, "output=%s frames=%d\n", options.output.string().c_str(), processed_frames);
+        std::fprintf(stderr, "output=%s frames=%zu\n", options.output.string().c_str(), processed_frames);
         profile.report_total(profile.elapsed_ms(run_start));
         std::puts("seedvr2-video-inference: ok");
         return 0;
