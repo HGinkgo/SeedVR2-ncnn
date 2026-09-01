@@ -54,6 +54,7 @@ add_executable(seedvr2-ncnn
     src/conditioning/conditioning.cpp
     src/io/image_io.cpp
     src/inference/image_inference.cpp
+    src/inference/latent_spool.cpp
     src/inference/memory_diagnostics.cpp
     src/inference/performance_profile.cpp
     src/model/model_registry.cpp
@@ -215,6 +216,7 @@ if(SEEDVR2_BUILD_TESTS)
         add_executable(seedvr2-image-inference-test
             tests/unit/cpp/test_image_inference.cpp
             src/inference/image_inference.cpp
+            src/inference/latent_spool.cpp
             src/inference/performance_profile.cpp
             src/resolution/resolution_plan.cpp)
         target_include_directories(seedvr2-image-inference-test PRIVATE
