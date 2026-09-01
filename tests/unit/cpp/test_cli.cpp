@@ -151,6 +151,11 @@ int main()
     const std::string total_line = seedvr2::format_profile_total_line(13579.0, 2913);
     require(total_line == "profile name=total ms=13579.0 peak-rss-mib=2913", "profile total line");
 
+    const std::string dit_param_line = seedvr2::format_profile_dit_load_line("param", 12.25);
+    require(dit_param_line == "profile name=dit-param-load ms=12.2", "DiT param load profile line");
+    const std::string dit_bin_line = seedvr2::format_profile_dit_load_line("bin", 987.66);
+    require(dit_bin_line == "profile name=dit-bin-load ms=987.7", "DiT bin load profile line");
+
     seedvr2::PerformanceProfile disabled;
     require(!disabled.enabled(), "profile construct disabled by default");
 
