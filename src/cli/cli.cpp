@@ -2,6 +2,7 @@
 
 #include "resolution/resolution_plan.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -11,6 +12,8 @@ namespace seedvr2
 {
 namespace
 {
+
+constexpr int kProductMaxArea = 256 * 256;
 
 bool parse_integer(const char* text, int& value)
 {
@@ -193,12 +196,21 @@ bool make_image_resolution_plan(const CliOptions& options, int input_width, int 
 
     if (options.width == 0 && options.height == 0)
     {
-        if (ResolutionPlan::from_input_area(input_height, input_width, plan, &error))
+        const long long input_area = static_cast<long long>(input_height) * input_width;
+        const long long bounded_area = std::max<long long>(16 * 16, std::min<long long>(kProductMaxArea, input_area));
+        if (ResolutionPlan::from_input_area(input_height, input_width, plan, &error,
+                                            static_cast<int>(bounded_area)))
             return true;
     }
     else if (ResolutionPlan::from_explicit(options.height, options.width, plan, &error))
     {
-        return true;
+        const long long target_area = static_cast<long long>(plan.image_height) * plan.image_width;
+        if (target_area <= kProductMaxArea)
+            return true;
+
+        error = "CLI target area must not exceed " + std::to_string(kProductMaxArea) +
+                " (256x256 low-resolution product limit), got " + std::to_string(plan.image_height) + "x" +
+                std::to_string(plan.image_width);
     }
     return false;
 }
