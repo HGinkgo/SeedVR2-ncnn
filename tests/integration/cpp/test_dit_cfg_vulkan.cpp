@@ -90,15 +90,21 @@ int main(int argc, char** argv)
 
     ncnn::Mat latent(kLatentSize, kLatentSize, 1, kLatentChannels);
     latent.fill(0.f);
+    seedvr2::ResolutionPlan square;
+    if (!seedvr2::ResolutionPlan::from_explicit(128, 128, square))
+    {
+        std::fprintf(stderr, "stage=square-plan failed\n");
+        return 1;
+    }
     ncnn::VkMat positive_output_gpu;
     ncnn::VkMat negative_output_gpu;
-    if (!seedvr2::run_dit_stack_gpu(latent, positive_condition, 500.f, argv[1], vkdev, blob_allocator,
+    if (!seedvr2::run_dit_stack_gpu(latent, positive_condition, 500.f, argv[1], square, vkdev, blob_allocator,
                                     staging_allocator, positive_output_gpu))
     {
         std::fprintf(stderr, "stage=positive-dit-stack failed\n");
         return 1;
     }
-    if (!seedvr2::run_dit_stack_gpu(latent, negative_condition, 500.f, argv[2], vkdev, blob_allocator,
+    if (!seedvr2::run_dit_stack_gpu(latent, negative_condition, 500.f, argv[2], square, vkdev, blob_allocator,
                                      staging_allocator, negative_output_gpu))
     {
         std::fprintf(stderr, "stage=negative-dit-stack failed\n");
