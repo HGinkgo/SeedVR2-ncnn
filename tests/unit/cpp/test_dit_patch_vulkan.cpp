@@ -69,6 +69,12 @@ int main()
     ncnn::VkAllocator* staging_allocator = vkdev->acquire_staging_allocator();
     ncnn::Option opt;
     configure(opt, blob_allocator, staging_allocator);
+    seedvr2::ResolutionPlan square;
+    if (!seedvr2::ResolutionPlan::from_explicit(128, 128, square))
+    {
+        std::fprintf(stderr, "stage=square-plan failed\n");
+        return 1;
+    }
 
     ncnn::Mat noise(kLatentSize, kLatentSize, 1, kLatentChannels);
     ncnn::Mat condition(kLatentSize, kLatentSize, 1, kLatentChannels);
@@ -89,8 +95,8 @@ int main()
     }
 
     ncnn::VkMat input_patches_gpu;
-    if (!seedvr2::make_dit_input_patches_gpu(noise_gpu, condition_gpu, vkdev, blob_allocator, staging_allocator,
-                                              input_patches_gpu))
+    if (!seedvr2::make_dit_input_patches_gpu(noise_gpu, condition_gpu, square, vkdev, blob_allocator,
+                                              staging_allocator, input_patches_gpu))
     {
         std::fprintf(stderr, "stage=input-patchify failed\n");
         return 1;
@@ -128,14 +134,15 @@ int main()
         }
 
     ncnn::VkMat output_patches_gpu;
-    if (!seedvr2::patch_latent_for_dit_output_gpu(noise_gpu, vkdev, blob_allocator, staging_allocator,
+    if (!seedvr2::patch_latent_for_dit_output_gpu(noise_gpu, square, vkdev, blob_allocator, staging_allocator,
                                                    output_patches_gpu))
     {
         std::fprintf(stderr, "stage=output-patchify failed\n");
         return 1;
     }
     ncnn::VkMat restored_gpu;
-    if (!seedvr2::unpatch_dit_output_gpu(output_patches_gpu, vkdev, blob_allocator, staging_allocator, restored_gpu))
+    if (!seedvr2::unpatch_dit_output_gpu(output_patches_gpu, square, vkdev, blob_allocator, staging_allocator,
+                                          restored_gpu))
     {
         std::fprintf(stderr, "stage=unpatch failed\n");
         return 1;

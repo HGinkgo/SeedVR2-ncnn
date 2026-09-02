@@ -432,18 +432,6 @@ bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
            valid_output;
 }
 
-bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
-                                const ncnn::VkMat& condition,
-                                ncnn::VulkanDevice* vkdev,
-                                ncnn::VkAllocator* blob_allocator,
-                                ncnn::VkAllocator* staging_allocator,
-                                ncnn::VkMat& patches)
-{
-    ResolutionPlan plan;
-    return ResolutionPlan::from_explicit(128, 128, plan) &&
-           make_dit_input_patches_gpu(noise, condition, plan, vkdev, blob_allocator, staging_allocator, patches);
-}
-
 bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
                                      const ResolutionPlan& plan,
                                      ncnn::VulkanDevice* vkdev,
@@ -477,17 +465,6 @@ bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
         return false;
     return !patches.empty() && patches.dims == 2 && patches.w == kOutputPatchWidth &&
            patches.h == plan.video_tokens && patches.elempack == 1;
-}
-
-bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
-                                     ncnn::VulkanDevice* vkdev,
-                                     ncnn::VkAllocator* blob_allocator,
-                                     ncnn::VkAllocator* staging_allocator,
-                                     ncnn::VkMat& patches)
-{
-    ResolutionPlan plan;
-    return ResolutionPlan::from_explicit(128, 128, plan) &&
-           patch_latent_for_dit_output_gpu(latent, plan, vkdev, blob_allocator, staging_allocator, patches);
 }
 
 bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
@@ -525,17 +502,6 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
         compute.submit_and_wait() != 0 || !unpack_gpu_to_pack1(packed_latent, vkdev, net.opt, latent))
         return false;
     return is_plan_latent(latent, plan);
-}
-
-bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
-                            ncnn::VulkanDevice* vkdev,
-                            ncnn::VkAllocator* blob_allocator,
-                            ncnn::VkAllocator* staging_allocator,
-                            ncnn::VkMat& latent)
-{
-    ResolutionPlan plan;
-    return ResolutionPlan::from_explicit(128, 128, plan) &&
-           unpatch_dit_output_gpu(patches, plan, vkdev, blob_allocator, staging_allocator, latent);
 }
 
 bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
@@ -590,21 +556,6 @@ bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
             return false;
     }
     return run_dit_stack_gpu(patches_gpu, text, timestep_value, stack_dir, plan, vkdev, blob_allocator,
-                             staging_allocator, output_matrix_gpu);
-}
-
-bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu)
-{
-    ResolutionPlan plan;
-    return ResolutionPlan::from_explicit(128, 128, plan) &&
-           run_dit_stack_gpu(latent_input, text, timestep_value, stack_dir, plan, vkdev, blob_allocator,
                              staging_allocator, output_matrix_gpu);
 }
 
@@ -786,21 +737,6 @@ bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
     DitStackSession session;
     return DitStackSession::open(stack_dir, plan, vkdev, blob_allocator, staging_allocator, session) &&
            session.run(input_patches, text, timestep_value, plan, output_matrix_gpu);
-}
-
-bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu)
-{
-    ResolutionPlan plan;
-    return ResolutionPlan::from_explicit(128, 128, plan) &&
-           run_dit_stack_gpu(input_patches, text, timestep_value, stack_dir, plan, vkdev, blob_allocator,
-                             staging_allocator, output_matrix_gpu);
 }
 
 } // namespace seedvr2

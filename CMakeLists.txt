@@ -62,7 +62,6 @@ add_executable(seedvr2-ncnn
     src/video/ffmpeg_video_reader.cpp
     src/awa/awa_layers.cpp
     src/resolution/resolution_plan.cpp
-    src/sampler/sampler.cpp
     src/vae/temporal_pad.cpp
     src/vae/causal_conv3d.cpp
     src/vae/depth_to_space.cpp)
@@ -335,6 +334,7 @@ if(SEEDVR2_BUILD_TESTS AND SEEDVR2_ENABLE_VULKAN)
     add_executable(seedvr2-dit-patch-vulkan-test
         tests/unit/cpp/test_dit_patch_vulkan.cpp
         src/dit/dit_stack.cpp
+        src/inference/performance_profile.cpp
         src/resolution/resolution_plan.cpp
         src/awa/awa_layers.cpp)
     target_link_libraries(seedvr2-dit-patch-vulkan-test PRIVATE ncnn)
@@ -464,6 +464,7 @@ if(SEEDVR2_BUILD_INTEGRATION_TESTS)
         add_executable(seedvr2-dit-cfg-vulkan-test
             tests/integration/cpp/test_dit_cfg_vulkan.cpp
             src/dit/dit_stack.cpp
+            src/inference/performance_profile.cpp
             src/resolution/resolution_plan.cpp
             src/sampler/sampler.cpp
             src/sampler/vulkan_sampler.cpp
@@ -478,6 +479,7 @@ if(SEEDVR2_BUILD_INTEGRATION_TESTS)
         add_executable(seedvr2-dynamic-dit-stack-vulkan-test
             tests/integration/cpp/test_dynamic_dit_stack_vulkan.cpp
             src/dit/dit_stack.cpp
+            src/inference/performance_profile.cpp
             src/resolution/resolution_plan.cpp
             src/conditioning/conditioning.cpp
             src/awa/awa_layers.cpp)
@@ -507,6 +509,7 @@ if(SEEDVR2_BUILD_INTEGRATION_TESTS)
             tests/integration/cpp/test_vae_dit_stack_vulkan.cpp
             src/awa/awa_layers.cpp
             src/dit/dit_stack.cpp
+            src/inference/performance_profile.cpp
             src/resolution/resolution_plan.cpp
             src/conditioning/conditioning.cpp
             src/sampler/sampler.cpp
