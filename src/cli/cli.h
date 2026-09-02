@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace seedvr2
 {
@@ -22,6 +23,8 @@ struct CliOptions final
     std::filesystem::path model_dir = "models/seedvr2-3b";
     std::filesystem::path input;
     std::filesystem::path output = "out.png";
+    std::vector<std::filesystem::path> inputs;
+    std::vector<std::filesystem::path> outputs;
     int width = 0;
     int height = 0;
     int gpu_id = -1;

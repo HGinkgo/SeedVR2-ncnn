@@ -28,8 +28,8 @@ void print_usage()
     std::puts("  --help       Show this help message");
     std::puts("  --version    Show SeedVR2-ncnn and ncnn versions");
     std::puts("  --model-dir  Model directory (default: models/seedvr2-3b)");
-    std::puts("  --input      Input image path");
-    std::puts("  --output     Output image path (default: out.png)");
+    std::puts("  --input      Input image path (repeat up to 2 times)");
+    std::puts("  --output     Output image path (repeat up to 2 times; default: out.png for one image)");
     std::puts("  --width      Explicit output width (optional; target area <= 256x256)");
     std::puts("  --height     Explicit output height (optional; target area <= 256x256)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
@@ -96,6 +96,11 @@ int main(int argc, char** argv)
 
     if (has_video_extension(options.input))
     {
+        if (options.inputs.size() != 1 || options.outputs.size() != 1)
+        {
+            std::fprintf(stderr, "error: video input accepts exactly one input and output path\n");
+            return 1;
+        }
         seedvr2::VideoReader reader;
         if (!seedvr2::VideoReader::open(options.input, reader, error))
         {
@@ -173,25 +178,36 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    seedvr2::RgbImage input_image;
+    std::vector<seedvr2::RgbImage> input_images;
     {
         const seedvr2::ProfileScope read_scope(profile, "image-read");
-        if (!seedvr2::load_rgb_image(options.input, input_image, error))
+        input_images.reserve(options.inputs.size());
+        for (const auto& input_path : options.inputs)
         {
-            std::fprintf(stderr, "error: %s\n", error.c_str());
-            return 1;
+            seedvr2::RgbImage image;
+            if (!seedvr2::load_rgb_image(input_path, image, error))
+            {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
+            input_images.push_back(std::move(image));
         }
     }
 
     seedvr2::ResolutionPlan resolution_plan;
-    if (!seedvr2::make_image_resolution_plan(options, input_image.width, input_image.height,
+    if (!seedvr2::make_image_resolution_plan(options, input_images.front().width, input_images.front().height,
                                              resolution_plan, error))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
-    std::fprintf(stderr, "input=%dx%d target=%dx%d\n", input_image.width, input_image.height,
-                 resolution_plan.image_width, resolution_plan.image_height);
+    if (input_images.size() == 1)
+        std::fprintf(stderr, "input=%dx%d target=%dx%d\n", input_images.front().width, input_images.front().height,
+                     resolution_plan.image_width, resolution_plan.image_height);
+    else
+        std::fprintf(stderr, "input=%dx%d target=%dx%d frames=%zu\n", input_images.front().width,
+                     input_images.front().height, resolution_plan.image_width, resolution_plan.image_height,
+                     input_images.size());
 
     seedvr2::ModelGraphSet graphs;
     if (!registry.resolve(resolution_plan, graphs, error))
@@ -200,23 +216,39 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    seedvr2::RgbImage output_image;
-    if (!seedvr2::run_image_inference(graphs, input_image, resolution_plan, options.gpu_id, output_image, error,
-                                      options.memory_budget_mib, &profile))
+    seedvr2::ImageInferenceSession session;
+    if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
+                                              options.memory_budget_mib, &profile))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
+    std::vector<seedvr2::RgbImage> output_images;
+    if (!session.run_batch(input_images, output_images, error))
+    {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+    if (output_images.size() != options.outputs.size())
+    {
+        std::fprintf(stderr, "error: inference returned %zu outputs for %zu inputs\n", output_images.size(),
+                     options.outputs.size());
+        return 1;
+    }
     {
         const seedvr2::ProfileScope write_scope(profile, "image-write");
-        if (!seedvr2::save_rgb_image(options.output, output_image, error))
+        for (std::size_t index = 0; index < output_images.size(); ++index)
         {
-            std::fprintf(stderr, "error: %s\n", error.c_str());
-            return 1;
+            if (!seedvr2::save_rgb_image(options.outputs[index], output_images[index], error))
+            {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
         }
     }
 
-    std::fprintf(stderr, "output=%s\n", options.output.string().c_str());
+    for (const auto& output_path : options.outputs)
+        std::fprintf(stderr, "output=%s\n", output_path.string().c_str());
     profile.report_total(profile.elapsed_ms(run_start));
     std::puts("seedvr2-image-inference: ok");
     return 0;
