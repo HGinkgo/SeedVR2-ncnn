@@ -61,6 +61,7 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
 
     bool width_set = false;
     bool height_set = false;
+    bool output_set = false;
     for (int index = 1; index < argc; ++index)
     {
         const char* argument = argv[index];
@@ -91,13 +92,30 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
         {
             if (!next_value(argc, argv, index, value, error))
                 return false;
-            options.input = value;
+            if (options.inputs.size() >= 2)
+            {
+                error = "--input accepts at most 2 paths";
+                return false;
+            }
+            options.inputs.emplace_back(value);
+            if (options.input.empty())
+                options.input = value;
         }
         else if (std::strcmp(argument, "--output") == 0)
         {
             if (!next_value(argc, argv, index, value, error))
                 return false;
-            options.output = value;
+            if (options.outputs.size() >= 2)
+            {
+                error = "--output accepts at most 2 paths";
+                return false;
+            }
+            options.outputs.emplace_back(value);
+            if (!output_set)
+            {
+                options.output = value;
+                output_set = true;
+            }
         }
         else if (std::strcmp(argument, "--width") == 0 || std::strcmp(argument, "--height") == 0)
         {
@@ -154,9 +172,23 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
 
     if (options.action != CliAction::Run)
         return true;
-    if (options.input.empty())
+    if (options.inputs.empty())
     {
         error = "--input is required";
+        return false;
+    }
+    if (options.outputs.empty())
+    {
+        if (options.inputs.size() != 1)
+        {
+            error = "--input and --output must contain the same number of paths";
+            return false;
+        }
+        options.outputs.push_back(options.output);
+    }
+    if (options.inputs.size() != options.outputs.size())
+    {
+        error = "--input and --output must contain the same number of paths";
         return false;
     }
     if (width_set != height_set)

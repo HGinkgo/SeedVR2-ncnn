@@ -28,7 +28,7 @@ cmake --build build-vulkan --parallel
 bash tests/smoke.sh ./build/seedvr2-ncnn
 ```
 
-当前 CLI 支持 PNG/JPEG 图片，以及逐帧处理未压缩 RGB24 AVI。启用 FFmpeg 后可读取常见压缩视频；视频输出仍为 RGB24 AVI。单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。可用 `--memory-budget-mib` 设置运行前的最小 Vulkan 显存预算（默认 `0`，不预检）。
+当前 CLI 支持 PNG/JPEG 图片，以及逐帧处理未压缩 RGB24 AVI。启用 FFmpeg 后可读取常见压缩视频；视频输出仍为 RGB24 AVI。单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。图片 CLI 可将 `--input` 和 `--output` 各重复 1 次（最多两张图片），在一次会话内批处理并复用 DiT 加载；视频仍要求单个输入和输出。可用 `--memory-budget-mib` 设置运行前的最小 Vulkan 显存预算（默认 `0`，不预检）。
 
 发布版面向低分辨率输入：自动模式会将输入等比缩放、按 16 像素对齐并居中裁剪到不超过 `256x256` 的目标面积；输入本身低于该上限时不会为填满面积而放大（仅保证合法的 16 像素最小对齐）。显式 `--width/--height` 也必须满足同一面积限制。当前正式验证的目标尺寸为 `128x128`、`128x256` 和 `256x256`，其他满足限制的动态尺寸不作为发布验证承诺。
 

@@ -45,9 +45,25 @@ int main()
     require(options.model_dir == std::filesystem::path("models/seedvr2-3b"), "model directory");
     require(options.input == std::filesystem::path("input.png"), "input path");
     require(options.output == std::filesystem::path("result.png"), "output path");
+    require(options.inputs == std::vector<std::filesystem::path>{"input.png"}, "single input list");
+    require(options.outputs == std::vector<std::filesystem::path>{"result.png"}, "single output list");
     require(options.width == 0 && options.height == 0, "automatic resolution defaults");
     require(options.gpu_id == -1, "automatic GPU default");
     require(options.memory_budget_mib == 0, "automatic memory budget default");
+
+    const seedvr2::CliOptions default_output = parse({"seedvr2-ncnn", "--input", "input.png"}, error);
+    require(default_output.outputs == std::vector<std::filesystem::path>{"out.png"}, "default output list");
+
+    const seedvr2::CliOptions image_batch = parse(
+        {"seedvr2-ncnn", "--input", "first.png", "--input", "second.png", "--output", "first-out.png",
+         "--output", "second-out.png"},
+        error);
+    require(image_batch.inputs == std::vector<std::filesystem::path>{"first.png", "second.png"},
+            "two image inputs");
+    require(image_batch.outputs == std::vector<std::filesystem::path>{"first-out.png", "second-out.png"},
+            "two image outputs");
+    require(image_batch.input == std::filesystem::path("first.png"), "batch keeps first input alias");
+    require(image_batch.output == std::filesystem::path("first-out.png"), "batch keeps first output alias");
 
     const seedvr2::CliOptions explicit_size = parse(
         {"seedvr2-ncnn", "--input", "input.png", "--width", "256", "--height", "256", "--gpu-id", "1"},
@@ -123,6 +139,16 @@ int main()
 
     const char* unknown_option[] = {"seedvr2-ncnn", "--bogus", "value"};
     require(!seedvr2::parse_cli(3, unknown_option, rejected, error), "unknown option rejected");
+
+    const char* too_many_inputs[] = {"seedvr2-ncnn", "--input", "one.png", "--input", "two.png",
+                                     "--input", "three.png", "--output", "out.png"};
+    require(!seedvr2::parse_cli(9, too_many_inputs, rejected, error), "more than two image inputs rejected");
+    require(error.find("at most 2") != std::string::npos, "image input limit error");
+
+    const char* mismatched_outputs[] = {"seedvr2-ncnn", "--input", "one.png", "--input", "two.png",
+                                        "--output", "out.png"};
+    require(!seedvr2::parse_cli(7, mismatched_outputs, rejected, error), "image output count mismatch rejected");
+    require(error.find("same number") != std::string::npos, "image output count error");
 
     const char* negative_budget[] = {"seedvr2-ncnn", "--input", "input.png", "--memory-budget-mib", "-1"};
     require(!seedvr2::parse_cli(5, negative_budget, rejected, error), "negative memory budget rejected");
