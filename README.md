@@ -4,6 +4,20 @@
 
 [下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
+## 效果展示
+
+下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。左图为输入，右图为输出；示例使用 `32x32` 输入和显式 `128x128` 目标。
+
+| 输入 | 输出 |
+| --- | --- |
+| <img src="assets/showcase-image-input-32.png" alt="32x32 风景输入图" width="256"> | <img src="assets/showcase-image-output-128.png" alt="SeedVR2-ncnn 128x128 风景输出图" width="256"> |
+
+两帧 AVI 示例（左：输入，右：输出）：
+
+![两帧视频输入与输出对照](assets/showcase-video-32-to-128.gif)
+
+示例源图来自 [ArrayFire assets](https://github.com/arrayfire/assets/blob/master/examples/images/README.md)，以 CC0 1.0 发布；展示资产仅包含该图的 `32x32` 裁剪及本项目产生的结果。
+
 ## 能做什么
 
 - 使用 Vulkan GPU 运行 FP32 SeedVR2 模型，无需 Python、PyTorch 或 CUDA。
