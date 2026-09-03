@@ -23,9 +23,17 @@ constexpr int kVideoPatchWidth = 132;
 constexpr int kTextInputWidth = 5120;
 constexpr int kOutputPatchWidth = 64;
 
-struct DitLoadProfile
+struct DitLoadProfile final : ncnn::NetLoadModelObserver
 {
     explicit DitLoadProfile(const PerformanceProfile* profile_in) : profile(profile_in) {}
+
+    void on_load_model(const ncnn::NetLoadModelProfile& value) override
+    {
+        ncnn_model_load_ms += value.layer_model_load_ms;
+        ncnn_pipeline_create_ms += value.pipeline_create_ms;
+        ncnn_upload_record_ms += value.upload_record_ms;
+        ncnn_upload_submit_ms += value.upload_submit_ms;
+    }
 
     int load_param(ncnn::Net& net, const char* path)
     {
@@ -55,11 +63,22 @@ struct DitLoadProfile
     {
         std::fprintf(stderr, "%s\n", format_profile_dit_load_line("param", param_ms).c_str());
         std::fprintf(stderr, "%s\n", format_profile_dit_load_line("bin", bin_ms).c_str());
+        std::fprintf(stderr, "%s\n", format_profile_dit_stage_line("ncnn-model-load", ncnn_model_load_ms).c_str());
+        std::fprintf(stderr, "%s\n",
+                     format_profile_dit_stage_line("ncnn-pipeline-create", ncnn_pipeline_create_ms).c_str());
+        std::fprintf(stderr, "%s\n",
+                     format_profile_dit_stage_line("ncnn-upload-record", ncnn_upload_record_ms).c_str());
+        std::fprintf(stderr, "%s\n",
+                     format_profile_dit_stage_line("ncnn-upload-submit", ncnn_upload_submit_ms).c_str());
     }
 
     const PerformanceProfile* profile = nullptr;
     double param_ms = 0.0;
     double bin_ms = 0.0;
+    double ncnn_model_load_ms = 0.0;
+    double ncnn_pipeline_create_ms = 0.0;
+    double ncnn_upload_record_ms = 0.0;
+    double ncnn_upload_submit_ms = 0.0;
 };
 
 void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blob_allocator,
@@ -81,6 +100,8 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
                 const AwaRuntimeSpec* runtime_spec, DitLoadProfile* load_profile)
 {
     configure(net, vkdev, blob_allocator, staging_allocator);
+    if (load_profile)
+        net.set_load_model_observer(load_profile);
     register_seedvr2_awa_layers(net, runtime_spec);
     const std::string param_path = stem + ".ncnn.param";
     const std::string model_path = stem + ".ncnn.bin";
@@ -110,6 +131,8 @@ bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAlloc
         "Input in0 0 1 in0\n"
         "Packing unpack 1 1 in0 out0 0=1\n";
     configure(net, vkdev, blob_allocator, staging_allocator);
+    if (load_profile)
+        net.set_load_model_observer(load_profile);
     const int param_status = load_profile ? load_profile->load_param_mem(net, kPackingParam)
                                           : net.load_param_mem(kPackingParam);
     if (param_status != 0)
