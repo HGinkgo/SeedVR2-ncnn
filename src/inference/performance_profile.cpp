@@ -55,6 +55,14 @@ std::string format_profile_dit_load_line(const char* component, double elapsed_m
     return line.str();
 }
 
+std::string format_profile_dit_stage_line(const char* stage, double elapsed_ms)
+{
+    std::ostringstream line;
+    line << "profile name=dit-" << stage;
+    append_ms(line, elapsed_ms);
+    return line.str();
+}
+
 std::uint64_t PerformanceProfile::peak_rss_mib() const
 {
 #if defined(__linux__)

@@ -31,6 +31,10 @@ std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_
 // Aggregate DiT graph-load lines, e.g. `profile name=dit-param-load ms=123.4`.
 std::string format_profile_dit_load_line(const char* component, double elapsed_ms);
 
+// Aggregate ncnn model-load stages for the DiT stack, e.g.
+// `profile name=dit-ncnn-upload-submit ms=123.4`.
+std::string format_profile_dit_stage_line(const char* stage, double elapsed_ms);
+
 // Opt-in stage timing for the Vulkan product path.
 //
 // Profiling is off unless the caller constructs the profile as enabled. When it

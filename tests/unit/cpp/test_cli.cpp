@@ -199,6 +199,15 @@ int main()
     const std::string dit_bin_line = seedvr2::format_profile_dit_load_line("bin", 987.66);
     require(dit_bin_line == "profile name=dit-bin-load ms=987.7", "DiT bin load profile line");
 
+    const std::string dit_ncnn_model = seedvr2::format_profile_dit_stage_line("ncnn-model-load", 12.25);
+    require(dit_ncnn_model == "profile name=dit-ncnn-model-load ms=12.2", "DiT ncnn model load line");
+    const std::string dit_ncnn_pipeline = seedvr2::format_profile_dit_stage_line("ncnn-pipeline-create", 0.0);
+    require(dit_ncnn_pipeline == "profile name=dit-ncnn-pipeline-create ms=0.0",
+            "DiT ncnn pipeline create line");
+    const std::string dit_ncnn_submit = seedvr2::format_profile_dit_stage_line("ncnn-upload-submit", 987.66);
+    require(dit_ncnn_submit == "profile name=dit-ncnn-upload-submit ms=987.7",
+            "DiT ncnn upload submit line");
+
     seedvr2::PerformanceProfile disabled;
     require(!disabled.enabled(), "profile construct disabled by default");
 
