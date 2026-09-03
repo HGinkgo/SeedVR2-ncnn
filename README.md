@@ -1,40 +1,109 @@
 # SeedVR2-ncnn
 
-SeedVR2 的 ncnn/Vulkan 实现项目，目标是提供类似 `zimage-ncnn-vulkan` 的便携式图像与视频超分命令行程序。
+适用于 Linux 和 Windows x86_64 的 SeedVR2 原生 C++ / ncnn / Vulkan 图像与视频增强命令行工具。
 
-## 构建
+[下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
-基础 CPU 构建只需要 CMake 和 C++17 编译器：
+## 能做什么
+
+- 使用 Vulkan GPU 运行 FP32 SeedVR2 模型，无需 Python、PyTorch 或 CUDA。
+- 处理 PNG/JPEG 图片；处理 RGB24 AVI 视频。Linux/Windows 运行包带有 LGPL FFmpeg 运行时，可读取常见压缩视频输入；视频输出固定为 RGB24 AVI。
+- 根据输入自动规划目标尺寸，或使用 `--width` 和 `--height` 指定目标尺寸。
+- 支持单张图片、最多两张图片的一次调用，以及单个视频文件。
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) 下载并解压对应平台的运行包。
+2. 从 [ModelScope](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) 下载模型到运行包目录。安装了 ModelScope CLI 时可执行：
+
+```bash
+modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
+```
+
+3. 在 Linux 运行第一张图片：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input input.png \
+  --output output.png \
+  --gpu-id 0
+```
+
+Windows 在运行包目录中使用同样的参数：
+
+```bat
+seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output.png --gpu-id 0
+```
+
+将视频处理到指定的低分辨率目标：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input input.avi \
+  --output output.avi \
+  --width 128 --height 128 \
+  --gpu-id 0
+```
+
+使用 `--help` 查看全部参数。模型包独立分发；运行包本身不依赖 Python、PyTorch 或 CUDA。
+
+## 动态尺寸
+
+发布版的自动模式保持输入宽高比，将目标对齐到 16 像素，并在必要时居中裁剪。目标面积不超过 `256x256`；低于该上限的输入不会仅为填满面积而被放大。显式 `--width` / `--height` 使用相同上限。
+
+| 发布验证目标 | 图片 | 两帧 AVI |
+| --- | --- | --- |
+| `128x128` | 已验证 | 已验证 |
+| `128x256` | 已验证 | - |
+| `256x256` | 已验证 | - |
+
+其他符合 16 像素对齐和面积上限的动态尺寸可以请求，但不属于当前发布验证承诺。
+
+## 输入与输出
+
+| 工作流 | 输入 | 输出 |
+| --- | --- | --- |
+| 图片 | PNG、JPEG | PNG、JPEG |
+| 基础视频 | RGB24 AVI | RGB24 AVI |
+| 带 FFmpeg 的运行包 | 常见压缩视频格式 | RGB24 AVI |
+
+图片调用可将 `--input` 和 `--output` 各重复一次，以在一次调用中处理两张图片。视频调用要求一个输入和一个 `.avi` 输出。
+
+## 模型与硬件
+
+模型目录必须是 ModelScope 发布的完整动态包：根目录含有 `manifest.sha256`（75 条记录），且包内不能有符号链接。将该目录传给 `--model-dir`。
+
+当前模型为 FP32，通常需要约 10 GiB 或以上的 Vulkan heap。RTX 3090 是低分辨率路径的验收基线；6 GiB 级显卡不在端到端支持范围内。Linux x86_64 运行包以 Ubuntu 22.04（glibc 2.35）为兼容基线构建，Windows GPU 驱动需由系统自行提供。
+
+## 当前边界
+
+- 本发布线面向低分辨率目标；720p 与长视频尚未纳入支持或验证范围。
+- macOS 不在产品范围内。
+- 模型权重和第三方依赖遵循各自许可证。
+
+## 从源码构建
+
+CPU 构建只需要 CMake 和 C++17 编译器：
 
 ```bash
 cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-启用 Vulkan 构建需要本机安装 Vulkan SDK、支持 Vulkan 的 GPU 和对应驱动：
+Vulkan 构建需要本地 Vulkan SDK、支持 Vulkan 的 GPU 与驱动：
 
 ```bash
 cmake -S . -B build-vulkan -DSEEDVR2_ENABLE_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-vulkan --parallel
 ```
 
-需要压缩视频输入时，额外配置 `-DSEEDVR2_ENABLE_FFMPEG=ON`，并提供 FFmpeg 开发库。
+压缩视频输入还需要在配置时加入 `-DSEEDVR2_ENABLE_FFMPEG=ON` 并提供 FFmpeg 开发库。
 
-## CLI
+## 开发与测试
 
-```bash
-./build/seedvr2-ncnn --help
-./build/seedvr2-ncnn --version
-bash tests/smoke.sh ./build/seedvr2-ncnn
-```
-
-当前 CLI 支持 PNG/JPEG 图片，以及逐帧处理未压缩 RGB24 AVI。启用 FFmpeg 后可读取常见压缩视频；视频输出仍为 RGB24 AVI。单图推理使用 Vulkan 构建，模型目录按目标尺寸组织。图片 CLI 可将 `--input` 和 `--output` 各重复 1 次（最多两张图片），在一次会话内批处理并复用 DiT 加载；视频仍要求单个输入和输出。可用 `--memory-budget-mib` 设置运行前的最小 Vulkan 显存预算（默认 `0`，不预检）。
-
-发布版面向低分辨率输入：自动模式会将输入等比缩放、按 16 像素对齐并居中裁剪到不超过 `256x256` 的目标面积；输入本身低于该上限时不会为填满面积而放大（仅保证合法的 16 像素最小对齐）。显式 `--width/--height` 也必须满足同一面积限制。当前正式验证的目标尺寸为 `128x128`、`128x256` 和 `256x256`，其他满足限制的动态尺寸不作为发布验证承诺。
-
-## 测试
-
-默认 CTest 只包含快速的原生单元和后端契约测试：CPU 构建通常为 12 项，Vulkan 构建为 17 项。
+默认 CTest 覆盖快速的原生单元和后端契约测试；模型加载、golden 和端到端测试需要本地模型及参考数据，按需启用。测试层级见 [tests/README.md](tests/README.md)。
 
 ```bash
 cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DSEEDVR2_BUILD_TESTS=ON
@@ -42,29 +111,6 @@ cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
-`tests/integration/cpp/` 中的模型加载、golden 和端到端测试需要本地模型/参考数据，只有显式配置 `-DSEEDVR2_BUILD_INTEGRATION_TESTS=ON` 才会构建，不会进入默认 CTest。`tests/python/` 验证导出和模型包工具；`tests/manual/package/` 验证 Linux/Windows runtime 包契约。各层的用途见 [`tests/README.md`](tests/README.md)。
-
-## 硬件要求
-
-Vulkan 运行需要支持 Vulkan 的 GPU 和驱动。模型权重单独分发；当前 FP32 模型包通常需要约 10 GiB 以上的 Vulkan heap，显存不足时程序会报告分配失败。RTX 3090 是当前低分辨率验收基线；6 GiB 级显卡不属于端到端支持目标。Windows GPU 驱动不随运行包分发。
-
-Linux x86_64 runtime 以 Ubuntu 22.04（glibc 2.35）为兼容基线构建；较旧发行版可能需要自行构建。
-
-## 模型
-
-模型包托管在 [ModelScope](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)。发布版使用扁平动态模型包：解包后应包含 `manifest.sha256`（75 条记录），且包内不得有符号链接；通过 `--model-dir` 指定解包目录。模型仓库中的 `README.md` 以当前发布包文件名为准；旧的固定分辨率目录仅作为兼容回退，不是当前发布验证承诺。
-
-## 目录
-
-```text
-SeedVR2-ncnn/
-├── src/                 # 应用源码
-├── tests/               # 单元、集成、Python 和 runtime 契约测试
-├── third_party/ncnn/    # ncnn SSH 子模块
-├── CMakeLists.txt
-└── README.en.md         # English documentation
-```
-
 ## 许可证
 
-ncnn 使用 BSD-3-Clause 许可证；SeedVR2 模型、权重和其他第三方依赖遵循其各自许可证。
+ncnn 使用 BSD-3-Clause 许可证。SeedVR2 模型、权重和其他第三方依赖遵循各自许可证。
