@@ -1,4 +1,5 @@
 #include "dit/dit_stack.h"
+#include "dit/dit_stack_internal.h"
 
 #include <chrono>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include "awa/awa_layers.h"
 #include "datareader.h"
 #include "net.h"
+#include "pipelinecache.h"
 #include "inference/performance_profile.h"
 
 namespace seedvr2
@@ -81,8 +83,13 @@ struct DitLoadProfile final : ncnn::NetLoadModelObserver
     double ncnn_upload_submit_ms = 0.0;
 };
 
-void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blob_allocator,
-               ncnn::VkAllocator* staging_allocator)
+} // namespace
+
+void configure_dit_vulkan_net(ncnn::Net& net,
+                              ncnn::VulkanDevice* vkdev,
+                              ncnn::VkAllocator* blob_allocator,
+                              ncnn::VkAllocator* staging_allocator,
+                              ncnn::PipelineCache* pipeline_cache)
 {
     net.opt.use_vulkan_compute = true;
     net.opt.use_packing_layout = false;
@@ -92,14 +99,19 @@ void configure(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blo
     net.opt.blob_vkallocator = blob_allocator;
     net.opt.workspace_vkallocator = blob_allocator;
     net.opt.staging_vkallocator = staging_allocator;
+    net.opt.pipeline_cache = pipeline_cache;
     net.set_vulkan_device(vkdev);
 }
 
+namespace
+{
+
 bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkdev,
                 ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator,
-                const AwaRuntimeSpec* runtime_spec, DitLoadProfile* load_profile)
+                ncnn::PipelineCache* pipeline_cache, const AwaRuntimeSpec* runtime_spec,
+                DitLoadProfile* load_profile)
 {
-    configure(net, vkdev, blob_allocator, staging_allocator);
+    configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
     if (load_profile)
         net.set_load_model_observer(load_profile);
     register_seedvr2_awa_layers(net, runtime_spec);
@@ -123,14 +135,15 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
 }
 
 bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAllocator* blob_allocator,
-                        ncnn::VkAllocator* staging_allocator, DitLoadProfile* load_profile)
+                        ncnn::VkAllocator* staging_allocator, ncnn::PipelineCache* pipeline_cache,
+                        DitLoadProfile* load_profile)
 {
     static const char kPackingParam[] =
         "7767517\n"
         "2 2\n"
         "Input in0 0 1 in0\n"
         "Packing unpack 1 1 in0 out0 0=1\n";
-    configure(net, vkdev, blob_allocator, staging_allocator);
+    configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
     if (load_profile)
         net.set_load_model_observer(load_profile);
     const int param_status = load_profile ? load_profile->load_param_mem(net, kPackingParam)
@@ -145,7 +158,7 @@ bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAlloc
 bool load_graph_from_param(ncnn::Net& net, const char* param, ncnn::VulkanDevice* vkdev,
                            ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator)
 {
-    configure(net, vkdev, blob_allocator, staging_allocator);
+    configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, nullptr);
     if (net.load_param_mem(param) != 0)
         return false;
     const unsigned char* empty_model = nullptr;
@@ -257,6 +270,7 @@ struct DitStackSession::Impl
     ncnn::VulkanDevice* vkdev = nullptr;
     ncnn::VkAllocator* blob_allocator = nullptr;
     ncnn::VkAllocator* staging_allocator = nullptr;
+    std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
     ncnn::Net dit_input;
     ncnn::Net dit_embedding;
     ncnn::Net packing;
@@ -273,6 +287,7 @@ struct DitStackSession::Impl
         packing.clear();
         dit_embedding.clear();
         dit_input.clear();
+        pipeline_cache.reset();
     }
 };
 
@@ -306,13 +321,15 @@ bool DitStackSession::open(const std::string& stack_dir,
     candidate->vkdev = vkdev;
     candidate->blob_allocator = blob_allocator;
     candidate->staging_allocator = staging_allocator;
+    candidate->pipeline_cache.reset(new ncnn::PipelineCache(vkdev));
     DitLoadProfile load_profile(profile && profile->enabled() ? profile : nullptr);
     DitLoadProfile* load_profile_ptr = load_profile.profile ? &load_profile : nullptr;
     if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator,
-                    &runtime_spec, load_profile_ptr) ||
+                    candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr) ||
         !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
-                    staging_allocator, &runtime_spec, load_profile_ptr) ||
-        !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator, load_profile_ptr))
+                    staging_allocator, candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr) ||
+        !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator,
+                            candidate->pipeline_cache.get(), load_profile_ptr))
         return false;
 
     candidate->blocks.reserve(32);
@@ -321,13 +338,13 @@ bool DitStackSession::open(const std::string& stack_dir,
         std::unique_ptr<ncnn::Net> block(new ncnn::Net);
         const std::string block_name = stack_dir + "/dit_block_" +
                                        (block_index < 10 ? "0" : "") + std::to_string(block_index);
-        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator, &runtime_spec,
-                        load_profile_ptr))
+        if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator,
+                        candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr))
             return false;
         candidate->blocks.push_back(std::move(block));
     }
     if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator,
-                    &runtime_spec, load_profile_ptr))
+                    candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr))
         return false;
 
     if (load_profile_ptr)

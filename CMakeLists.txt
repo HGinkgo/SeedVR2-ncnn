@@ -344,6 +344,19 @@ if(SEEDVR2_BUILD_TESTS AND SEEDVR2_ENABLE_VULKAN)
     target_sources(seedvr2-dit-patch-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
     add_test(NAME seedvr2-dit-patch-vulkan-test COMMAND seedvr2-dit-patch-vulkan-test)
 
+    add_executable(seedvr2-dit-pipeline-cache-config-vulkan-test
+        tests/unit/cpp/test_dit_pipeline_cache_config_vulkan.cpp
+        src/dit/dit_stack.cpp
+        src/inference/performance_profile.cpp
+        src/resolution/resolution_plan.cpp
+        src/awa/awa_layers.cpp)
+    target_link_libraries(seedvr2-dit-pipeline-cache-config-vulkan-test PRIVATE ncnn)
+    target_include_directories(seedvr2-dit-pipeline-cache-config-vulkan-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
+    target_sources(seedvr2-dit-pipeline-cache-config-vulkan-test PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
+    add_test(NAME seedvr2-dit-pipeline-cache-config-vulkan-test COMMAND seedvr2-dit-pipeline-cache-config-vulkan-test)
+
     add_executable(seedvr2-sampler-vulkan-test
         tests/unit/cpp/test_sampler_vulkan.cpp
         src/sampler/sampler.cpp
