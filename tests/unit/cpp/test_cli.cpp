@@ -92,6 +92,11 @@ int main()
     require(profiling.gpu_id == options.gpu_id, "profile keeps the automatic GPU default");
     require(profiling.memory_budget_mib == 0, "profile keeps the automatic memory budget");
 
+    const seedvr2::CliOptions color_fix = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--color-fix"}, error);
+    require(color_fix.color_fix, "color fix enabled on request");
+    require(!options.color_fix, "color fix disabled by default");
+
     const seedvr2::CliOptions profile_with_resolution = parse(
         {"seedvr2-ncnn", "--input", "input.png", "--width", "128", "--height", "128", "--profile"},
         error);

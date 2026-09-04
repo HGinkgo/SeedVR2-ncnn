@@ -80,6 +80,11 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
             options.profile = true;
             continue;
         }
+        if (std::strcmp(argument, "--color-fix") == 0)
+        {
+            options.color_fix = true;
+            continue;
+        }
 
         const char* value = nullptr;
         if (std::strcmp(argument, "--model-dir") == 0)

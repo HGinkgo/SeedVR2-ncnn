@@ -24,6 +24,7 @@ The source photograph comes from [ArrayFire assets](https://github.com/arrayfire
 - Processes PNG/JPEG images and RGB24 AVI video. The Linux and Windows runtime packages include LGPL FFmpeg runtime libraries for common compressed video inputs; video output is always RGB24 AVI.
 - Plans an output size automatically from the input or accepts an explicit `--width` and `--height`.
 - Handles one image, up to two images in one invocation, or one video file.
+- Optionally applies reference-guided color reconstruction with `--color-fix`; it is off by default and leaves the existing path unchanged.
 
 ## Quick Start
 
@@ -62,6 +63,8 @@ Process a video at an explicit low-resolution target:
 ```
 
 Use `--help` for all options. Model weights are distributed separately; the runtime itself has no Python, PyTorch, or CUDA dependency.
+
+`--color-fix` is an optional output postprocess: it retains generated high-frequency detail while replacing low-frequency color with a reference reconstructed from the input. Video mode spools reference frames to a process-local temporary file instead of retaining the whole clip in memory.
 
 ## Dynamic Resolution
 
