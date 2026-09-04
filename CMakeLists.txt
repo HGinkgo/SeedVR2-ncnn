@@ -55,8 +55,10 @@ add_executable(seedvr2-ncnn
     src/io/image_io.cpp
     src/inference/image_inference.cpp
     src/inference/latent_spool.cpp
+    src/inference/rgb_spool.cpp
     src/inference/memory_diagnostics.cpp
     src/inference/performance_profile.cpp
+    src/postprocess/color_fix.cpp
     src/model/model_registry.cpp
     src/video/video_io.cpp
     src/video/ffmpeg_video_reader.cpp
@@ -184,6 +186,13 @@ if(SEEDVR2_BUILD_TESTS)
     target_include_directories(seedvr2-cli-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME seedvr2-cli-test COMMAND seedvr2-cli-test)
 
+    add_executable(seedvr2-color-fix-test
+        tests/unit/cpp/test_color_fix.cpp
+        src/inference/rgb_spool.cpp
+        src/postprocess/color_fix.cpp)
+    target_include_directories(seedvr2-color-fix-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME seedvr2-color-fix-test COMMAND seedvr2-color-fix-test)
+
     add_executable(seedvr2-image-io-test
         tests/unit/cpp/test_image_io.cpp
         src/io/image_io.cpp)
@@ -216,7 +225,9 @@ if(SEEDVR2_BUILD_TESTS)
             tests/unit/cpp/test_image_inference.cpp
             src/inference/image_inference.cpp
             src/inference/latent_spool.cpp
+            src/inference/rgb_spool.cpp
             src/inference/performance_profile.cpp
+            src/postprocess/color_fix.cpp
             src/resolution/resolution_plan.cpp)
         target_include_directories(seedvr2-image-inference-test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"

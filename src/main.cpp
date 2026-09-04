@@ -35,6 +35,7 @@ void print_usage()
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
     std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");
     std::puts("  --profile     Print opt-in stage timings to stderr (default: off)");
+    std::puts("  --color-fix   Apply reference-guided color reconstruction (default: off)");
 }
 
 void print_version()
@@ -142,7 +143,7 @@ int main(int argc, char** argv)
 
         seedvr2::ImageInferenceSession session;
         if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
-                                                  options.memory_budget_mib, &profile))
+                                                  options.memory_budget_mib, &profile, options.color_fix))
         {
             std::fprintf(stderr, "error: stage=video-inference-init: %s\n", error.c_str());
             return 1;
@@ -218,7 +219,7 @@ int main(int argc, char** argv)
 
     seedvr2::ImageInferenceSession session;
     if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
-                                              options.memory_budget_mib, &profile))
+                                              options.memory_budget_mib, &profile, options.color_fix))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;

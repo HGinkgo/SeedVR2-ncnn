@@ -24,6 +24,7 @@
 - 处理 PNG/JPEG 图片；处理 RGB24 AVI 视频。Linux/Windows 运行包带有 LGPL FFmpeg 运行时，可读取常见压缩视频输入；视频输出固定为 RGB24 AVI。
 - 根据输入自动规划目标尺寸，或使用 `--width` 和 `--height` 指定目标尺寸。
 - 支持单张图片、最多两张图片的一次调用，以及单个视频文件。
+- 可选使用 `--color-fix` 进行参考引导的色彩重建；默认关闭，不改变既有输出路径。
 
 ## 快速开始
 
@@ -62,6 +63,8 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 ```
 
 使用 `--help` 查看全部参数。模型包独立分发；运行包本身不依赖 Python、PyTorch 或 CUDA。
+
+`--color-fix` 是可选的输出后处理：保留模型生成的高频细节，并用输入参考的低频色彩重建输出。视频模式会将参考帧暂存到进程临时文件中，因此不会把整段视频长期保留在内存中。
 
 ## 动态尺寸
 
