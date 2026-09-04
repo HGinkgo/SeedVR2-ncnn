@@ -8,7 +8,7 @@
 namespace seedvr2
 {
 
-// Private process-local storage for video RGB references used by optional postprocessing.
+// Private process-local storage for video RGB references used during color reconstruction.
 class RgbFrameSpool final
 {
 public:

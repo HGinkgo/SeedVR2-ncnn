@@ -633,7 +633,7 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
                          const ResolutionPlan& plan,
                          VulkanInferenceContext& context,
                          LatentSpool& condition_spool,
-                         RgbFrameSpool* reference_spool,
+                         RgbFrameSpool& reference_spool,
                          std::size_t& frame_count,
                          std::string& error,
                          const PerformanceProfile& profile,
@@ -678,16 +678,13 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         std::fprintf(stderr, "stage=video-frame index=%zu\n", absolute_index);
         const ProfileScope frame_scope(profile, "vae-encode", absolute_index);
         ncnn::Mat sample;
-        if (reference_spool)
+        RgbImage reference;
+        if (!prepare_color_reference(input, plan, reference, error) || !reference_spool.append(reference, error))
         {
-            RgbImage reference;
-            if (!prepare_color_reference(input, plan, reference, error) || !reference_spool->append(reference, error))
-            {
-                if (error.empty())
-                    error = "frame=" + std::to_string(absolute_index) + " failed to spool color reference";
-                profile.report("video-read", read_ms);
-                return false;
-            }
+            if (error.empty())
+                error = "frame=" + std::to_string(absolute_index) + " failed to spool color reference";
+            profile.report("video-read", read_ms);
+            return false;
         }
         if (!prepare_input(input, plan, sample))
         {
@@ -922,7 +919,7 @@ bool decode_video_vulkan(LatentSpool& output_spool,
                          const ResolutionPlan& plan,
                          VulkanInferenceContext& context,
                          const ImageInferenceSession::VideoFrameWriter& writer,
-                         RgbFrameSpool* reference_spool,
+                         RgbFrameSpool& reference_spool,
                          std::size_t expected_frames,
                          std::size_t& frame_count,
                          std::string& error,
@@ -991,16 +988,12 @@ bool decode_video_vulkan(LatentSpool& output_spool,
             error = "frame=" + std::to_string(absolute_index) + " stage=output-postprocess failed";
             return false;
         }
-        if (reference_spool)
+        RgbImage reference;
+        if (!reference_spool.read_next(reference, error) || !apply_wavelet_color_fix(output, reference, output, error))
         {
-            RgbImage reference;
-            if (!reference_spool->read_next(reference, error) ||
-                !apply_wavelet_color_fix(output, reference, output, error))
-            {
-                if (error.empty())
-                    error = "frame=" + std::to_string(absolute_index) + " stage=color-fix failed";
-                return false;
-            }
+            if (error.empty())
+                error = "frame=" + std::to_string(absolute_index) + " stage=color-reconstruction failed";
+            return false;
         }
         const auto write_start = PerformanceProfile::Clock::now();
         std::string write_error;
@@ -1032,8 +1025,7 @@ bool run_vulkan_image_video(const ImageInferenceSession::VideoFrameReader& reade
                             std::size_t& frame_count,
                             std::string& error,
                             const PerformanceProfile& profile,
-                            std::size_t frame_offset,
-                            bool color_fix)
+                            std::size_t frame_offset)
 {
     struct FrameCleanup final
     {
@@ -1046,15 +1038,10 @@ bool run_vulkan_image_video(const ImageInferenceSession::VideoFrameReader& reade
     LatentSpool condition_spool;
     LatentSpool output_spool;
     RgbFrameSpool reference_spool;
-    RgbFrameSpool* reference_spool_ptr = nullptr;
-    if (color_fix)
-    {
-        if (!RgbFrameSpool::create(reference_spool, error))
-            return false;
-        reference_spool_ptr = &reference_spool;
-    }
+    if (!RgbFrameSpool::create(reference_spool, error))
+        return false;
     std::size_t encoded_frames = 0;
-    if (!encode_video_vulkan(reader, plan, context, condition_spool, reference_spool_ptr, encoded_frames, error, profile,
+    if (!encode_video_vulkan(reader, plan, context, condition_spool, reference_spool, encoded_frames, error, profile,
                              frame_offset))
     {
         profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
@@ -1074,12 +1061,12 @@ bool run_vulkan_image_video(const ImageInferenceSession::VideoFrameReader& reade
         profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
         return false;
     }
-    if (reference_spool_ptr && !reference_spool_ptr->rewind(error))
+    if (!reference_spool.rewind(error))
     {
         profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
         return false;
     }
-    if (!decode_video_vulkan(output_spool, plan, context, writer, reference_spool_ptr, denoised_frames, frame_count,
+    if (!decode_video_vulkan(output_spool, plan, context, writer, reference_spool, denoised_frames, frame_count,
                              error, profile, frame_offset))
     {
         profile.report_batch("video-batch", encoded_frames, profile.elapsed_ms(batch_start));
@@ -1095,8 +1082,7 @@ bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
                             std::vector<RgbImage>& outputs,
                             std::string& error,
                             const PerformanceProfile& profile,
-                            std::size_t frame_offset,
-                            bool color_fix)
+                            std::size_t frame_offset)
 {
     struct FrameCleanup final
     {
@@ -1113,17 +1099,14 @@ bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
         outputs.clear();
         return false;
     }
-    if (color_fix)
+    for (std::size_t index = 0; index < outputs.size(); index++)
     {
-        for (std::size_t index = 0; index < outputs.size(); index++)
+        RgbImage reference;
+        if (!prepare_color_reference(inputs[index], plan, reference, error) ||
+            !apply_wavelet_color_fix(outputs[index], reference, outputs[index], error))
         {
-            RgbImage reference;
-            if (!prepare_color_reference(inputs[index], plan, reference, error) ||
-                !apply_wavelet_color_fix(outputs[index], reference, outputs[index], error))
-            {
-                outputs.clear();
-                return false;
-            }
+            outputs.clear();
+            return false;
         }
     }
     return true;
@@ -1140,7 +1123,6 @@ struct ImageInferenceSession::Impl
 #endif
     // Borrowed from the caller; null when profiling is disabled.
     const PerformanceProfile* profile = nullptr;
-    bool color_fix = false;
 };
 
 ImageInferenceSession::ImageInferenceSession() = default;
@@ -1157,8 +1139,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
                                  ImageInferenceSession& session,
                                  std::string& error,
                                  std::uint32_t memory_budget_mib,
-                                 const PerformanceProfile* profile,
-                                 bool color_fix)
+                                 const PerformanceProfile* profile)
 {
     error.clear();
 #if NCNN_VULKAN
@@ -1170,7 +1151,6 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     static const PerformanceProfile kDisabledProfile;
     std::unique_ptr<Impl> candidate(new Impl);
     candidate->profile = profile ? profile : &kDisabledProfile;
-    candidate->color_fix = color_fix;
     if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
                                   *candidate->profile))
         return false;
@@ -1182,7 +1162,6 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     (void)gpu_id;
     (void)memory_budget_mib;
     (void)profile;
-    (void)color_fix;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif
@@ -1229,7 +1208,7 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
         }
     }
     return run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error,
-                                  *impl_->profile, frame_offset, impl_->color_fix);
+                                  *impl_->profile, frame_offset);
 #else
     (void)inputs;
     (void)frame_offset;
@@ -1258,7 +1237,7 @@ bool ImageInferenceSession::run_video(const VideoFrameReader& reader,
         return false;
     }
     return run_vulkan_image_video(reader, writer, impl_->context.plan, impl_->context, frame_count, error,
-                                  *impl_->profile, frame_offset, impl_->color_fix);
+                                  *impl_->profile, frame_offset);
 #else
     (void)frame_offset;
     error = "image inference requires a Vulkan-enabled build";
