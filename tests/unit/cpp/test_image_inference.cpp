@@ -8,6 +8,16 @@
 
 int main()
 {
+    const std::vector<seedvr2::VaeTileRange> ranges = seedvr2::make_vae_tile_ranges(256, 128);
+    assert(ranges.size() == 2);
+    assert(ranges[0].offset == 0 && ranges[0].size == 128);
+    assert(ranges[1].offset == 128 && ranges[1].size == 128);
+    const std::vector<seedvr2::VaeTileRange> overlap_ranges = seedvr2::make_vae_tile_ranges(320, 128);
+    assert(overlap_ranges.size() == 3);
+    assert(overlap_ranges.front().offset == 0 && overlap_ranges.back().offset == 192);
+    assert(overlap_ranges[1].offset > overlap_ranges[0].offset &&
+           overlap_ranges[1].offset < overlap_ranges.back().offset);
+
     seedvr2::LatentSpool spool;
     std::string spool_error;
     assert(seedvr2::LatentSpool::create(spool, spool_error));

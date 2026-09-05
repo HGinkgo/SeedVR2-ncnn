@@ -79,6 +79,30 @@ int main()
         {"seedvr2-ncnn", "--input", "input.png", "--memory-budget-mib", "4096"}, error);
     require(memory_budget.memory_budget_mib == 4096, "explicit memory budget");
 
+    const seedvr2::CliOptions scaled = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--scale", "2", "--start-frame", "3", "--frames", "5",
+         "--vae-tile-size", "128"},
+        error);
+    require(scaled.scale == 2, "explicit scale");
+    require(scaled.start_frame == 3 && scaled.frame_count == 5, "video segment range");
+    require(scaled.vae_tile_size == 128, "VAE tile size");
+
+    const seedvr2::CliOptions directory_batch = parse(
+        {"seedvr2-ncnn", "--input-dir", "frames", "--output-dir", "results", "--scale", "1"}, error);
+    require(directory_batch.input_dir == std::filesystem::path("frames"), "input directory");
+    require(directory_batch.output_dir == std::filesystem::path("results"), "output directory");
+    require(directory_batch.inputs.empty() && directory_batch.outputs.empty(), "directory batch path lists");
+
+    const seedvr2::CliOptions check_model = parse(
+        {"seedvr2-ncnn", "--check-model", "--model-dir", "models"}, error);
+    require(check_model.action == seedvr2::CliAction::CheckModel, "check model action");
+
+    require(seedvr2::select_video_frame_count(36, 12, 48) == 24, "known video range is clipped");
+    require(seedvr2::select_video_frame_count(36, 12, 0) == 24, "known video remainder is selected");
+    require(seedvr2::select_video_frame_count(0, 0, 48) == 48, "unknown video honors explicit limit");
+    require(seedvr2::select_video_frame_count(0, 12, 0) == -1, "unknown video remains unbounded");
+    require(seedvr2::select_video_frame_count(36, 36, 0) == 0, "range at video end is empty");
+
     // --profile is opt-in and must not perturb any other default.
     require(!options.profile && !explicit_size.profile, "profile disabled by default");
 
@@ -142,6 +166,26 @@ int main()
 
     const char* missing_input[] = {"seedvr2-ncnn", "--model-dir", "models"};
     require(!seedvr2::parse_cli(3, missing_input, rejected, error), "missing input rejected");
+
+    const char* scale_with_size[] = {"seedvr2-ncnn", "--input", "input.png", "--scale", "2", "--width", "128",
+                                     "--height", "128"};
+    require(!seedvr2::parse_cli(9, scale_with_size, rejected, error), "scale and explicit size rejected");
+    require(error.find("scale") != std::string::npos, "scale mutual exclusion error");
+
+    const char* directory_without_output[] = {"seedvr2-ncnn", "--input-dir", "frames"};
+    require(!seedvr2::parse_cli(3, directory_without_output, rejected, error), "directory output required");
+    require(error.find("output-dir") != std::string::npos, "directory output error");
+
+    const char* negative_start[] = {"seedvr2-ncnn", "--input", "input.avi", "--start-frame", "-1"};
+    require(!seedvr2::parse_cli(5, negative_start, rejected, error), "negative start rejected");
+
+    const char* invalid_tile[] = {"seedvr2-ncnn", "--input", "input.png", "--vae-tile-size", "50"};
+    require(!seedvr2::parse_cli(5, invalid_tile, rejected, error), "misaligned VAE tile rejected");
+    require(error.find("vae-tile-size") != std::string::npos, "VAE tile validation error");
+
+    seedvr2::ResolutionPlan scaled_plan;
+    require(seedvr2::make_image_resolution_plan(scaled, 64, 64, scaled_plan, error), error.c_str());
+    require(scaled_plan.image_width == 128 && scaled_plan.image_height == 128, "scaled resolution plan");
 
     const char* unknown_option[] = {"seedvr2-ncnn", "--bogus", "value"};
     require(!seedvr2::parse_cli(3, unknown_option, rejected, error), "unknown option rejected");

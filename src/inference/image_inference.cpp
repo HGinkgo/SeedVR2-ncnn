@@ -30,6 +30,33 @@
 
 namespace seedvr2
 {
+
+std::vector<VaeTileRange> make_vae_tile_ranges(int total, int tile_size)
+{
+    if (total <= 0 || tile_size <= 0 || tile_size >= total)
+        return total > 0 ? std::vector<VaeTileRange>{{0, total}} : std::vector<VaeTileRange>();
+    // Use the fewest tiles that cover the dimension. Their evenly distributed
+    // offsets retain overlap where the geometry permits it without adding a
+    // nearly duplicate final tile (for example, 256 with 128 uses two tiles).
+    const int tile_count = (total + tile_size - 1) / tile_size;
+    const int last_offset = total - tile_size;
+    std::vector<VaeTileRange> ranges;
+    ranges.reserve(static_cast<std::size_t>(tile_count));
+    int previous_offset = -1;
+    for (int index = 0; index < tile_count; ++index)
+    {
+        int offset = index == tile_count - 1 ? last_offset : (last_offset * index) / (tile_count - 1);
+        if (index > 0 && index + 1 < tile_count)
+            offset = (offset / 16) * 16;
+        if (offset <= previous_offset)
+            offset = previous_offset + 16;
+        offset = std::min(offset, last_offset);
+        ranges.push_back({offset, tile_size});
+        previous_offset = offset;
+    }
+    return ranges;
+}
+
 namespace
 {
 
@@ -136,6 +163,7 @@ struct VulkanInferenceContext final
     ncnn::Mat text;
     ResolutionPlan plan;
     ModelGraphSet graphs;
+    int vae_tile_size = 0;
 
     void clear()
     {
@@ -164,6 +192,239 @@ struct VulkanInferenceContext final
 
     ~VulkanInferenceContext() { clear(); }
 };
+
+bool crop_float_mat(const ncnn::Mat& source, int left, int top, int width, int height, ncnn::Mat& tile)
+{
+    if (source.empty() || (source.dims != 3 && source.dims != 4) || source.d != 1 || source.c <= 0 || left < 0 || top < 0 || width <= 0 || height <= 0 ||
+        left + width > source.w || top + height > source.h)
+        return false;
+    tile.create(width, height, 1, source.c);
+    if (tile.empty())
+        return false;
+    for (int channel = 0; channel < source.c; ++channel)
+    {
+        const ncnn::Mat source_plane = source.channel(channel);
+        ncnn::Mat tile_plane = tile.channel(channel);
+        for (int y = 0; y < height; ++y)
+            std::memcpy(tile_plane.row(y), source_plane.row(top + y) + left, static_cast<std::size_t>(width) * sizeof(float));
+    }
+    return true;
+}
+
+bool stitch_float_mat(const std::vector<ncnn::Mat>& tiles,
+                      const std::vector<VaeTileRange>& horizontal,
+                      const std::vector<VaeTileRange>& vertical,
+                      int full_width,
+                      int full_height,
+                      ncnn::Mat& output)
+{
+    if (full_width <= 0 || full_height <= 0 || full_width % 8 != 0 || full_height % 8 != 0 ||
+        tiles.size() != horizontal.size() * vertical.size() || tiles.empty())
+        return false;
+    const ncnn::Mat& first = tiles.front();
+    if (first.empty() || (first.dims != 3 && first.dims != 4) || first.d != 1 || first.c <= 0 || first.w != horizontal.front().size / 8 ||
+        first.h != vertical.front().size / 8)
+        return false;
+    const int latent_width = full_width / 8;
+    const int latent_height = full_height / 8;
+    output.create(latent_width, latent_height, 1, first.c);
+    if (output.empty())
+        return false;
+    std::vector<float> sums(output.total(), 0.f);
+    std::vector<float> weights(static_cast<std::size_t>(latent_width) * latent_height, 0.f);
+    std::size_t tile_index = 0;
+    for (const VaeTileRange& y_range : vertical)
+    {
+        for (const VaeTileRange& x_range : horizontal)
+        {
+            const ncnn::Mat& tile = tiles[tile_index++];
+            if (tile.w != x_range.size / 8 || tile.h != y_range.size / 8 || tile.c != first.c)
+                return false;
+            const int x0 = x_range.offset / 8;
+            const int y0 = y_range.offset / 8;
+            for (int y = 0; y < tile.h; ++y)
+            {
+                for (int x = 0; x < tile.w; ++x)
+                {
+                    const std::size_t weight_index = static_cast<std::size_t>(y0 + y) * latent_width + x0 + x;
+                    weights[weight_index] += 1.f;
+                    for (int channel = 0; channel < tile.c; ++channel)
+                        sums[(static_cast<std::size_t>(channel) * latent_height + y0 + y) * latent_width + x0 + x] +=
+                            tile.channel(channel).row(y)[x];
+                }
+            }
+        }
+    }
+    for (int channel = 0; channel < output.c; ++channel)
+    {
+        ncnn::Mat plane = output.channel(channel);
+        for (int y = 0; y < latent_height; ++y)
+            for (int x = 0; x < latent_width; ++x)
+            {
+                const std::size_t index = static_cast<std::size_t>(y) * latent_width + x;
+                plane.row(y)[x] = sums[(static_cast<std::size_t>(channel) * latent_height + y) * latent_width + x] /
+                                  std::max(1.f, weights[index]);
+            }
+    }
+    return true;
+}
+
+bool stitch_reconstruction(const std::vector<ncnn::Mat>& tiles,
+                           const std::vector<VaeTileRange>& horizontal,
+                           const std::vector<VaeTileRange>& vertical,
+                           int full_width,
+                           int full_height,
+                           ncnn::Mat& output)
+{
+    if (full_width <= 0 || full_height <= 0 || tiles.size() != horizontal.size() * vertical.size() || tiles.empty())
+        return false;
+    const ncnn::Mat& first = tiles.front();
+    if (first.empty() || (first.dims != 3 && first.dims != 4) || first.d != 1 || first.c != 3 || first.w != horizontal.front().size ||
+        first.h != vertical.front().size)
+        return false;
+    output.create(full_width, full_height, 1, first.c);
+    if (output.empty())
+        return false;
+    std::vector<float> sums(output.total(), 0.f);
+    std::vector<float> weights(static_cast<std::size_t>(full_width) * full_height, 0.f);
+    std::size_t tile_index = 0;
+    for (const VaeTileRange& y_range : vertical)
+    {
+        for (const VaeTileRange& x_range : horizontal)
+        {
+            const ncnn::Mat& tile = tiles[tile_index++];
+            if (tile.w != x_range.size || tile.h != y_range.size || tile.c != first.c)
+                return false;
+            for (int y = 0; y < tile.h; ++y)
+                for (int x = 0; x < tile.w; ++x)
+                {
+                    const std::size_t weight_index = static_cast<std::size_t>(y_range.offset + y) * full_width +
+                                                     x_range.offset + x;
+                    weights[weight_index] += 1.f;
+                    for (int channel = 0; channel < tile.c; ++channel)
+                        sums[(static_cast<std::size_t>(channel) * full_height + y_range.offset + y) * full_width +
+                             x_range.offset + x] += tile.channel(channel).row(y)[x];
+                }
+        }
+    }
+    for (int channel = 0; channel < output.c; ++channel)
+    {
+        ncnn::Mat plane = output.channel(channel);
+        for (int y = 0; y < full_height; ++y)
+            for (int x = 0; x < full_width; ++x)
+            {
+                const std::size_t index = static_cast<std::size_t>(y) * full_width + x;
+                plane.row(y)[x] = sums[(static_cast<std::size_t>(channel) * full_height + y) * full_width + x] /
+                                  std::max(1.f, weights[index]);
+            }
+    }
+    return true;
+}
+
+bool tile_mode_enabled(const VulkanInferenceContext& context)
+{
+    return context.vae_tile_size >= 32 &&
+           (context.vae_tile_size < context.plan.image_width || context.vae_tile_size < context.plan.image_height);
+}
+
+bool run_encode_tile_vulkan(const ncnn::Mat& sample,
+                            ncnn::Net& encode,
+                            VulkanInferenceContext& context,
+                            ncnn::Mat& latent,
+                            std::string& error,
+                            std::size_t frame_index)
+{
+    const ncnn::Option encode_opt = encode.opt;
+    ncnn::VkMat sample_gpu;
+    {
+        ncnn::VkCompute compute(context.vkdev);
+        compute.record_upload(sample, sample_gpu, encode_opt);
+        if (compute.submit_and_wait() != 0)
+        {
+            error = "frame=" + std::to_string(frame_index) + " " +
+                    format_vulkan_stage_error("input-upload", context.diagnostics,
+                                              "Vulkan command submission returned failure");
+            return false;
+        }
+    }
+    ncnn::VkMat latent_gpu;
+    {
+        ncnn::Extractor extractor = encode.create_extractor();
+        extractor.set_light_mode(false);
+        ncnn::VkCompute compute(context.vkdev);
+        if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
+            compute.submit_and_wait() != 0)
+        {
+            error = "frame=" + std::to_string(frame_index) + " " +
+                    format_vulkan_stage_error("vae-encode", context.diagnostics,
+                                              "ncnn extraction or Vulkan command submission returned failure");
+            return false;
+        }
+    }
+    sample_gpu.release();
+    {
+        ncnn::VkCompute compute(context.vkdev);
+        compute.record_download(latent_gpu, latent, encode_opt);
+        if (compute.submit_and_wait() != 0 || latent.empty())
+        {
+            error = "frame=" + std::to_string(frame_index) + " " +
+                    format_vulkan_stage_error("vae-encode", context.diagnostics,
+                                              "latent download returned failure");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool run_decode_tile_vulkan(const ncnn::Mat& latent,
+                            ncnn::Net& decode,
+                            VulkanInferenceContext& context,
+                            ncnn::Mat& reconstruction,
+                            std::string& error,
+                            std::size_t frame_index)
+{
+    ncnn::VkMat latent_gpu;
+    {
+        ncnn::VkCompute compute(context.vkdev);
+        compute.record_upload(latent, latent_gpu, decode.opt);
+        if (compute.submit_and_wait() != 0)
+        {
+            error = "frame=" + std::to_string(frame_index) + " " +
+                    format_vulkan_stage_error("handoff-latent", context.diagnostics,
+                                              "latent upload returned failure");
+            return false;
+        }
+    }
+    ncnn::Extractor extractor = decode.create_extractor();
+    extractor.set_light_mode(false);
+    if (extractor.input("in0", latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
+    {
+        error = "frame=" + std::to_string(frame_index) + " " +
+                format_vulkan_stage_error("vae-decode", context.diagnostics, "ncnn extraction returned failure");
+        return false;
+    }
+    return true;
+}
+
+void clear_vae_tile_allocators(VulkanInferenceContext& context, bool encode)
+{
+    // VAE weights use ncnn's separate weight allocator; only transient tile blobs
+    // and staging buffers are reclaimed between tiles.
+    if (encode)
+    {
+        if (context.encode_blob_allocator)
+            context.encode_blob_allocator->clear();
+        if (context.encode_staging_allocator)
+            context.encode_staging_allocator->clear();
+    }
+    else
+    {
+        if (context.decode_blob_allocator)
+            context.decode_blob_allocator->clear();
+        if (context.decode_staging_allocator)
+            context.decode_staging_allocator->clear();
+    }
+}
 
 void clear_frame_staging_allocators(VulkanInferenceContext& context)
 {
@@ -274,11 +535,18 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
                                std::uint32_t memory_budget_mib,
                                VulkanInferenceContext& context,
                                std::string& error,
-                               const PerformanceProfile& profile)
+                               const PerformanceProfile& profile,
+                               int vae_tile_size)
 {
     if (gpu_id < -1)
     {
         error = "Vulkan GPU id must be greater than or equal to -1";
+        return false;
+    }
+    if (vae_tile_size < 0 ||
+        (vae_tile_size > 0 && (vae_tile_size < 32 || vae_tile_size % 16 != 0)))
+    {
+        error = "VAE tile size must be zero or at least 32 and divisible by 16";
         return false;
     }
 
@@ -335,6 +603,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     }
     context.plan = plan;
     context.graphs = graphs;
+    context.vae_tile_size = vae_tile_size;
     return true;
 }
 
@@ -363,8 +632,6 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
                 return false;
             }
         }
-        const ncnn::Option encode_opt = encode.opt;
-
         for (std::size_t frame_index = 0; frame_index < inputs.size(); frame_index++)
         {
             const ProfileScope frame_scope(profile, "vae-encode", frame_offset + frame_index);
@@ -375,42 +642,34 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
                 return false;
             }
 
-            ncnn::VkMat sample_gpu;
-            {
-                ncnn::VkCompute compute(context.vkdev);
-                compute.record_upload(sample, sample_gpu, encode_opt);
-                if (compute.submit_and_wait() != 0)
-                {
-                    stage_error(frame_index, "input-upload", "Vulkan command submission returned failure");
-                    return false;
-                }
-            }
-
-            ncnn::VkMat latent_gpu;
-            std::fprintf(stderr, "stage=vae-encode\n");
-            {
-                ncnn::Extractor extractor = encode.create_extractor();
-                extractor.set_light_mode(false);
-                ncnn::VkCompute compute(context.vkdev);
-                if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
-                    compute.submit_and_wait() != 0)
-                {
-                    stage_error(frame_index, "vae-encode", "ncnn extraction or Vulkan command submission returned failure");
-                    return false;
-                }
-            }
-            sample_gpu.release();
-
             ncnn::Mat latent;
+            std::fprintf(stderr, "stage=vae-encode\n");
+            if (tile_mode_enabled(context))
             {
-                ncnn::VkCompute compute(context.vkdev);
-                compute.record_download(latent_gpu, latent, encode_opt);
-                if (compute.submit_and_wait() != 0 || latent.empty())
+                const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+                const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
+                std::vector<ncnn::Mat> tile_latents;
+                tile_latents.reserve(horizontal.size() * vertical.size());
+                for (const VaeTileRange& y_range : vertical)
+                    for (const VaeTileRange& x_range : horizontal)
+                    {
+                        ncnn::Mat sample_tile;
+                        ncnn::Mat latent_tile;
+                        if (!crop_float_mat(sample, x_range.offset, y_range.offset, x_range.size, y_range.size,
+                                            sample_tile) ||
+                            !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, frame_index))
+                            return false;
+                        tile_latents.push_back(std::move(latent_tile));
+                        clear_vae_tile_allocators(context, true);
+                    }
+                if (!stitch_float_mat(tile_latents, horizontal, vertical, plan.image_width, plan.image_height, latent))
                 {
-                    stage_error(frame_index, "vae-encode", "latent download returned failure");
+                    error = "frame=" + std::to_string(frame_index) + " stage=vae-encode tiled latent stitching failed";
                     return false;
                 }
             }
+            else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, frame_index))
+                return false;
             condition_latents.push_back(std::move(latent));
         }
     }
@@ -569,26 +828,41 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
         for (std::size_t frame_index = 0; frame_index < output_latents.size(); frame_index++)
         {
             const ProfileScope frame_scope(profile, "vae-decode", frame_offset + frame_index);
-            ncnn::VkMat decode_latent_gpu;
+            ncnn::Mat reconstruction;
+            std::fprintf(stderr, "stage=vae-decode\n");
+            if (tile_mode_enabled(context))
             {
-                ncnn::VkCompute compute(context.vkdev);
-                compute.record_upload(output_latents[frame_index], decode_latent_gpu, decode.opt);
-                if (compute.submit_and_wait() != 0)
+                const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+                const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
+                std::vector<ncnn::Mat> tile_reconstructions;
+                tile_reconstructions.reserve(horizontal.size() * vertical.size());
+                for (const VaeTileRange& y_range : vertical)
+                    for (const VaeTileRange& x_range : horizontal)
+                    {
+                        ncnn::Mat latent_tile;
+                        if (!crop_float_mat(output_latents[frame_index], x_range.offset / 8, y_range.offset / 8,
+                                            x_range.size / 8, y_range.size / 8, latent_tile))
+                        {
+                            error = "frame=" + std::to_string(frame_index) + " stage=vae-decode tiled latent crop failed";
+                            return false;
+                        }
+                        ncnn::Mat reconstruction_tile;
+                        if (!run_decode_tile_vulkan(latent_tile, decode, context, reconstruction_tile, error,
+                                                    frame_index))
+                            return false;
+                        tile_reconstructions.push_back(std::move(reconstruction_tile));
+                        clear_vae_tile_allocators(context, false);
+                    }
+                if (!stitch_reconstruction(tile_reconstructions, horizontal, vertical, plan.image_width,
+                                           plan.image_height, reconstruction))
                 {
-                    stage_error(frame_index, "handoff-latent", "latent upload returned failure");
+                    error = "frame=" + std::to_string(frame_index) + " stage=vae-decode tiled reconstruction stitching failed";
                     return false;
                 }
             }
-
-            ncnn::Mat reconstruction;
-            std::fprintf(stderr, "stage=vae-decode\n");
-            ncnn::Extractor extractor = decode.create_extractor();
-            extractor.set_light_mode(false);
-            if (extractor.input("in0", decode_latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
-            {
-                stage_error(frame_index, "vae-decode", "ncnn extraction returned failure");
+            else if (!run_decode_tile_vulkan(output_latents[frame_index], decode, context, reconstruction, error,
+                                             frame_index))
                 return false;
-            }
             if (!reconstruction_to_rgb(reconstruction, plan, outputs.emplace_back()))
             {
                 outputs.pop_back();
@@ -655,7 +929,6 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
             return false;
         }
     }
-    const ncnn::Option encode_opt = encode.opt;
     double read_ms = 0.0;
     for (;;)
     {
@@ -693,50 +966,40 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
             return false;
         }
 
-        ncnn::VkMat sample_gpu;
-        {
-            ncnn::VkCompute compute(context.vkdev);
-            compute.record_upload(sample, sample_gpu, encode_opt);
-            if (compute.submit_and_wait() != 0)
-            {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("input-upload", context.diagnostics,
-                                                  "Vulkan command submission returned failure");
-                profile.report("video-read", read_ms);
-                return false;
-            }
-        }
-
-        ncnn::VkMat latent_gpu;
         std::fprintf(stderr, "stage=vae-encode\n");
+        ncnn::Mat latent;
+        if (tile_mode_enabled(context))
         {
-            ncnn::Extractor extractor = encode.create_extractor();
-            extractor.set_light_mode(false);
-            ncnn::VkCompute compute(context.vkdev);
-            if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
-                compute.submit_and_wait() != 0)
+            const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+            const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
+            std::vector<ncnn::Mat> tile_latents;
+            tile_latents.reserve(horizontal.size() * vertical.size());
+            for (const VaeTileRange& y_range : vertical)
+                for (const VaeTileRange& x_range : horizontal)
+                {
+                    ncnn::Mat sample_tile;
+                    ncnn::Mat latent_tile;
+                    if (!crop_float_mat(sample, x_range.offset, y_range.offset, x_range.size, y_range.size,
+                                        sample_tile) ||
+                        !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, absolute_index))
+                    {
+                        profile.report("video-read", read_ms);
+                        return false;
+                    }
+                    tile_latents.push_back(std::move(latent_tile));
+                    clear_vae_tile_allocators(context, true);
+                }
+            if (!stitch_float_mat(tile_latents, horizontal, vertical, plan.image_width, plan.image_height, latent))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("vae-encode", context.diagnostics,
-                                                  "ncnn extraction or Vulkan command submission returned failure");
+                error = "frame=" + std::to_string(absolute_index) + " stage=vae-encode tiled latent stitching failed";
                 profile.report("video-read", read_ms);
                 return false;
             }
         }
-        sample_gpu.release();
-
-        ncnn::Mat latent;
+        else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, absolute_index))
         {
-            ncnn::VkCompute compute(context.vkdev);
-            compute.record_download(latent_gpu, latent, encode_opt);
-            if (compute.submit_and_wait() != 0 || latent.empty())
-            {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("vae-encode", context.diagnostics,
-                                                  "latent download returned failure");
-                profile.report("video-read", read_ms);
-                return false;
-            }
+            profile.report("video-read", read_ms);
+            return false;
         }
         LatentFrame stored;
         if (!ncnn_mat_to_latent_frame(latent, stored) || !condition_spool.append(stored, error))
@@ -958,30 +1221,40 @@ bool decode_video_vulkan(LatentSpool& output_spool,
             error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool record is invalid";
             return false;
         }
-        ncnn::VkMat decode_latent_gpu;
+        ncnn::Mat reconstruction;
+        std::fprintf(stderr, "stage=vae-decode\n");
+        if (tile_mode_enabled(context))
         {
-            ncnn::VkCompute compute(context.vkdev);
-            compute.record_upload(output_latent, decode_latent_gpu, decode.opt);
-            if (compute.submit_and_wait() != 0)
+            const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+            const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
+            std::vector<ncnn::Mat> tile_reconstructions;
+            tile_reconstructions.reserve(horizontal.size() * vertical.size());
+            for (const VaeTileRange& y_range : vertical)
+                for (const VaeTileRange& x_range : horizontal)
+                {
+                    ncnn::Mat latent_tile;
+                    if (!crop_float_mat(output_latent, x_range.offset / 8, y_range.offset / 8,
+                                        x_range.size / 8, y_range.size / 8, latent_tile))
+                    {
+                        error = "frame=" + std::to_string(absolute_index) + " stage=vae-decode tiled latent crop failed";
+                        return false;
+                    }
+                    ncnn::Mat reconstruction_tile;
+                    if (!run_decode_tile_vulkan(latent_tile, decode, context, reconstruction_tile, error,
+                                                absolute_index))
+                        return false;
+                    tile_reconstructions.push_back(std::move(reconstruction_tile));
+                    clear_vae_tile_allocators(context, false);
+                }
+            if (!stitch_reconstruction(tile_reconstructions, horizontal, vertical, plan.image_width,
+                                       plan.image_height, reconstruction))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("handoff-latent", context.diagnostics,
-                                                  "latent upload returned failure");
+                error = "frame=" + std::to_string(absolute_index) + " stage=vae-decode tiled reconstruction stitching failed";
                 return false;
             }
         }
-
-        ncnn::Mat reconstruction;
-        std::fprintf(stderr, "stage=vae-decode\n");
-        ncnn::Extractor extractor = decode.create_extractor();
-        extractor.set_light_mode(false);
-        if (extractor.input("in0", decode_latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
-        {
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("vae-decode", context.diagnostics,
-                                              "ncnn extraction returned failure");
+        else if (!run_decode_tile_vulkan(output_latent, decode, context, reconstruction, error, absolute_index))
             return false;
-        }
         RgbImage output;
         if (!reconstruction_to_rgb(reconstruction, plan, output))
         {
@@ -1139,7 +1412,8 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
                                  ImageInferenceSession& session,
                                  std::string& error,
                                  std::uint32_t memory_budget_mib,
-                                 const PerformanceProfile* profile)
+                                 const PerformanceProfile* profile,
+                                 int vae_tile_size)
 {
     error.clear();
 #if NCNN_VULKAN
@@ -1152,7 +1426,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     std::unique_ptr<Impl> candidate(new Impl);
     candidate->profile = profile ? profile : &kDisabledProfile;
     if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
-                                  *candidate->profile))
+                                  *candidate->profile, vae_tile_size))
         return false;
     session.impl_ = std::move(candidate);
     return true;
@@ -1162,6 +1436,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     (void)gpu_id;
     (void)memory_budget_mib;
     (void)profile;
+    (void)vae_tile_size;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif

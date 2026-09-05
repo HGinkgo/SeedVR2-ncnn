@@ -22,6 +22,9 @@ class ModelRegistry final
 public:
     static bool open(const std::filesystem::path& model_dir, ModelRegistry& registry, std::string& error);
 
+    // Validate the self-contained package contract without loading Vulkan graphs.
+    bool check_package(std::string& error) const;
+
     bool resolve(const ResolutionPlan& plan, ModelGraphSet& graphs, std::string& error) const;
 
 private:
