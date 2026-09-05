@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(SeedVR2-ncnn VERSION 0.1.0 LANGUAGES CXX)
+project(SeedVR2-ncnn VERSION 0.1.1 LANGUAGES CXX)
 
 option(SEEDVR2_ENABLE_VULKAN "Build ncnn with Vulkan compute support" OFF)
 option(SEEDVR2_ENABLE_FFMPEG "Enable optional FFmpeg video input" OFF)

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.1
+
+This release aligns the portable runtime with the current low-resolution
+product path:
+
+- Reference-guided low-frequency color reconstruction is now applied to image
+  and video output by default while preserving generated high-frequency detail.
+- The experimental `--vae-tile-size` path reduces VAE activation residency for
+  tiled image and video processing without changing model weights or the
+  default full-frame path.
+- The CLI adds integer `--scale`, directory image batches, bounded video
+  segments, and `--check-model` package validation.
+- Model-package validation now verifies every manifest hash, rejects missing or
+  extra files and unsafe paths, and requires a package without symbolic links.
+
+The validated target matrix remains `128x128`, `128x256`, and `256x256`.
+720p and long-duration video remain outside the supported release boundary.
+
 ## 0.1.0
 
 The first low-resolution release line provides:
