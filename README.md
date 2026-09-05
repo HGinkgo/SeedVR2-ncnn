@@ -31,6 +31,7 @@
 - 根据输入自动规划目标尺寸，或使用 `--width` 和 `--height` 指定目标尺寸。
 - 支持单张图片、最多两张图片的一次调用，以及单个视频文件。
 - 不提供文生图、文生视频或图生视频生成工作流；输入内容保持为图片或视频增强任务。
+- 标准输出会进行参考引导的色彩重建：保留模型生成的高频细节，并从输入重建低频色彩。
 
 ## 快速开始
 
@@ -69,6 +70,43 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 ```
 
 使用 `--help` 查看全部参数。模型包独立分发；运行包本身不依赖 Python、PyTorch 或 CUDA。
+
+批量处理一个目录中的图片时，可以复用同一模型会话：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input-dir frames \
+  --output-dir enhanced \
+  --scale 2 \
+  --gpu-id 0
+```
+
+视频也支持从指定帧开始、限制处理帧数；这适合快速预览较长素材：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input clip.avi \
+  --output preview.avi \
+  --width 256 --height 256 \
+  --start-frame 12 --frames 48 \
+  --gpu-id 0
+```
+
+显存紧张时可以启用实验性的 VAE 分块路径。它只改变 VAE 的空间分块与拼接，不改变模型权重或默认路径；分块尺寸必须是 16 的倍数：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input large.png --output enhanced.png \
+  --width 256 --height 256 \
+  --vae-tile-size 128 --gpu-id 0
+```
+
+发布包可先运行 `--check-model --model-dir models/seedvr2-3b`，在不初始化 Vulkan 的情况下检查动态模型包的 manifest、记录数和符号链接约束。
+
+输出后处理会保留模型生成的高频细节，并用输入参考重建低频色彩。视频模式会将参考帧暂存到进程临时文件中，因此不会把整段视频长期保留在内存中。
 
 ## 动态尺寸
 

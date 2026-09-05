@@ -31,6 +31,7 @@ The source photograph comes from [ArrayFire assets](https://github.com/arrayfire
 - Plans an output size automatically from the input or accepts an explicit `--width` and `--height`.
 - Handles one image, up to two images in one invocation, or one video file.
 - Does not provide text-to-image, text-to-video, or image-to-video generation workflows; it enhances supplied images and video.
+- Standard output applies reference-guided color reconstruction, retaining generated high-frequency detail while reconstructing low-frequency color from the input.
 
 ## Quick Start
 
@@ -69,6 +70,43 @@ Process a video at an explicit low-resolution target:
 ```
 
 Use `--help` for all options. Model weights are distributed separately; the runtime itself has no Python, PyTorch, or CUDA dependency.
+
+For a directory of images, the batch mode reuses one model session for consecutive inputs with the same target plan:
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input-dir frames \
+  --output-dir enhanced \
+  --scale 2 \
+  --gpu-id 0
+```
+
+Video processing can select a bounded segment, which is useful for quick previews of longer material:
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input clip.avi \
+  --output preview.avi \
+  --width 256 --height 256 \
+  --start-frame 12 --frames 48 \
+  --gpu-id 0
+```
+
+When GPU memory is tight, the experimental VAE tile path processes and stitches spatial tiles. It does not change model weights or the default path; tile edges must be multiples of 16:
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input large.png --output enhanced.png \
+  --width 256 --height 256 \
+  --vae-tile-size 128 --gpu-id 0
+```
+
+Runtime packages can run `--check-model --model-dir models/seedvr2-3b` to validate the dynamic package manifest, record count, and symlink constraints without initializing Vulkan.
+
+Output postprocessing retains generated high-frequency detail while reconstructing low-frequency color from an input reference. Video mode spools reference frames to a process-local temporary file instead of retaining the whole clip in memory.
 
 ## Dynamic Resolution
 
