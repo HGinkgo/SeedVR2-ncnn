@@ -15,6 +15,15 @@
 namespace seedvr2
 {
 
+struct VaeTileRange final
+{
+    int offset = 0;
+    int size = 0;
+};
+
+// Return a bounded, deterministic set of ranges covering [0, total).
+std::vector<VaeTileRange> make_vae_tile_ranges(int total, int tile_size);
+
 class ImageInferenceSession final
 {
 public:

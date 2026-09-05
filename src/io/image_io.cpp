@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <unordered_set>
 
 namespace seedvr2
 {
@@ -32,6 +33,14 @@ bool valid_image(const RgbImage& image)
     const std::size_t expected = static_cast<std::size_t>(image.width) *
                                  static_cast<std::size_t>(image.height) * 3u;
     return image.pixels.size() == expected;
+}
+
+std::string output_path_key(const std::filesystem::path& path)
+{
+    std::string key = path.generic_string();
+    std::transform(key.begin(), key.end(), key.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    return key;
 }
 
 } // namespace
@@ -133,6 +142,35 @@ bool list_rgb_images(const std::filesystem::path& directory,
     {
         error = "input directory contains no PNG or JPEG images: " + directory.string();
         return false;
+    }
+    return true;
+}
+
+bool make_directory_output_paths(const std::filesystem::path& output_directory,
+                                 const std::vector<std::filesystem::path>& input_paths,
+                                 std::vector<std::filesystem::path>& output_paths,
+                                 std::string& error)
+{
+    output_paths.clear();
+    error.clear();
+    std::unordered_set<std::string> seen;
+    for (const std::filesystem::path& input_path : input_paths)
+    {
+        const std::string stem = input_path.stem().string();
+        if (stem.empty())
+        {
+            error = "input image has an empty output stem: " + input_path.string();
+            output_paths.clear();
+            return false;
+        }
+        const std::filesystem::path output_path = output_directory / (stem + ".png");
+        if (!seen.insert(output_path_key(output_path)).second)
+        {
+            error = "directory output path collision: " + output_path.string();
+            output_paths.clear();
+            return false;
+        }
+        output_paths.push_back(output_path);
     }
     return true;
 }

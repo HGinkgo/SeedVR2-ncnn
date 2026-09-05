@@ -246,6 +246,12 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "error: %s\n", error.c_str());
             return 1;
         }
+        std::vector<std::filesystem::path> output_paths;
+        if (!seedvr2::make_directory_output_paths(options.output_dir, paths, output_paths, error))
+        {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
         std::error_code directory_error;
         std::filesystem::create_directories(options.output_dir, directory_error);
         if (directory_error)
@@ -256,8 +262,9 @@ int main(int argc, char** argv)
         seedvr2::ImageInferenceSession session;
         seedvr2::ResolutionPlan session_plan;
         bool session_open = false;
-        for (const auto& input_path : paths)
+        for (std::size_t input_index = 0; input_index < paths.size(); ++input_index)
         {
+            const auto& input_path = paths[input_index];
             seedvr2::RgbImage input_image;
             if (!seedvr2::load_rgb_image(input_path, input_image, error))
             {
@@ -293,7 +300,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "error: %s\n", error.c_str());
                 return 1;
             }
-            const std::filesystem::path output_path = options.output_dir / (input_path.stem().string() + ".png");
+            const std::filesystem::path& output_path = output_paths[input_index];
             if (!seedvr2::save_rgb_image(output_path, output_image, error))
             {
                 std::fprintf(stderr, "error: %s\n", error.c_str());

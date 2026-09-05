@@ -30,6 +30,33 @@
 
 namespace seedvr2
 {
+
+std::vector<VaeTileRange> make_vae_tile_ranges(int total, int tile_size)
+{
+    if (total <= 0 || tile_size <= 0 || tile_size >= total)
+        return total > 0 ? std::vector<VaeTileRange>{{0, total}} : std::vector<VaeTileRange>();
+    // Use the fewest tiles that cover the dimension. Their evenly distributed
+    // offsets retain overlap where the geometry permits it without adding a
+    // nearly duplicate final tile (for example, 256 with 128 uses two tiles).
+    const int tile_count = (total + tile_size - 1) / tile_size;
+    const int last_offset = total - tile_size;
+    std::vector<VaeTileRange> ranges;
+    ranges.reserve(static_cast<std::size_t>(tile_count));
+    int previous_offset = -1;
+    for (int index = 0; index < tile_count; ++index)
+    {
+        int offset = index == tile_count - 1 ? last_offset : (last_offset * index) / (tile_count - 1);
+        if (index > 0 && index + 1 < tile_count)
+            offset = (offset / 16) * 16;
+        if (offset <= previous_offset)
+            offset = previous_offset + 16;
+        offset = std::min(offset, last_offset);
+        ranges.push_back({offset, tile_size});
+        previous_offset = offset;
+    }
+    return ranges;
+}
+
 namespace
 {
 
@@ -166,35 +193,6 @@ struct VulkanInferenceContext final
     ~VulkanInferenceContext() { clear(); }
 };
 
-struct TileRange final
-{
-    int offset = 0;
-    int size = 0;
-};
-
-std::vector<TileRange> make_tile_ranges(int total, int tile_size)
-{
-    if (total <= 0 || tile_size <= 0 || tile_size >= total)
-        return {{0, total}};
-    const int overlap = std::max(16, (tile_size / 4 / 16) * 16);
-    const int step = tile_size - overlap;
-    const int last_offset = total - tile_size;
-    std::vector<TileRange> ranges;
-    for (int offset = 0;;)
-    {
-        ranges.push_back({offset, tile_size});
-        if (offset >= last_offset)
-            break;
-        if (offset + step >= last_offset)
-        {
-            ranges.push_back({last_offset, tile_size});
-            break;
-        }
-        offset += step;
-    }
-    return ranges;
-}
-
 bool crop_float_mat(const ncnn::Mat& source, int left, int top, int width, int height, ncnn::Mat& tile)
 {
     if (source.empty() || (source.dims != 3 && source.dims != 4) || source.d != 1 || source.c <= 0 || left < 0 || top < 0 || width <= 0 || height <= 0 ||
@@ -214,8 +212,8 @@ bool crop_float_mat(const ncnn::Mat& source, int left, int top, int width, int h
 }
 
 bool stitch_float_mat(const std::vector<ncnn::Mat>& tiles,
-                      const std::vector<TileRange>& horizontal,
-                      const std::vector<TileRange>& vertical,
+                      const std::vector<VaeTileRange>& horizontal,
+                      const std::vector<VaeTileRange>& vertical,
                       int full_width,
                       int full_height,
                       ncnn::Mat& output)
@@ -235,9 +233,9 @@ bool stitch_float_mat(const std::vector<ncnn::Mat>& tiles,
     std::vector<float> sums(output.total(), 0.f);
     std::vector<float> weights(static_cast<std::size_t>(latent_width) * latent_height, 0.f);
     std::size_t tile_index = 0;
-    for (const TileRange& y_range : vertical)
+    for (const VaeTileRange& y_range : vertical)
     {
-        for (const TileRange& x_range : horizontal)
+        for (const VaeTileRange& x_range : horizontal)
         {
             const ncnn::Mat& tile = tiles[tile_index++];
             if (tile.w != x_range.size / 8 || tile.h != y_range.size / 8 || tile.c != first.c)
@@ -272,8 +270,8 @@ bool stitch_float_mat(const std::vector<ncnn::Mat>& tiles,
 }
 
 bool stitch_reconstruction(const std::vector<ncnn::Mat>& tiles,
-                           const std::vector<TileRange>& horizontal,
-                           const std::vector<TileRange>& vertical,
+                           const std::vector<VaeTileRange>& horizontal,
+                           const std::vector<VaeTileRange>& vertical,
                            int full_width,
                            int full_height,
                            ncnn::Mat& output)
@@ -290,9 +288,9 @@ bool stitch_reconstruction(const std::vector<ncnn::Mat>& tiles,
     std::vector<float> sums(output.total(), 0.f);
     std::vector<float> weights(static_cast<std::size_t>(full_width) * full_height, 0.f);
     std::size_t tile_index = 0;
-    for (const TileRange& y_range : vertical)
+    for (const VaeTileRange& y_range : vertical)
     {
-        for (const TileRange& x_range : horizontal)
+        for (const VaeTileRange& x_range : horizontal)
         {
             const ncnn::Mat& tile = tiles[tile_index++];
             if (tile.w != x_range.size || tile.h != y_range.size || tile.c != first.c)
@@ -648,12 +646,12 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
             std::fprintf(stderr, "stage=vae-encode\n");
             if (tile_mode_enabled(context))
             {
-                const std::vector<TileRange> horizontal = make_tile_ranges(plan.image_width, context.vae_tile_size);
-                const std::vector<TileRange> vertical = make_tile_ranges(plan.image_height, context.vae_tile_size);
+                const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+                const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
                 std::vector<ncnn::Mat> tile_latents;
                 tile_latents.reserve(horizontal.size() * vertical.size());
-                for (const TileRange& y_range : vertical)
-                    for (const TileRange& x_range : horizontal)
+                for (const VaeTileRange& y_range : vertical)
+                    for (const VaeTileRange& x_range : horizontal)
                     {
                         ncnn::Mat sample_tile;
                         ncnn::Mat latent_tile;
@@ -834,12 +832,12 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
             std::fprintf(stderr, "stage=vae-decode\n");
             if (tile_mode_enabled(context))
             {
-                const std::vector<TileRange> horizontal = make_tile_ranges(plan.image_width, context.vae_tile_size);
-                const std::vector<TileRange> vertical = make_tile_ranges(plan.image_height, context.vae_tile_size);
+                const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+                const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
                 std::vector<ncnn::Mat> tile_reconstructions;
                 tile_reconstructions.reserve(horizontal.size() * vertical.size());
-                for (const TileRange& y_range : vertical)
-                    for (const TileRange& x_range : horizontal)
+                for (const VaeTileRange& y_range : vertical)
+                    for (const VaeTileRange& x_range : horizontal)
                     {
                         ncnn::Mat latent_tile;
                         if (!crop_float_mat(output_latents[frame_index], x_range.offset / 8, y_range.offset / 8,
@@ -972,12 +970,12 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         ncnn::Mat latent;
         if (tile_mode_enabled(context))
         {
-            const std::vector<TileRange> horizontal = make_tile_ranges(plan.image_width, context.vae_tile_size);
-            const std::vector<TileRange> vertical = make_tile_ranges(plan.image_height, context.vae_tile_size);
+            const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+            const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
             std::vector<ncnn::Mat> tile_latents;
             tile_latents.reserve(horizontal.size() * vertical.size());
-            for (const TileRange& y_range : vertical)
-                for (const TileRange& x_range : horizontal)
+            for (const VaeTileRange& y_range : vertical)
+                for (const VaeTileRange& x_range : horizontal)
                 {
                     ncnn::Mat sample_tile;
                     ncnn::Mat latent_tile;
@@ -1227,12 +1225,12 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         std::fprintf(stderr, "stage=vae-decode\n");
         if (tile_mode_enabled(context))
         {
-            const std::vector<TileRange> horizontal = make_tile_ranges(plan.image_width, context.vae_tile_size);
-            const std::vector<TileRange> vertical = make_tile_ranges(plan.image_height, context.vae_tile_size);
+            const std::vector<VaeTileRange> horizontal = make_vae_tile_ranges(plan.image_width, context.vae_tile_size);
+            const std::vector<VaeTileRange> vertical = make_vae_tile_ranges(plan.image_height, context.vae_tile_size);
             std::vector<ncnn::Mat> tile_reconstructions;
             tile_reconstructions.reserve(horizontal.size() * vertical.size());
-            for (const TileRange& y_range : vertical)
-                for (const TileRange& x_range : horizontal)
+            for (const VaeTileRange& y_range : vertical)
+                for (const VaeTileRange& x_range : horizontal)
                 {
                     ncnn::Mat latent_tile;
                     if (!crop_float_mat(output_latent, x_range.offset / 8, y_range.offset / 8,

@@ -60,6 +60,26 @@ void write_manifest(const std::filesystem::path& root, std::size_t records)
         manifest << "0000000000000000000000000000000000000000000000000000000000000000  file-" << index << "\n";
 }
 
+void write_valid_manifest(const std::filesystem::path& root)
+{
+    std::ofstream manifest(root / "manifest.sha256");
+    require(manifest.good(), "create valid manifest");
+    const std::string one_byte_zero_hash =
+        "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d";
+    const std::string conditioning_hash =
+        "961effa4cb6a9f7b332b55455c481f7d06a4b227ab19aafe489e522c746246f7";
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+    {
+        if (!entry.is_regular_file() || entry.path().filename() == "manifest.sha256")
+            continue;
+        const std::filesystem::path relative = std::filesystem::relative(entry.path(), root);
+        const std::string hash = relative.generic_string() == "conditioning/pos_emb.f32"
+                                     ? conditioning_hash
+                                     : one_byte_zero_hash;
+        manifest << hash << "  " << relative.generic_string() << "\n";
+    }
+}
+
 } // namespace
 
 int main()
@@ -80,6 +100,8 @@ int main()
     touch(root / "vae_encode.ncnn.param");
     require(!registry.resolve(plan, graphs, error), "incomplete flat model package rejected");
     require(error.find("vae_encode") != std::string::npos, "missing graph names flat package artifact");
+    std::filesystem::remove(root / "vae_encode.ncnn.param", cleanup_error);
+    require(!cleanup_error, "remove incomplete package fixture artifact");
 
     populate_package(root);
     touch(root / "conditioning" / "pos_emb.f32", 58u * 5120u * sizeof(float));
@@ -90,7 +112,17 @@ int main()
     require(graphs.conditioning_path == root / "conditioning" / "pos_emb.f32", "conditioning path");
     require(graphs.text_tokens == 58, "positive conditioning token count");
     write_manifest(root, 75);
+    require(!registry.check_package(error), "manifest entries for missing files rejected");
+    require(error.find("missing") != std::string::npos || error.find("manifest") != std::string::npos,
+            "missing manifest artifact error");
+    write_valid_manifest(root);
     require(registry.check_package(error), error.c_str());
+
+    touch(root / "dit_input.ncnn.bin", 2);
+    require(!registry.check_package(error), "manifest hash mismatch rejected");
+    require(error.find("hash") != std::string::npos, "manifest hash mismatch error");
+    touch(root / "dit_input.ncnn.bin");
+    write_valid_manifest(root);
 
     write_manifest(root, 74);
     require(!registry.check_package(error), "short manifest rejected");
