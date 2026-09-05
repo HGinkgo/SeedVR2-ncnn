@@ -6,17 +6,23 @@
 
 ## 效果展示
 
-下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。左图为输入，右图为输出；示例使用 `32x32` 输入和显式 `128x128` 目标。
+下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。图像和视频分别展示本项目支持的两类工作流；当前发布线的最大目标为 `256x256`。
+
+### 图像增强
+
+左图为 `128x128` 输入，右图为显式 `256x256` 目标的实际输出。
 
 | 输入 | 输出 |
 | --- | --- |
-| <img src="assets/showcase-image-input-32.png" alt="32x32 风景输入图" width="256"> | <img src="assets/showcase-image-output-128.png" alt="SeedVR2-ncnn 128x128 风景输出图" width="256"> |
+| <img src="assets/showcase-image-input-128.png" alt="128x128 风景输入图" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 风景输出图" width="256"> |
 
-两帧 AVI 示例（左：输入，右：输出）：
+### 视频增强
 
-![两帧视频输入与输出对照](assets/showcase-video-32-to-128.gif)
+下面是同一连续序列的输入与实际 `256x256` 输出对照。输入与输出 AVI 均为连续 3 秒、36 帧、12 fps；GIF 仅作逐帧并排预览（左：放大的 `128x128` 输入；右：输出）：
 
-示例源图来自 [ArrayFire assets](https://github.com/arrayfire/assets/blob/master/examples/images/README.md)，以 CC0 1.0 发布；展示资产仅包含该图的 `32x32` 裁剪及本项目产生的结果。
+![连续视频输入与输出对照](assets/showcase-video-128-to-256.gif)
+
+示例源图来自 [ArrayFire assets](https://github.com/arrayfire/assets/blob/master/examples/images/README.md)，以 CC0 1.0 发布。视频输入是由该实景图生成的连续平移镜头；提交的展示资产仅包含输入裁剪及本项目实际生成的图像/视频结果。
 
 ## 能做什么
 
@@ -24,6 +30,7 @@
 - 处理 PNG/JPEG 图片；处理 RGB24 AVI 视频。Linux/Windows 运行包带有 LGPL FFmpeg 运行时，可读取常见压缩视频输入；视频输出固定为 RGB24 AVI。
 - 根据输入自动规划目标尺寸，或使用 `--width` 和 `--height` 指定目标尺寸。
 - 支持单张图片、最多两张图片的一次调用，以及单个视频文件。
+- 不提供文生图、文生视频或图生视频生成工作流；输入内容保持为图片或视频增强任务。
 - 标准输出会进行参考引导的色彩重建：保留模型生成的高频细节，并从输入重建低频色彩。
 
 ## 快速开始
@@ -105,11 +112,11 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 
 发布版的自动模式保持输入宽高比，将目标对齐到 16 像素，并在必要时居中裁剪。目标面积不超过 `256x256`；低于该上限的输入不会仅为填满面积而被放大。显式 `--width` / `--height` 使用相同上限。
 
-| 发布验证目标 | 图片 | 两帧 AVI |
+| 发布验证目标 | 图片 | AVI |
 | --- | --- | --- |
-| `128x128` | 已验证 | 已验证 |
+| `128x128` | 已验证 | 已验证（两帧） |
 | `128x256` | 已验证 | - |
-| `256x256` | 已验证 | - |
+| `256x256` | 已验证 | 已验证（连续 36 帧） |
 
 其他符合 16 像素对齐和面积上限的动态尺寸可以请求，但不属于当前发布验证承诺。
 
