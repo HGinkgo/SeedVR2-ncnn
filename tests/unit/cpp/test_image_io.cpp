@@ -1,7 +1,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "io/image_io.h"
 
@@ -52,6 +54,19 @@ int main()
     const std::filesystem::path unsupported_path = image_path.string() + ".webp";
     require(!seedvr2::save_rgb_image(unsupported_path, source, error), "unsupported output rejected");
     require(error.find("unsupported") != std::string::npos, "unsupported output error");
+
+    const std::filesystem::path input_dir =
+        std::filesystem::temp_directory_path() / "seedvr2-ncnn-image-directory-test";
+    std::filesystem::remove_all(input_dir);
+    std::filesystem::create_directories(input_dir);
+    std::ofstream(input_dir / "z.png") << "placeholder";
+    std::ofstream(input_dir / "a.jpg") << "placeholder";
+    std::ofstream(input_dir / "ignore.txt") << "placeholder";
+    std::vector<std::filesystem::path> image_paths;
+    require(seedvr2::list_rgb_images(input_dir, image_paths, error), error.c_str());
+    require(image_paths == std::vector<std::filesystem::path>{input_dir / "a.jpg", input_dir / "z.png"},
+            "directory image enumeration is sorted and filtered");
+    std::filesystem::remove_all(input_dir);
 
     std::filesystem::remove(image_path);
     std::filesystem::remove(jpeg_path);

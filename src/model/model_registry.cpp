@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <sstream>
 #include <vector>
 
@@ -52,6 +53,59 @@ bool has_flat_graph_artifact(const std::filesystem::path& model_dir)
            is_regular_model_file(encode.string() + ".ncnn.bin");
 }
 
+bool validate_manifest(const std::filesystem::path& model_dir, std::string& error)
+{
+    const std::filesystem::path manifest = model_dir / "manifest.sha256";
+    std::ifstream input(manifest);
+    if (!input)
+    {
+        error = "missing model package manifest: " + manifest.string();
+        return false;
+    }
+
+    std::size_t records = 0;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        if (line.empty())
+            continue;
+        const std::size_t separator = line.find("  ");
+        if (separator != 64 || line.size() <= separator + 2)
+        {
+            error = "invalid model package manifest record at line " + std::to_string(records + 1);
+            return false;
+        }
+        ++records;
+    }
+    if (records != 75)
+    {
+        error = "model package manifest must contain 75 records, got " + std::to_string(records);
+        return false;
+    }
+
+    std::error_code traversal_error;
+    for (std::filesystem::recursive_directory_iterator it(model_dir, traversal_error), end; it != end; it.increment(traversal_error))
+    {
+        if (traversal_error)
+        {
+            error = "failed to inspect model package: " + model_dir.string();
+            return false;
+        }
+        const bool is_symlink = it->is_symlink(traversal_error);
+        if (traversal_error)
+        {
+            error = "failed to inspect model package: " + model_dir.string();
+            return false;
+        }
+        if (is_symlink)
+        {
+            error = "model package must not contain symbolic links: " + it->path().string();
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 bool ModelRegistry::open(const std::filesystem::path& model_dir, ModelRegistry& registry, std::string& error)
@@ -71,6 +125,26 @@ bool ModelRegistry::open(const std::filesystem::path& model_dir, ModelRegistry& 
     }
 
     registry.model_dir_ = model_dir;
+    return true;
+}
+
+bool ModelRegistry::check_package(std::string& error) const
+{
+    error.clear();
+    if (model_dir_.empty())
+    {
+        error = "model registry is not open";
+        return false;
+    }
+    if (!validate_manifest(model_dir_, error))
+        return false;
+
+    ResolutionPlan plan;
+    if (!ResolutionPlan::from_explicit(256, 256, plan, &error))
+        return false;
+    ModelGraphSet graphs;
+    if (!resolve(plan, graphs, error))
+        return false;
     return true;
 }
 

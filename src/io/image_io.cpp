@@ -101,4 +101,40 @@ bool save_rgb_image(const std::filesystem::path& path, const RgbImage& image, st
     return true;
 }
 
+bool list_rgb_images(const std::filesystem::path& directory,
+                     std::vector<std::filesystem::path>& paths,
+                     std::string& error)
+{
+    paths.clear();
+    error.clear();
+    std::error_code filesystem_error;
+    if (!std::filesystem::is_directory(directory, filesystem_error))
+    {
+        error = "input directory does not exist or is not a directory: " + directory.string();
+        return false;
+    }
+    for (std::filesystem::directory_iterator it(directory, filesystem_error), end; it != end;
+         it.increment(filesystem_error))
+    {
+        if (filesystem_error)
+        {
+            error = "failed to enumerate input directory: " + directory.string();
+            paths.clear();
+            return false;
+        }
+        if (!it->is_regular_file(filesystem_error))
+            continue;
+        const std::string extension = lowercase_extension(it->path());
+        if (extension == ".png" || extension == ".jpg" || extension == ".jpeg")
+            paths.push_back(it->path());
+    }
+    std::sort(paths.begin(), paths.end());
+    if (paths.empty())
+    {
+        error = "input directory contains no PNG or JPEG images: " + directory.string();
+        return false;
+    }
+    return true;
+}
+
 } // namespace seedvr2

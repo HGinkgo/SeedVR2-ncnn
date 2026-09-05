@@ -52,6 +52,14 @@ void populate_package(const std::filesystem::path& root)
     }
 }
 
+void write_manifest(const std::filesystem::path& root, std::size_t records)
+{
+    std::ofstream manifest(root / "manifest.sha256");
+    require(manifest.good(), "create manifest");
+    for (std::size_t index = 0; index < records; ++index)
+        manifest << "0000000000000000000000000000000000000000000000000000000000000000  file-" << index << "\n";
+}
+
 } // namespace
 
 int main()
@@ -81,6 +89,13 @@ int main()
     require(graphs.dit_stack_dir == root, "DiT stack directory");
     require(graphs.conditioning_path == root / "conditioning" / "pos_emb.f32", "conditioning path");
     require(graphs.text_tokens == 58, "positive conditioning token count");
+    write_manifest(root, 75);
+    require(registry.check_package(error), error.c_str());
+
+    write_manifest(root, 74);
+    require(!registry.check_package(error), "short manifest rejected");
+    require(error.find("75 records") != std::string::npos, "manifest count error");
+    write_manifest(root, 75);
 
     seedvr2::ResolutionPlan second_shape;
     require(seedvr2::ResolutionPlan::from_explicit(256, 256, second_shape, &error), error.c_str());

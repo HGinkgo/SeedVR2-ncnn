@@ -17,4 +17,9 @@ struct RgbImage final
 bool load_rgb_image(const std::filesystem::path& path, RgbImage& image, std::string& error);
 bool save_rgb_image(const std::filesystem::path& path, const RgbImage& image, std::string& error);
 
+// Return supported image files in deterministic lexicographic order.
+bool list_rgb_images(const std::filesystem::path& directory,
+                     std::vector<std::filesystem::path>& paths,
+                     std::string& error);
+
 } // namespace seedvr2
