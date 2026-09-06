@@ -120,6 +120,8 @@ Automatic mode preserves the input aspect ratio, aligns the target to 16 pixels,
 
 Other dynamic sizes that meet the 16-pixel alignment and area limit can be requested, but are outside the current release validation promise.
 
+For a plain `256x256` target without `--vae-tile-size`, the runtime automatically materializes the dynamic VAE parameters in memory and enables ncnn's light execution mode. The model package files and dynamic paths for other sizes are unchanged; this is an internal equivalent path and needs no extra CLI option.
+
 ## Inputs and Outputs
 
 | Workflow | Input | Output |

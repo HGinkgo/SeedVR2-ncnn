@@ -24,6 +24,10 @@ std::string format_profile_line(const char* name,
                                 std::size_t count_value,
                                 double elapsed_ms);
 
+// Profile line carrying a stable non-timing mode, e.g.:
+//   profile name=vae-graph mode=static-256
+std::string format_profile_mode_line(const char* name, const char* mode);
+
 // Closing profile line carrying the peak host memory, e.g.:
 //   profile name=total ms=13579.0 peak-rss-mib=2913
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib);
@@ -78,6 +82,12 @@ public:
             std::fprintf(stderr, "%s\n",
                          format_profile_line(name, "frames", frame_count, elapsed_ms).c_str());
         }
+    }
+
+    void report_mode(const char* name, const char* mode) const
+    {
+        if (enabled_)
+            std::fprintf(stderr, "%s\n", format_profile_mode_line(name, mode).c_str());
     }
 
     void report_total(double elapsed_ms) const

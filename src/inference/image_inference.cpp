@@ -25,6 +25,7 @@
 #include "net.h"
 #include "sampler/vulkan_sampler.h"
 #include "vae/temporal_pad.h"
+#include "vae/static_vae_graph.h"
 #include "vulkan/transient_staging_allocator.h"
 #endif
 
@@ -134,7 +135,7 @@ std::uint64_t query_max_allocation_mib(const ncnn::VulkanDevice* vkdev)
 }
 
 bool load_vae(ncnn::Net& net,
-              const std::filesystem::path& stem,
+              const PreparedVaeGraph& graph,
               ncnn::VulkanDevice* vkdev,
               ncnn::VkAllocator* blob_allocator,
               ncnn::VkAllocator* staging_allocator,
@@ -144,9 +145,10 @@ bool load_vae(ncnn::Net& net,
     net.opt.use_local_pool_allocator = !low_memory_cpu;
     net.set_vulkan_device(vkdev);
     register_seedvr2_vae_layers(net);
-    const std::string stem_string = stem.string();
-    return net.load_param((stem_string + ".ncnn.param").c_str()) == 0 &&
-           net.load_model((stem_string + ".ncnn.bin").c_str()) == 0;
+    const int param_result = graph.param_contents.empty()
+                                 ? net.load_param(graph.param_path.string().c_str())
+                                 : net.load_param_mem(graph.param_contents.c_str());
+    return param_result == 0 && net.load_model(graph.model_path.string().c_str()) == 0;
 }
 
 struct VulkanInferenceContext final
@@ -164,6 +166,9 @@ struct VulkanInferenceContext final
     ResolutionPlan plan;
     ModelGraphSet graphs;
     int vae_tile_size = 0;
+    PreparedVaeGraph encode_vae_graph;
+    PreparedVaeGraph decode_vae_graph;
+    VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
 
     void clear()
     {
@@ -350,7 +355,7 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
     ncnn::VkMat latent_gpu;
     {
         ncnn::Extractor extractor = encode.create_extractor();
-        extractor.set_light_mode(false);
+        extractor.set_light_mode(vae_graph_uses_light_mode(context.vae_graph_mode));
         ncnn::VkCompute compute(context.vkdev);
         if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
             compute.submit_and_wait() != 0)
@@ -396,7 +401,7 @@ bool run_decode_tile_vulkan(const ncnn::Mat& latent,
         }
     }
     ncnn::Extractor extractor = decode.create_extractor();
-    extractor.set_light_mode(false);
+    extractor.set_light_mode(vae_graph_uses_light_mode(context.vae_graph_mode));
     if (extractor.input("in0", latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
     {
         error = "frame=" + std::to_string(frame_index) + " " +
@@ -604,6 +609,21 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     context.plan = plan;
     context.graphs = graphs;
     context.vae_tile_size = vae_tile_size;
+    if (!prepare_vae_graph(graphs.vae_encode_stem, plan.image_width, plan.image_height, vae_tile_size,
+                           context.encode_vae_graph, error) ||
+        !prepare_vae_graph(graphs.vae_decode_stem, plan.image_width, plan.image_height, vae_tile_size,
+                           context.decode_vae_graph, error))
+    {
+        stage_error("load-vae-graph", error.c_str());
+        return false;
+    }
+    if (context.encode_vae_graph.mode != context.decode_vae_graph.mode)
+    {
+        stage_error("load-vae-graph", "encode and decode VAE graph modes do not match");
+        return false;
+    }
+    context.vae_graph_mode = context.encode_vae_graph.mode;
+    profile.report_mode("vae-graph", vae_graph_mode_name(context.vae_graph_mode));
     return true;
 }
 
@@ -625,7 +645,7 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
         {
             const ProfileScope load_scope(profile, "load-encode");
             std::fprintf(stderr, "stage=load-encode\n");
-            if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
+            if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
                           context.encode_staging_allocator, false))
             {
                 stage_error(0, "load-encode", "ncnn graph load returned failure");
@@ -817,7 +837,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
         {
             const ProfileScope load_scope(profile, "load-decode");
             std::fprintf(stderr, "stage=load-decode\n");
-            if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
+            if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
                           context.decode_staging_allocator.get(), true))
             {
                 stage_error(0, "load-decode", "ncnn graph load returned failure");
@@ -921,7 +941,7 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
     {
         const ProfileScope load_scope(profile, "load-encode");
         std::fprintf(stderr, "stage=load-encode\n");
-        if (!load_vae(encode, context.graphs.vae_encode_stem, context.vkdev, context.encode_blob_allocator,
+        if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
                       context.encode_staging_allocator, false))
         {
             error = format_vulkan_stage_error("load-encode", context.diagnostics,
@@ -1194,7 +1214,7 @@ bool decode_video_vulkan(LatentSpool& output_spool,
     {
         const ProfileScope load_scope(profile, "load-decode");
         std::fprintf(stderr, "stage=load-decode\n");
-        if (!load_vae(decode, context.graphs.vae_decode_stem, context.vkdev, context.decode_blob_allocator,
+        if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
                       context.decode_staging_allocator.get(), true))
         {
             error = format_vulkan_stage_error("load-decode", context.diagnostics,

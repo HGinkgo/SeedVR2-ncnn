@@ -120,6 +120,8 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 
 其他符合 16 像素对齐和面积上限的动态尺寸可以请求，但不属于当前发布验证承诺。
 
+在不使用 `--vae-tile-size` 的 `256x256` 目标上，运行包会自动将动态 VAE 参数在内存中固定化，并启用 ncnn 的轻量执行模式；模型包文件和其他尺寸的动态路径不变。这是内部的等价执行路径，不需要额外 CLI 选项。
+
 ## 输入与输出
 
 | 工作流 | 输入 | 输出 |

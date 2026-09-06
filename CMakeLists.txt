@@ -66,7 +66,8 @@ add_executable(seedvr2-ncnn
     src/resolution/resolution_plan.cpp
     src/vae/temporal_pad.cpp
     src/vae/causal_conv3d.cpp
-    src/vae/depth_to_space.cpp)
+    src/vae/depth_to_space.cpp
+    src/vae/static_vae_graph.cpp)
 target_link_libraries(seedvr2-ncnn PRIVATE ncnn)
 target_include_directories(seedvr2-ncnn PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -219,6 +220,13 @@ if(SEEDVR2_BUILD_TESTS)
         src/resolution/resolution_plan.cpp)
     target_include_directories(seedvr2-model-registry-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME seedvr2-model-registry-test COMMAND seedvr2-model-registry-test)
+
+    add_executable(seedvr2-static-vae-graph-test
+        tests/unit/cpp/test_static_vae_graph.cpp
+        src/vae/static_vae_graph.cpp
+        src/inference/performance_profile.cpp)
+    target_include_directories(seedvr2-static-vae-graph-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME seedvr2-static-vae-graph-test COMMAND seedvr2-static-vae-graph-test)
 
     if(NOT SEEDVR2_ENABLE_VULKAN)
         add_executable(seedvr2-image-inference-test

@@ -38,6 +38,13 @@ std::string format_profile_line(const char* name,
     return line.str();
 }
 
+std::string format_profile_mode_line(const char* name, const char* mode)
+{
+    std::ostringstream line;
+    line << "profile name=" << name << " mode=" << mode;
+    return line.str();
+}
+
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib)
 {
     std::ostringstream line;
