@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
@@ -288,6 +289,15 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
     return true;
 }
 
+bool is_avi_output_path(const std::filesystem::path& path)
+{
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    return extension == ".avi";
+}
+
 bool validate_model_directory(const std::filesystem::path& model_dir, std::string& error)
 {
     error.clear();
@@ -328,6 +338,14 @@ bool make_image_resolution_plan(const CliOptions& options, int input_width, int 
         const int target_width = static_cast<int>(scaled_width);
         const int aligned_height = std::max(16, (target_height / 16) * 16);
         const int aligned_width = std::max(16, (target_width / 16) * 16);
+        const long long target_area = static_cast<long long>(aligned_height) * aligned_width;
+        if (target_area > kProductMaxArea)
+        {
+            error = "CLI target area must not exceed " + std::to_string(kProductMaxArea) +
+                    " (256x256 low-resolution product limit), got " + std::to_string(aligned_height) + "x" +
+                    std::to_string(aligned_width);
+            return false;
+        }
         if (ResolutionPlan::from_explicit(aligned_height, aligned_width, plan, &error))
             return true;
     }

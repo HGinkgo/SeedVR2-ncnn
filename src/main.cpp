@@ -147,7 +147,7 @@ int main(int argc, char** argv)
                          reader.info().frame_count);
             return 1;
         }
-        if (!has_video_extension(options.output) || options.output.extension() != ".avi")
+        if (!seedvr2::is_avi_output_path(options.output))
         {
             std::fprintf(stderr, "error: AVI input requires an AVI output path\n");
             return 1;

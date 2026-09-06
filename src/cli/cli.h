@@ -43,6 +43,7 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
 bool validate_model_directory(const std::filesystem::path& model_dir, std::string& error);
 bool make_image_resolution_plan(const CliOptions& options, int input_width, int input_height,
                                 ResolutionPlan& plan, std::string& error);
+bool is_avi_output_path(const std::filesystem::path& path);
 
 // Return the selected frame count, or -1 when an unknown-length source is
 // intentionally left unbounded.

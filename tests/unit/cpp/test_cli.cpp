@@ -187,6 +187,17 @@ int main()
     require(seedvr2::make_image_resolution_plan(scaled, 64, 64, scaled_plan, error), error.c_str());
     require(scaled_plan.image_width == 128 && scaled_plan.image_height == 128, "scaled resolution plan");
 
+    require(seedvr2::is_avi_output_path("result.avi"), "lowercase AVI output accepted");
+    require(seedvr2::is_avi_output_path("result.AVI"), "uppercase AVI output accepted");
+    require(!seedvr2::is_avi_output_path("result.mp4"), "non-AVI output rejected");
+
+    const seedvr2::CliOptions oversized_scale = parse(
+        {"seedvr2-ncnn", "--input", "input.png", "--scale", "2"}, error);
+    seedvr2::ResolutionPlan oversized_scale_plan;
+    require(!seedvr2::make_image_resolution_plan(oversized_scale, 256, 256, oversized_scale_plan, error),
+            "scaled resolution respects product area limit");
+    require(error.find("65536") != std::string::npos, "scaled resolution limit error");
+
     const char* unknown_option[] = {"seedvr2-ncnn", "--bogus", "value"};
     require(!seedvr2::parse_cli(3, unknown_option, rejected, error), "unknown option rejected");
 
