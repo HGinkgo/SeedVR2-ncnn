@@ -36,6 +36,14 @@ std::string format_profile_residency_line(const char* phase,
                                           std::uint32_t heap_budget_mib,
                                           std::uint64_t max_allocation_mib);
 
+// Session lifecycle profile lines, e.g.:
+//   profile name=session-open mode=cold ms=123.4
+//   profile name=session-run mode=warm index=1 ms=456.7
+std::string format_profile_session_open_line(const char* mode, double elapsed_ms);
+std::string format_profile_session_run_line(const char* mode,
+                                            std::size_t run_index,
+                                            double elapsed_ms);
+
 // Closing profile line carrying the peak host memory, e.g.:
 //   profile name=total ms=13579.0 peak-rss-mib=2913
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib);
@@ -108,6 +116,22 @@ public:
                          format_profile_residency_line(phase, current_rss_mib(), peak_rss_mib(),
                                                        heap_budget_mib, max_allocation_mib)
                              .c_str());
+        }
+    }
+
+    void report_session_open(double elapsed_ms) const
+    {
+        if (enabled_)
+            std::fprintf(stderr, "%s\n", format_profile_session_open_line("cold", elapsed_ms).c_str());
+    }
+
+    void report_session_run(std::size_t run_index, double elapsed_ms) const
+    {
+        if (enabled_)
+        {
+            const char* mode = run_index == 0 ? "cold" : "warm";
+            std::fprintf(stderr, "%s\n",
+                         format_profile_session_run_line(mode, run_index, elapsed_ms).c_str());
         }
     }
 

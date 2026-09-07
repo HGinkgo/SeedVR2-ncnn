@@ -58,6 +58,24 @@ std::string format_profile_residency_line(const char* phase,
     return line.str();
 }
 
+std::string format_profile_session_open_line(const char* mode, double elapsed_ms)
+{
+    std::ostringstream line;
+    line << "profile name=session-open mode=" << mode;
+    append_ms(line, elapsed_ms);
+    return line.str();
+}
+
+std::string format_profile_session_run_line(const char* mode,
+                                            std::size_t run_index,
+                                            double elapsed_ms)
+{
+    std::ostringstream line;
+    line << "profile name=session-run mode=" << mode << " index=" << run_index;
+    append_ms(line, elapsed_ms);
+    return line.str();
+}
+
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib)
 {
     std::ostringstream line;

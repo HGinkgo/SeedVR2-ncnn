@@ -1431,6 +1431,7 @@ struct ImageInferenceSession::Impl
 #endif
     // Borrowed from the caller; null when profiling is disabled.
     const PerformanceProfile* profile = nullptr;
+    mutable std::size_t run_count = 0;
 };
 
 ImageInferenceSession::ImageInferenceSession() = default;
@@ -1460,9 +1461,11 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     static const PerformanceProfile kDisabledProfile;
     std::unique_ptr<Impl> candidate(new Impl);
     candidate->profile = profile ? profile : &kDisabledProfile;
+    const auto open_start = PerformanceProfile::Clock::now();
     if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
                                   *candidate->profile, vae_tile_size))
         return false;
+    candidate->profile->report_session_open(candidate->profile->elapsed_ms(open_start));
     session.impl_ = std::move(candidate);
     return true;
 #else
@@ -1517,8 +1520,14 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
             return false;
         }
     }
-    return run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error,
-                                  *impl_->profile, frame_offset);
+    const auto run_start = PerformanceProfile::Clock::now();
+    const std::size_t run_index = impl_->run_count;
+    if (!run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error,
+                                *impl_->profile, frame_offset))
+        return false;
+    impl_->profile->report_session_run(run_index, impl_->profile->elapsed_ms(run_start));
+    ++impl_->run_count;
+    return true;
 #else
     (void)inputs;
     (void)frame_offset;
@@ -1546,8 +1555,14 @@ bool ImageInferenceSession::run_video(const VideoFrameReader& reader,
         error = "inference session is not open";
         return false;
     }
-    return run_vulkan_image_video(reader, writer, impl_->context.plan, impl_->context, frame_count, error,
-                                  *impl_->profile, frame_offset);
+    const auto run_start = PerformanceProfile::Clock::now();
+    const std::size_t run_index = impl_->run_count;
+    if (!run_vulkan_image_video(reader, writer, impl_->context.plan, impl_->context, frame_count, error,
+                                *impl_->profile, frame_offset))
+        return false;
+    impl_->profile->report_session_run(run_index, impl_->profile->elapsed_ms(run_start));
+    ++impl_->run_count;
+    return true;
 #else
     (void)frame_offset;
     error = "image inference requires a Vulkan-enabled build";

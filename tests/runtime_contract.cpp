@@ -109,6 +109,14 @@ void check_residency_profile_contract()
             "residency profile line");
 }
 
+void check_session_profile_contract()
+{
+    const std::string open_line = seedvr2::format_profile_session_open_line("cold", 123.4);
+    require(open_line == "profile name=session-open mode=cold ms=123.4", "session open profile line");
+    const std::string run_line = seedvr2::format_profile_session_run_line("warm", 2, 456.7);
+    require(run_line == "profile name=session-run mode=warm index=2 ms=456.7", "session run profile line");
+}
+
 } // namespace
 
 int main()
@@ -116,6 +124,7 @@ int main()
     check_cli_contract();
     check_avi_contract();
     check_residency_profile_contract();
+    check_session_profile_contract();
     std::puts("seedvr2-runtime-contract: ok");
     return 0;
 }
