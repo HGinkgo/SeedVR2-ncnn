@@ -156,9 +156,10 @@ bool load_packing_graph(ncnn::Net& net, ncnn::VulkanDevice* vkdev, ncnn::VkAlloc
 }
 
 bool load_graph_from_param(ncnn::Net& net, const char* param, ncnn::VulkanDevice* vkdev,
-                           ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator)
+                           ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator,
+                           ncnn::PipelineCache* pipeline_cache)
 {
-    configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, nullptr);
+    configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
     if (net.load_param_mem(param) != 0)
         return false;
     const unsigned char* empty_model = nullptr;
@@ -270,7 +271,8 @@ struct DitStackSession::Impl
     ncnn::VulkanDevice* vkdev = nullptr;
     ncnn::VkAllocator* blob_allocator = nullptr;
     ncnn::VkAllocator* staging_allocator = nullptr;
-    std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
+    std::unique_ptr<ncnn::PipelineCache> owned_pipeline_cache;
+    ncnn::PipelineCache* pipeline_cache = nullptr;
     ncnn::Net dit_input;
     ncnn::Net dit_embedding;
     ncnn::Net packing;
@@ -287,7 +289,8 @@ struct DitStackSession::Impl
         packing.clear();
         dit_embedding.clear();
         dit_input.clear();
-        pipeline_cache.reset();
+        owned_pipeline_cache.reset();
+        pipeline_cache = nullptr;
     }
 };
 
@@ -317,7 +320,8 @@ bool DitStackSession::open(const std::string& stack_dir,
                            ncnn::VkAllocator* blob_allocator,
                            ncnn::VkAllocator* staging_allocator,
                            DitStackSession& session,
-                           const PerformanceProfile* profile)
+                           const PerformanceProfile* profile,
+                           ncnn::PipelineCache* pipeline_cache)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || plan.video_tokens <= 0)
         return false;
@@ -329,15 +333,21 @@ bool DitStackSession::open(const std::string& stack_dir,
     candidate->vkdev = vkdev;
     candidate->blob_allocator = blob_allocator;
     candidate->staging_allocator = staging_allocator;
-    candidate->pipeline_cache.reset(new ncnn::PipelineCache(vkdev));
+    if (pipeline_cache)
+        candidate->pipeline_cache = pipeline_cache;
+    else
+    {
+        candidate->owned_pipeline_cache.reset(new ncnn::PipelineCache(vkdev));
+        candidate->pipeline_cache = candidate->owned_pipeline_cache.get();
+    }
     DitLoadProfile load_profile(profile && profile->enabled() ? profile : nullptr);
     DitLoadProfile* load_profile_ptr = load_profile.profile ? &load_profile : nullptr;
     if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator,
-                    candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr) ||
+                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr) ||
         !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
-                    staging_allocator, candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr) ||
+                    staging_allocator, candidate->pipeline_cache, &runtime_spec, load_profile_ptr) ||
         !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator,
-                            candidate->pipeline_cache.get(), load_profile_ptr))
+                            candidate->pipeline_cache, load_profile_ptr))
         return false;
 
     candidate->blocks.reserve(32);
@@ -347,12 +357,12 @@ bool DitStackSession::open(const std::string& stack_dir,
         const std::string block_name = stack_dir + "/dit_block_" +
                                        (block_index < 10 ? "0" : "") + std::to_string(block_index);
         if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator,
-                        candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr))
+                        candidate->pipeline_cache, &runtime_spec, load_profile_ptr))
             return false;
         candidate->blocks.push_back(std::move(block));
     }
     if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator,
-                    candidate->pipeline_cache.get(), &runtime_spec, load_profile_ptr))
+                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr))
         return false;
 
     if (load_profile_ptr)
@@ -368,7 +378,8 @@ bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
                                 ncnn::VulkanDevice* vkdev,
                                 ncnn::VkAllocator* blob_allocator,
                                 ncnn::VkAllocator* staging_allocator,
-                                ncnn::VkMat& patches)
+                                ncnn::VkMat& patches,
+                                ncnn::PipelineCache* pipeline_cache)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || noise.empty() || condition.empty())
     {
@@ -391,7 +402,7 @@ bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
           << "Reorg patchify 1 1 video patch_grid 0=2 1=1\n"
           << "Permute token_major 1 1 patch_grid token_grid 0=3\n"
           << "Reshape flatten 1 1 token_grid patches 0=132 1=" << plan.video_tokens << "\n";
-    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator))
+    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator, pipeline_cache))
     {
         std::fprintf(stderr, "make_dit_input_patches_gpu: graph load failed\n");
         return false;
@@ -485,7 +496,8 @@ bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
                                      ncnn::VulkanDevice* vkdev,
                                      ncnn::VkAllocator* blob_allocator,
                                      ncnn::VkAllocator* staging_allocator,
-                                     ncnn::VkMat& patches)
+                                     ncnn::VkMat& patches,
+                                     ncnn::PipelineCache* pipeline_cache)
 {
     if (!vkdev || !blob_allocator || !staging_allocator)
         return false;
@@ -497,7 +509,7 @@ bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
           << "Reorg patchify 1 1 latent patch_grid 0=2 1=1\n"
           << "Permute token_major 1 1 patch_grid token_grid 0=3\n"
           << "Reshape flatten 1 1 token_grid patches 0=64 1=" << plan.video_tokens << "\n";
-    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator))
+    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator, pipeline_cache))
         return false;
 
     ncnn::VkMat latent_pack1;
@@ -520,7 +532,8 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
                             ncnn::VulkanDevice* vkdev,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
-                            ncnn::VkMat& latent)
+                            ncnn::VkMat& latent,
+                            ncnn::PipelineCache* pipeline_cache)
 {
     if (!vkdev || !blob_allocator || !staging_allocator)
         return false;
@@ -534,7 +547,7 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
           << plan.source_height << " 2=64\n"
           << "ShuffleChannel channel_major 1 1 patch_grid shuffled 0=4\n"
           << "PixelShuffle unpatch 1 1 shuffled latent 0=2 1=0\n";
-    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator))
+    if (!load_graph_from_param(net, param.str().c_str(), vkdev, blob_allocator, staging_allocator, pipeline_cache))
         return false;
 
     ncnn::VkMat patches_pack1;

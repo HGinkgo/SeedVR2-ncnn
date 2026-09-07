@@ -43,6 +43,7 @@ std::string format_profile_session_open_line(const char* mode, double elapsed_ms
 std::string format_profile_session_run_line(const char* mode,
                                             std::size_t run_index,
                                             double elapsed_ms);
+std::string format_profile_pipeline_cache_line(const char* phase, std::size_t entries);
 
 // Closing profile line carrying the peak host memory, e.g.:
 //   profile name=total ms=13579.0 peak-rss-mib=2913
@@ -133,6 +134,12 @@ public:
             std::fprintf(stderr, "%s\n",
                          format_profile_session_run_line(mode, run_index, elapsed_ms).c_str());
         }
+    }
+
+    void report_pipeline_cache(const char* phase, std::size_t entries) const
+    {
+        if (enabled_)
+            std::fprintf(stderr, "%s\n", format_profile_pipeline_cache_line(phase, entries).c_str());
     }
 
     void report_total(double elapsed_ms) const

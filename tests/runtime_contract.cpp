@@ -115,6 +115,8 @@ void check_session_profile_contract()
     require(open_line == "profile name=session-open mode=cold ms=123.4", "session open profile line");
     const std::string run_line = seedvr2::format_profile_session_run_line("warm", 2, 456.7);
     require(run_line == "profile name=session-run mode=warm index=2 ms=456.7", "session run profile line");
+    const std::string cache_line = seedvr2::format_profile_pipeline_cache_line("dit", 37);
+    require(cache_line == "profile name=pipeline-cache phase=dit entries=37", "pipeline cache profile line");
 }
 
 } // namespace

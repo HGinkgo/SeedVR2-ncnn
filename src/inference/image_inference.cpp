@@ -23,6 +23,7 @@
 #include "dit/dit_stack.h"
 #include "gpu.h"
 #include "net.h"
+#include "pipelinecache.h"
 #include "sampler/vulkan_sampler.h"
 #include "vae/temporal_pad.h"
 #include "vae/static_vae_graph.h"
@@ -106,7 +107,9 @@ private:
     bool active_ = false;
 };
 
-ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator)
+ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator,
+                                ncnn::VkAllocator* staging_allocator,
+                                ncnn::PipelineCache* pipeline_cache = nullptr)
 {
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
@@ -117,6 +120,7 @@ ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator, ncnn::VkAlloc
     opt.blob_vkallocator = blob_allocator;
     opt.workspace_vkallocator = blob_allocator;
     opt.staging_vkallocator = staging_allocator;
+    opt.pipeline_cache = pipeline_cache;
     return opt;
 }
 
@@ -139,9 +143,10 @@ bool load_vae(ncnn::Net& net,
               ncnn::VulkanDevice* vkdev,
               ncnn::VkAllocator* blob_allocator,
               ncnn::VkAllocator* staging_allocator,
-              bool low_memory_cpu)
+              bool low_memory_cpu,
+              ncnn::PipelineCache* pipeline_cache)
 {
-    net.opt = make_vulkan_option(blob_allocator, staging_allocator);
+    net.opt = make_vulkan_option(blob_allocator, staging_allocator, pipeline_cache);
     net.opt.use_local_pool_allocator = !low_memory_cpu;
     net.set_vulkan_device(vkdev);
     register_seedvr2_vae_layers(net);
@@ -169,6 +174,7 @@ struct VulkanInferenceContext final
     PreparedVaeGraph encode_vae_graph;
     PreparedVaeGraph decode_vae_graph;
     VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
+    std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
 
     void clear()
     {
@@ -192,6 +198,7 @@ struct VulkanInferenceContext final
         dit_staging_allocator = nullptr;
         encode_staging_allocator = nullptr;
         vkdev = nullptr;
+        pipeline_cache.reset();
         instance.close();
     }
 
@@ -566,6 +573,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         error = "requested Vulkan GPU is unavailable";
         return false;
     }
+    context.pipeline_cache = std::make_unique<ncnn::PipelineCache>(context.vkdev);
 
     context.diagnostics.gpu_id = selected_gpu;
     context.diagnostics.device_name = context.vkdev->info.device_name();
@@ -646,7 +654,7 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
             const ProfileScope load_scope(profile, "load-encode");
             std::fprintf(stderr, "stage=load-encode\n");
             if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
-                          context.encode_staging_allocator, false))
+                          context.encode_staging_allocator, false, context.pipeline_cache.get()))
             {
                 stage_error(0, "load-encode", "ncnn graph load returned failure");
                 return false;
@@ -714,7 +722,8 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
         error = "frame=" + std::to_string(frame_index) + " " +
                 format_vulkan_stage_error(stage, context.diagnostics, detail);
     };
-    const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator);
+    const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator,
+                                                    context.pipeline_cache.get());
 
     ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
     if (noise.empty())
@@ -731,7 +740,8 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             const ProfileScope load_scope(profile, "load-dit-stack");
             std::fprintf(stderr, "stage=load-dit-stack\n");
             if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                       context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile))
+                                       context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile,
+                                       context.pipeline_cache.get()))
             {
                 stage_error(0, "load-dit-stack", "ncnn graph load returned failure");
                 return false;
@@ -759,7 +769,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             std::fprintf(stderr, "stage=dit-input-patchify\n");
             if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
                                             context.dit_blob_allocator, context.dit_staging_allocator,
-                                            input_patches_gpu))
+                                            input_patches_gpu, context.pipeline_cache.get()))
             {
                 stage_error(frame_index, "dit-input-patchify", "GPU patch assembly returned failure");
                 return false;
@@ -776,7 +786,8 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             ncnn::VkMat noise_patches_gpu;
             std::fprintf(stderr, "stage=noise-patchify\n");
             if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                                 context.dit_staging_allocator, noise_patches_gpu))
+                                                 context.dit_staging_allocator, noise_patches_gpu,
+                                                 context.pipeline_cache.get()))
             {
                 stage_error(frame_index, "noise-patchify", "GPU patch assembly returned failure");
                 return false;
@@ -795,7 +806,8 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             ncnn::VkMat output_latent_gpu;
             std::fprintf(stderr, "stage=latent-unpatch\n");
             if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                        context.dit_staging_allocator, output_latent_gpu))
+                                        context.dit_staging_allocator, output_latent_gpu,
+                                        context.pipeline_cache.get()))
             {
                 stage_error(frame_index, "latent-unpatch", "GPU patch removal returned failure");
                 return false;
@@ -842,7 +854,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
             const ProfileScope load_scope(profile, "load-decode");
             std::fprintf(stderr, "stage=load-decode\n");
             if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
-                          context.decode_staging_allocator.get(), true))
+                          context.decode_staging_allocator.get(), true, context.pipeline_cache.get()))
             {
                 stage_error(0, "load-decode", "ncnn graph load returned failure");
                 return false;
@@ -948,7 +960,7 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         const ProfileScope load_scope(profile, "load-encode");
         std::fprintf(stderr, "stage=load-encode\n");
         if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
-                      context.encode_staging_allocator, false))
+                      context.encode_staging_allocator, false, context.pipeline_cache.get()))
         {
             error = format_vulkan_stage_error("load-encode", context.diagnostics,
                                               "ncnn graph load returned failure");
@@ -1066,7 +1078,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
     if (!LatentSpool::create(output_spool, error))
         return false;
 
-    const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator);
+    const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator,
+                                                    context.pipeline_cache.get());
     ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
     if (noise.empty())
     {
@@ -1081,7 +1094,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         const ProfileScope load_scope(profile, "load-dit-stack");
         std::fprintf(stderr, "stage=load-dit-stack\n");
         if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                   context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile))
+                                   context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile,
+                                   context.pipeline_cache.get()))
         {
             error = format_vulkan_stage_error("load-dit-stack", context.diagnostics,
                                               "ncnn graph load returned failure");
@@ -1125,7 +1139,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         ncnn::VkMat input_patches_gpu;
         std::fprintf(stderr, "stage=dit-input-patchify\n");
         if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
-                                        context.dit_blob_allocator, context.dit_staging_allocator, input_patches_gpu))
+                                        context.dit_blob_allocator, context.dit_staging_allocator, input_patches_gpu,
+                                        context.pipeline_cache.get()))
         {
             error = "frame=" + std::to_string(absolute_index) + " " +
                     format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
@@ -1146,7 +1161,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         ncnn::VkMat noise_patches_gpu;
         std::fprintf(stderr, "stage=noise-patchify\n");
         if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                             context.dit_staging_allocator, noise_patches_gpu))
+                                             context.dit_staging_allocator, noise_patches_gpu,
+                                             context.pipeline_cache.get()))
         {
             error = "frame=" + std::to_string(absolute_index) + " " +
                     format_vulkan_stage_error("noise-patchify", context.diagnostics,
@@ -1169,7 +1185,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         ncnn::VkMat output_latent_gpu;
         std::fprintf(stderr, "stage=latent-unpatch\n");
         if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                    context.dit_staging_allocator, output_latent_gpu))
+                                    context.dit_staging_allocator, output_latent_gpu,
+                                    context.pipeline_cache.get()))
         {
             error = "frame=" + std::to_string(absolute_index) + " " +
                     format_vulkan_stage_error("latent-unpatch", context.diagnostics,
@@ -1227,7 +1244,7 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         const ProfileScope load_scope(profile, "load-decode");
         std::fprintf(stderr, "stage=load-decode\n");
         if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
-                      context.decode_staging_allocator.get(), true))
+                      context.decode_staging_allocator.get(), true, context.pipeline_cache.get()))
         {
             error = format_vulkan_stage_error("load-decode", context.diagnostics,
                                               "ncnn graph load returned failure");
@@ -1525,6 +1542,7 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
     if (!run_vulkan_image_batch(inputs, impl_->context.plan, impl_->context, outputs, error,
                                 *impl_->profile, frame_offset))
         return false;
+    impl_->profile->report_pipeline_cache("run", impl_->context.pipeline_cache->size());
     impl_->profile->report_session_run(run_index, impl_->profile->elapsed_ms(run_start));
     ++impl_->run_count;
     return true;
@@ -1560,6 +1578,7 @@ bool ImageInferenceSession::run_video(const VideoFrameReader& reader,
     if (!run_vulkan_image_video(reader, writer, impl_->context.plan, impl_->context, frame_count, error,
                                 *impl_->profile, frame_offset))
         return false;
+    impl_->profile->report_pipeline_cache("run", impl_->context.pipeline_cache->size());
     impl_->profile->report_session_run(run_index, impl_->profile->elapsed_ms(run_start));
     ++impl_->run_count;
     return true;
