@@ -164,7 +164,7 @@ For compressed video input, also configure `-DSEEDVR2_ENABLE_FFMPEG=ON` and prov
 
 ## Development and Tests
 
-Default CTest covers the fast native unit and backend-contract checks. Model-backed graph-load, golden, and end-to-end tests require local models and reference data and are opt-in. See [tests/README.md](tests/README.md) for the test tiers.
+The public verification surface stays compact: `SEEDVR2_BUILD_TESTS=ON` builds one fast runtime contract check for CLI behavior, low-resolution planning, and AVI I/O; `tests/smoke.sh` is the lightweight executable smoke test. Model export, GPU numerical comparison, and performance work remain local acceptance workflows rather than daily repository targets.
 
 ```bash
 cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DSEEDVR2_BUILD_TESTS=ON

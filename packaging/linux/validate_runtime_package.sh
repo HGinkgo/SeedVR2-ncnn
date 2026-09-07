@@ -2,7 +2,7 @@
 
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 packager="$repo_root/packaging/linux/package_runtime.sh"
 ffmpeg_builder="$repo_root/packaging/linux/build_ffmpeg_lgpl.sh"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/seedvr2-package-test.XXXXXX")
@@ -72,7 +72,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 if [ "$#" -ne 1 ]; then
-    printf '%s\n' "Usage: test_linux_runtime_package.sh [--release-smoke|--release-video-smoke|--reject-linked-model|--reject-mismatched-source]" >&2
+    printf '%s\n' "Usage: validate_runtime_package.sh [--release-smoke|--release-video-smoke|--reject-linked-model|--reject-mismatched-source]" >&2
     exit 2
 fi
 
@@ -280,7 +280,7 @@ case "$1" in
         printf '%s\n' "seedvr2 Linux runtime package video smoke: ok"
         ;;
     *)
-        printf '%s\n' "Usage: test_linux_runtime_package.sh [--release-smoke|--release-video-smoke|--reject-linked-model|--reject-mismatched-source]" >&2
+        printf '%s\n' "Usage: validate_runtime_package.sh [--release-smoke|--release-video-smoke|--reject-linked-model|--reject-mismatched-source]" >&2
         exit 2
         ;;
 esac

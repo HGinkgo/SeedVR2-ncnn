@@ -164,7 +164,7 @@ cmake --build build-vulkan --parallel
 
 ## 开发与测试
 
-默认 CTest 覆盖快速的原生单元和后端契约测试；模型加载、golden 和端到端测试需要本地模型及参考数据，按需启用。测试层级见 [tests/README.md](tests/README.md)。
+公开验证面保持精简：`SEEDVR2_BUILD_TESTS=ON` 只构建一条快速运行时合同测试，覆盖 CLI、低分辨率规划和 AVI I/O；`tests/smoke.sh` 用于可执行文件的轻量冒烟。模型导出、GPU 数值比对和性能验证保留为本地验收流程，不作为日常仓库测试目标。
 
 ```bash
 cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DSEEDVR2_BUILD_TESTS=ON

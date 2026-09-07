@@ -1,14 +1,14 @@
 #!/usr/bin/env pwsh
 #
-# Contract tests for the Windows x86_64 SeedVR2-ncnn runtime package.
+# Validates the Windows x86_64 SeedVR2-ncnn runtime package.
 #
-# This is the Windows counterpart of test_linux_runtime_package.sh. It expects
+# This is the Windows counterpart of validate_runtime_package.sh. It expects
 # the staged package directory and the release ZIP produced by
 # packaging/windows/package_runtime.ps1.
 #
 # Usage:
-#   test_windows_runtime_package.ps1 -PackageDir <dir> -Archive <path> [-Msys2Root <path>]
-#   test_windows_runtime_package.ps1 -ReleaseSmoke -Binary <path> -FfmpegPrefix <path>
+#   validate_runtime_package.ps1 -PackageDir <dir> -Archive <path> [-Msys2Root <path>]
+#   validate_runtime_package.ps1 -ReleaseSmoke -Binary <path> -FfmpegPrefix <path>
 #                                    -FfmpegSource <path> -Output <dir> [-Msys2Root <path>]
 
 [CmdletBinding()]
@@ -45,7 +45,7 @@ if ($ReleaseSmoke) {
     foreach ($required in @('Binary', 'FfmpegPrefix', 'FfmpegSource', 'Output')) {
         if (-not (Get-Variable -Name $required -ValueOnly)) { Fail "-$required is required with -ReleaseSmoke" }
     }
-    $packageScript = Join-Path $PSScriptRoot '..\..\..\packaging\windows\package_runtime.ps1'
+    $packageScript = Join-Path $PSScriptRoot 'package_runtime.ps1'
     if (-not (Test-Path $packageScript)) { Fail "package script is missing: $packageScript" }
 
     Write-Host "staging release package"

@@ -76,10 +76,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
 
       - name: Build Vulkan release executable
-        run: cmake --build build-release --target seedvr2-ncnn seedvr2-cli-test seedvr2-video-io-test --parallel 2
+        run: cmake --build build-release --target seedvr2-ncnn seedvr2-runtime-contract-test --parallel 2
 
       - name: Run release build checks
-        run: ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
+        run: ctest --test-dir build-release --output-on-failure -R seedvr2-runtime-contract-test
 
       - name: Stage Linux runtime archive
         run: >-
@@ -94,7 +94,7 @@ jobs:
           SEEDVR2_PACKAGE_TEST_BINARY: ${{ github.workspace }}/build-release/seedvr2-ncnn
           SEEDVR2_PACKAGE_TEST_FFMPEG_PREFIX: ${{ runner.temp }}/ffmpeg-prefix
           SEEDVR2_PACKAGE_TEST_FFMPEG_SOURCE: ${{ runner.temp }}/ffmpeg-8.1.2.tar.xz
-        run: ./tests/manual/package/test_linux_runtime_package.sh --release-smoke
+        run: ./packaging/linux/validate_runtime_package.sh --release-smoke
 
       - name: Upload Linux runtime archive
         uses: actions/upload-artifact@v4
@@ -208,12 +208,12 @@ jobs:
       - name: Build Vulkan release executable
         shell: pwsh
         run: |
-          cmake --build build-release --target seedvr2-ncnn seedvr2-cli-test seedvr2-video-io-test --parallel 2
+          cmake --build build-release --target seedvr2-ncnn seedvr2-runtime-contract-test --parallel 2
 
       - name: Run release build checks
         shell: pwsh
         run: |
-          ctest --test-dir build-release --output-on-failure -R 'seedvr2-(cli|video-io)-test'
+          ctest --test-dir build-release --output-on-failure -R seedvr2-runtime-contract-test
 
       - name: Stage Windows runtime archive
         env:
@@ -230,7 +230,7 @@ jobs:
       - name: Validate staged archive contract
         shell: pwsh
         run: |
-          .\tests\manual\package\test_windows_runtime_package.ps1 `
+          .\packaging\windows\validate_runtime_package.ps1 `
             -PackageDir "$env:RUNNER_TEMP\seedvr2-release\SeedVR2-ncnn-windows-x86_64" `
             -Archive "$env:RUNNER_TEMP\seedvr2-release\SeedVR2-ncnn-windows-x86_64.zip"
 
