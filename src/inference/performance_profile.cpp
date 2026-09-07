@@ -45,6 +45,19 @@ std::string format_profile_mode_line(const char* name, const char* mode)
     return line.str();
 }
 
+std::string format_profile_residency_line(const char* phase,
+                                          std::uint64_t rss_mib,
+                                          std::uint64_t peak_rss_mib,
+                                          std::uint32_t heap_budget_mib,
+                                          std::uint64_t max_allocation_mib)
+{
+    std::ostringstream line;
+    line << "profile name=residency phase=" << phase << " rss-mib=" << rss_mib
+         << " peak-rss-mib=" << peak_rss_mib << " heap-budget-mib=" << heap_budget_mib
+         << " max-allocation-mib=" << max_allocation_mib;
+    return line.str();
+}
+
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib)
 {
     std::ostringstream line;
@@ -70,7 +83,10 @@ std::string format_profile_dit_stage_line(const char* stage, double elapsed_ms)
     return line.str();
 }
 
-std::uint64_t PerformanceProfile::peak_rss_mib() const
+namespace
+{
+
+std::uint64_t read_proc_status_mib(const char* field)
 {
 #if defined(__linux__)
     // Read the high-water mark the kernel already tracks for us. This is a
@@ -82,7 +98,7 @@ std::uint64_t PerformanceProfile::peak_rss_mib() const
     std::string key;
     while (status >> key)
     {
-        if (key == "VmHWM:")
+        if (key == field)
         {
             std::uint64_t kib = 0;
             if (status >> kib)
@@ -94,6 +110,18 @@ std::uint64_t PerformanceProfile::peak_rss_mib() const
     }
 #endif
     return 0;
+}
+
+} // namespace
+
+std::uint64_t PerformanceProfile::peak_rss_mib() const
+{
+    return read_proc_status_mib("VmHWM:");
+}
+
+std::uint64_t PerformanceProfile::current_rss_mib() const
+{
+    return read_proc_status_mib("VmRSS:");
 }
 
 } // namespace seedvr2

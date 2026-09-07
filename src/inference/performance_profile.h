@@ -28,6 +28,14 @@ std::string format_profile_line(const char* name,
 //   profile name=vae-graph mode=static-256
 std::string format_profile_mode_line(const char* name, const char* mode);
 
+// Residency checkpoint, e.g.:
+//   profile name=residency phase=dit-released rss-mib=512 peak-rss-mib=2048 heap-budget-mib=23676 max-allocation-mib=4094
+std::string format_profile_residency_line(const char* phase,
+                                          std::uint64_t rss_mib,
+                                          std::uint64_t peak_rss_mib,
+                                          std::uint32_t heap_budget_mib,
+                                          std::uint64_t max_allocation_mib);
+
 // Closing profile line carrying the peak host memory, e.g.:
 //   profile name=total ms=13579.0 peak-rss-mib=2913
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib);
@@ -90,6 +98,19 @@ public:
             std::fprintf(stderr, "%s\n", format_profile_mode_line(name, mode).c_str());
     }
 
+    void report_residency(const char* phase,
+                          std::uint32_t heap_budget_mib,
+                          std::uint64_t max_allocation_mib) const
+    {
+        if (enabled_)
+        {
+            std::fprintf(stderr, "%s\n",
+                         format_profile_residency_line(phase, current_rss_mib(), peak_rss_mib(),
+                                                       heap_budget_mib, max_allocation_mib)
+                             .c_str());
+        }
+    }
+
     void report_total(double elapsed_ms) const
     {
         if (enabled_)
@@ -101,6 +122,9 @@ public:
 
     // Peak resident host memory in MiB, or 0 when the platform cannot report it.
     std::uint64_t peak_rss_mib() const;
+
+    // Current resident host memory in MiB, or 0 when the platform cannot report it.
+    std::uint64_t current_rss_mib() const;
 
 private:
     bool enabled_ = false;

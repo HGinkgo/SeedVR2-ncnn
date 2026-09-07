@@ -163,6 +163,7 @@ if(SEEDVR2_BUILD_TESTS)
     add_executable(seedvr2-runtime-contract-test
         tests/runtime_contract.cpp
         src/cli/cli.cpp
+        src/inference/performance_profile.cpp
         src/resolution/resolution_plan.cpp
         src/video/video_io.cpp
         src/video/ffmpeg_video_reader.cpp)

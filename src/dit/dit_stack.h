@@ -22,6 +22,9 @@ public:
     DitStackSession(const DitStackSession&) = delete;
     DitStackSession& operator=(const DitStackSession&) = delete;
 
+    // Release loaded graph and pipeline resources before allocator reclamation.
+    void clear();
+
     static bool open(const std::string& stack_dir,
                      const ResolutionPlan& plan,
                      ncnn::VulkanDevice* vkdev,

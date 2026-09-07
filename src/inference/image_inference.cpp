@@ -696,6 +696,8 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
 
     context.encode_blob_allocator->clear();
     context.encode_staging_allocator->clear();
+    profile.report_residency("encode-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 
@@ -816,6 +818,8 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
 
     context.dit_blob_allocator->clear();
     context.dit_staging_allocator->clear();
+    profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 
@@ -894,6 +898,8 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
 
     context.decode_blob_allocator->clear();
     context.decode_staging_allocator->clear();
+    profile.report_residency("decode-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 
@@ -1039,8 +1045,11 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
     }
     if (!condition_spool.rewind(error))
         return false;
+    encode.clear();
     context.encode_blob_allocator->clear();
     context.encode_staging_allocator->clear();
+    profile.report_residency("encode-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 
@@ -1193,8 +1202,11 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
 
     if (!output_spool.rewind(error))
         return false;
+    dit.clear();
     context.dit_blob_allocator->clear();
     context.dit_staging_allocator->clear();
+    profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 
@@ -1306,8 +1318,11 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         error = "stage=video-inference: staged frame count changed during processing";
         return false;
     }
+    decode.clear();
     context.decode_blob_allocator->clear();
     context.decode_staging_allocator->clear();
+    profile.report_residency("decode-released", context.diagnostics.heap_budget_mib,
+                             context.diagnostics.max_allocation_mib);
     return true;
 }
 

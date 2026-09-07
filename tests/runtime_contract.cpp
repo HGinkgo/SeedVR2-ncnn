@@ -1,4 +1,5 @@
 #include "cli/cli.h"
+#include "inference/performance_profile.h"
 #include "resolution/resolution_plan.h"
 #include "video/video_io.h"
 
@@ -100,12 +101,21 @@ void check_avi_contract()
     std::remove(path.string().c_str());
 }
 
+void check_residency_profile_contract()
+{
+    const std::string line = seedvr2::format_profile_residency_line(
+        "dit", 512, 2048, 23676, 4094);
+    require(line == "profile name=residency phase=dit rss-mib=512 peak-rss-mib=2048 heap-budget-mib=23676 max-allocation-mib=4094",
+            "residency profile line");
+}
+
 } // namespace
 
 int main()
 {
     check_cli_contract();
     check_avi_contract();
+    check_residency_profile_contract();
     std::puts("seedvr2-runtime-contract: ok");
     return 0;
 }

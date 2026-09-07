@@ -295,8 +295,16 @@ DitStackSession::DitStackSession() = default;
 
 DitStackSession::~DitStackSession()
 {
+    clear();
+}
+
+void DitStackSession::clear()
+{
     if (impl_)
+    {
         impl_->clear();
+        impl_.reset();
+    }
 }
 
 DitStackSession::DitStackSession(DitStackSession&&) noexcept = default;
