@@ -117,6 +117,8 @@ void check_session_profile_contract()
     require(run_line == "profile name=session-run mode=warm index=2 ms=456.7", "session run profile line");
     const std::string cache_line = seedvr2::format_profile_pipeline_cache_line("dit", 37);
     require(cache_line == "profile name=pipeline-cache phase=dit entries=37", "pipeline cache profile line");
+    const std::string model_line = seedvr2::format_profile_model_cache_line("dit", "reuse");
+    require(model_line == "profile name=model-cache phase=dit mode=reuse", "model cache profile line");
 }
 
 } // namespace

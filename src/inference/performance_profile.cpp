@@ -83,6 +83,13 @@ std::string format_profile_pipeline_cache_line(const char* phase, std::size_t en
     return line.str();
 }
 
+std::string format_profile_model_cache_line(const char* phase, const char* mode)
+{
+    std::ostringstream line;
+    line << "profile name=model-cache phase=" << phase << " mode=" << mode;
+    return line.str();
+}
+
 std::string format_profile_total_line(double elapsed_ms, std::uint64_t peak_rss_mib)
 {
     std::ostringstream line;

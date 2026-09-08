@@ -175,9 +175,20 @@ struct VulkanInferenceContext final
     PreparedVaeGraph decode_vae_graph;
     VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
     std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
+    std::unique_ptr<DitStackSession> cached_dit;
+
+    void clear_cached_dit()
+    {
+        if (cached_dit)
+        {
+            cached_dit->clear();
+            cached_dit.reset();
+        }
+    }
 
     void clear()
     {
+        clear_cached_dit();
         decode_staging_allocator.reset();
         if (vkdev)
         {
@@ -709,6 +720,37 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
     return true;
 }
 
+bool acquire_dit_stack(const ResolutionPlan& plan,
+                       VulkanInferenceContext& context,
+                       DitStackSession*& dit,
+                       std::string& error,
+                       const PerformanceProfile& profile)
+{
+    const ProfileScope load_scope(profile, "load-dit-stack");
+    std::fprintf(stderr, "stage=load-dit-stack\n");
+    if (context.cached_dit)
+    {
+        dit = context.cached_dit.get();
+        profile.report_model_cache("dit", "reuse");
+        return true;
+    }
+
+    std::unique_ptr<DitStackSession> candidate(new DitStackSession);
+    if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
+                               context.dit_blob_allocator, context.dit_staging_allocator, *candidate, &profile,
+                               context.pipeline_cache.get()))
+    {
+        error = format_vulkan_stage_error("load-dit-stack", context.diagnostics,
+                                          "ncnn graph load returned failure");
+        return false;
+    }
+
+    context.cached_dit = std::move(candidate);
+    dit = context.cached_dit.get();
+    profile.report_model_cache("dit", "load");
+    return true;
+}
+
 bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                           const ResolutionPlan& plan,
                           VulkanInferenceContext& context,
@@ -734,21 +776,12 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
     for (std::size_t index = 0; index < noise.total(); index++)
         noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
 
-    {
-        DitStackSession dit;
-        {
-            const ProfileScope load_scope(profile, "load-dit-stack");
-            std::fprintf(stderr, "stage=load-dit-stack\n");
-            if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                       context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile,
-                                       context.pipeline_cache.get()))
-            {
-                stage_error(0, "load-dit-stack", "ncnn graph load returned failure");
-                return false;
-            }
-        }
+    DitStackSession* dit = nullptr;
+    if (!acquire_dit_stack(plan, context, dit, error, profile))
+        return false;
 
-        for (std::size_t frame_index = 0; frame_index < condition_latents.size(); frame_index++)
+    for (std::size_t frame_index = 0; frame_index < condition_latents.size(); frame_index++)
+    {
         {
             const ProfileScope frame_scope(profile, "dit-stack", frame_offset + frame_index);
             ncnn::VkMat condition_gpu;
@@ -777,8 +810,9 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
 
             ncnn::VkMat prediction_gpu;
             std::fprintf(stderr, "stage=dit-stack\n");
-            if (!dit.run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
+            if (!dit->run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
             {
+                context.clear_cached_dit();
                 stage_error(frame_index, "dit-stack", "GPU DiT execution returned failure");
                 return false;
             }
@@ -1089,19 +1123,9 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
     for (std::size_t index = 0; index < noise.total(); index++)
         noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
 
-    DitStackSession dit;
-    {
-        const ProfileScope load_scope(profile, "load-dit-stack");
-        std::fprintf(stderr, "stage=load-dit-stack\n");
-        if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
-                                   context.dit_blob_allocator, context.dit_staging_allocator, dit, &profile,
-                                   context.pipeline_cache.get()))
-        {
-            error = format_vulkan_stage_error("load-dit-stack", context.diagnostics,
-                                              "ncnn graph load returned failure");
-            return false;
-        }
-    }
+    DitStackSession* dit = nullptr;
+    if (!acquire_dit_stack(plan, context, dit, error, profile))
+        return false;
 
     for (;;)
     {
@@ -1150,8 +1174,9 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
 
         ncnn::VkMat prediction_gpu;
         std::fprintf(stderr, "stage=dit-stack\n");
-        if (!dit.run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
+        if (!dit->run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
         {
+            context.clear_cached_dit();
             error = "frame=" + std::to_string(absolute_index) + " " +
                     format_vulkan_stage_error("dit-stack", context.diagnostics,
                                               "GPU DiT execution returned failure");
@@ -1219,7 +1244,6 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
 
     if (!output_spool.rewind(error))
         return false;
-    dit.clear();
     context.dit_blob_allocator->clear();
     context.dit_staging_allocator->clear();
     profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
