@@ -20,3 +20,6 @@ __pycache__/
 
 # Temporary implementation design documents
 docs/superpowers/
+
+# Isolated feature worktrees
+.worktrees/
