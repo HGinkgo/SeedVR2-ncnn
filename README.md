@@ -71,6 +71,16 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 
 使用 `--help` 查看全部参数。模型包独立分发；运行包本身不依赖 Python、PyTorch 或 CUDA。
 
+默认使用经过发布验证的单步采样。`--steps N` 可启用实验性的多步 Euler 采样（`N` 必须为正整数）；它会按步数增加 DiT 计算时间，并改变生成结果：
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input input.png --output output.png \
+  --width 256 --height 256 \
+  --steps 4 --gpu-id 0
+```
+
 批量处理一个目录中的图片时，可以复用同一模型会话：
 
 ```bash
@@ -121,6 +131,8 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 其他符合 16 像素对齐和面积上限的动态尺寸可以请求，但不属于当前发布验证承诺。
 
 在不使用 `--vae-tile-size` 的 `256x256` 目标上，运行包会自动将动态 VAE 参数在内存中固定化，并启用 ncnn 的轻量执行模式；模型包文件和其他尺寸的动态路径不变。这是内部的等价执行路径，不需要额外 CLI 选项。
+
+上表的发布验收采用默认单步采样；多步采样保持为实验选项。GPU 端到端验收已在 `256x256`、36 帧视频上通过，四步路径产生预期的不同采样结果，但尚未纳入默认发布质量承诺。
 
 ## 输入与输出
 

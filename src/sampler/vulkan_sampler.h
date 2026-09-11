@@ -25,4 +25,14 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
                                        ncnn::VkAllocator* staging_allocator,
                                        ncnn::VkMat& endpoint_sample);
 
+// Positive-only v_lerp Euler update used by the product path when --steps is
+// greater than one: sample += normalized_delta * prediction.
+bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
+                               const ncnn::VkMat& sample,
+                               float normalized_delta,
+                               ncnn::VulkanDevice* vkdev,
+                               ncnn::VkAllocator* blob_allocator,
+                               ncnn::VkAllocator* staging_allocator,
+                               ncnn::VkMat& updated_sample);
+
 } // namespace seedvr2

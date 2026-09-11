@@ -1,6 +1,7 @@
 #include "cli/cli.h"
 #include "inference/performance_profile.h"
 #include "resolution/resolution_plan.h"
+#include "sampler/sampler.h"
 #include "video/video_io.h"
 
 #include <cstdio>
@@ -39,14 +40,15 @@ void check_cli_contract()
     const seedvr2::CliOptions options = parse(
         {"seedvr2-ncnn", "--model-dir", "models/seedvr2-3b", "--input", "input.png", "--output",
          "result.png", "--width", "256", "--height", "256", "--gpu-id", "0", "--memory-budget-mib",
-         "4096"},
+         "4096", "--steps", "4"},
         error);
     require(options.action == seedvr2::CliAction::Run, "run action");
     require(options.model_dir == std::filesystem::path("models/seedvr2-3b"), "model directory");
     require(options.input == std::filesystem::path("input.png"), "input path");
     require(options.output == std::filesystem::path("result.png"), "output path");
     require(options.width == 256 && options.height == 256, "supported fixed shape");
-    require(options.gpu_id == 0 && options.memory_budget_mib == 4096, "runtime resource options");
+    require(options.gpu_id == 0 && options.memory_budget_mib == 4096 && options.sample_steps == 4,
+            "runtime resource options");
 
     seedvr2::ResolutionPlan plan;
     require(seedvr2::make_image_resolution_plan(options, 100, 100, plan, error), error.c_str());
@@ -63,10 +65,30 @@ void check_cli_contract()
     const char* invalid_tile[] = {"seedvr2-ncnn", "--input", "input.png", "--vae-tile-size", "50"};
     require(!seedvr2::parse_cli(5, invalid_tile, rejected, error), "misaligned VAE tile rejected");
 
+    const char* invalid_steps[] = {"seedvr2-ncnn", "--input", "input.png", "--steps", "0"};
+    require(!seedvr2::parse_cli(5, invalid_steps, rejected, error), "non-positive sampling steps rejected");
+
     const seedvr2::CliOptions over_limit = parse(
         {"seedvr2-ncnn", "--input", "input.png", "--width", "320", "--height", "256"}, error);
     require(!seedvr2::make_image_resolution_plan(over_limit, 100, 100, plan, error), "product area limit");
     require(error.find("65536") != std::string::npos, "product area limit message");
+}
+
+void check_sampler_contract()
+{
+    const std::vector<float> timesteps = seedvr2::uniform_trailing_timesteps(1000.f, 4, 1.f);
+    require(timesteps.size() == 4, "sampling timestep count");
+    require(timesteps[0] == 1000.f && timesteps[1] == 750.f && timesteps[2] == 500.f &&
+                timesteps[3] == 250.f,
+            "sampling timestep schedule");
+
+    const std::vector<float> sample = {1.f, 2.f};
+    const std::vector<float> prediction = {4.f, -2.f};
+    std::vector<float> next_sample;
+    require(seedvr2::euler_v_lerp_step(sample, prediction, 750.f, 500.f, 1000.f, next_sample),
+            "Euler v-lerp step accepted");
+    require(next_sample.size() == 2 && next_sample[0] == 0.f && next_sample[1] == 2.5f,
+            "Euler v-lerp step values");
 }
 
 void check_avi_contract()
@@ -126,6 +148,7 @@ void check_session_profile_contract()
 int main()
 {
     check_cli_contract();
+    check_sampler_contract();
     check_avi_contract();
     check_residency_profile_contract();
     check_session_profile_contract();

@@ -46,7 +46,8 @@ public:
                      std::string& error,
                      std::uint32_t memory_budget_mib = 0,
                      const PerformanceProfile* profile = nullptr,
-                     int vae_tile_size = 0);
+                     int vae_tile_size = 0,
+                     int sample_steps = 1);
 
     bool run_frame(const RgbImage& input, RgbImage& output, std::string& error) const;
 

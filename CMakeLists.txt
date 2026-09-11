@@ -62,6 +62,7 @@ add_executable(seedvr2-ncnn
     src/video/ffmpeg_video_reader.cpp
     src/awa/awa_layers.cpp
     src/resolution/resolution_plan.cpp
+    src/sampler/sampler.cpp
     src/vae/temporal_pad.cpp
     src/vae/causal_conv3d.cpp
     src/vae/depth_to_space.cpp
@@ -165,6 +166,7 @@ if(SEEDVR2_BUILD_TESTS)
         src/cli/cli.cpp
         src/inference/performance_profile.cpp
         src/resolution/resolution_plan.cpp
+        src/sampler/sampler.cpp
         src/video/video_io.cpp
         src/video/ffmpeg_video_reader.cpp)
     target_include_directories(seedvr2-runtime-contract-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

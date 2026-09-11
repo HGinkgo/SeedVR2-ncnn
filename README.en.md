@@ -71,6 +71,16 @@ Process a video at an explicit low-resolution target:
 
 Use `--help` for all options. Model weights are distributed separately; the runtime itself has no Python, PyTorch, or CUDA dependency.
 
+The release-validated default uses one sampling step. `--steps N` enables experimental multi-step Euler sampling (`N` must be a positive integer); it increases DiT compute time with the step count and changes the generated result:
+
+```bash
+./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b \
+  --input input.png --output output.png \
+  --width 256 --height 256 \
+  --steps 4 --gpu-id 0
+```
+
 For a directory of images, the batch mode reuses one model session for consecutive inputs with the same target plan:
 
 ```bash
@@ -121,6 +131,8 @@ Automatic mode preserves the input aspect ratio, aligns the target to 16 pixels,
 Other dynamic sizes that meet the 16-pixel alignment and area limit can be requested, but are outside the current release validation promise.
 
 For a plain `256x256` target without `--vae-tile-size`, the runtime automatically materializes the dynamic VAE parameters in memory and enables ncnn's light execution mode. The model package files and dynamic paths for other sizes are unchanged; this is an internal equivalent path and needs no extra CLI option.
+
+The release validation table covers the default one-step sampler. Multi-step sampling remains experimental. GPU end-to-end acceptance passed on a `256x256`, 36-frame video; the four-step path produces the expected different sampling trajectory but is not part of the default release quality promise.
 
 ## Inputs and Outputs
 

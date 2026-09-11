@@ -33,6 +33,7 @@ struct CliOptions final
     int scale = 0;
     int start_frame = 0;
     int frame_count = 0;
+    int sample_steps = 1;
     int vae_tile_size = 0;
     int gpu_id = -1;
     std::uint32_t memory_budget_mib = 0;

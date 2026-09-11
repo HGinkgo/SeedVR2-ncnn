@@ -188,6 +188,18 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
             else
                 options.frame_count = parsed;
         }
+        else if (std::strcmp(argument, "--steps") == 0)
+        {
+            if (!next_value(argc, argv, index, value, error))
+                return false;
+            int parsed = 0;
+            if (!parse_integer(value, parsed) || parsed <= 0)
+            {
+                error = "--steps must be a positive integer";
+                return false;
+            }
+            options.sample_steps = parsed;
+        }
         else if (std::strcmp(argument, "--vae-tile-size") == 0)
         {
             if (!next_value(argc, argv, index, value, error))

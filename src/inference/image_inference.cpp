@@ -24,6 +24,7 @@
 #include "gpu.h"
 #include "net.h"
 #include "pipelinecache.h"
+#include "sampler/sampler.h"
 #include "sampler/vulkan_sampler.h"
 #include "vae/temporal_pad.h"
 #include "vae/static_vae_graph.h"
@@ -63,6 +64,7 @@ namespace
 {
 
 constexpr int kLatentChannels = 16;
+constexpr float kSamplingScheduleT = 1000.f;
 
 bool valid_rgb_image(const RgbImage& image)
 {
@@ -171,6 +173,7 @@ struct VulkanInferenceContext final
     ResolutionPlan plan;
     ModelGraphSet graphs;
     int vae_tile_size = 0;
+    int sample_steps = 1;
     PreparedVaeGraph encode_vae_graph;
     PreparedVaeGraph decode_vae_graph;
     VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
@@ -751,6 +754,81 @@ bool acquire_dit_stack(const ResolutionPlan& plan,
     return true;
 }
 
+bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
+                                  const ncnn::VkMat& initial_noise_gpu,
+                                  const ResolutionPlan& plan,
+                                  VulkanInferenceContext& context,
+                                  DitStackSession& dit,
+                                  ncnn::VkMat& output_latent_gpu,
+                                  const char*& failed_stage)
+{
+    const std::vector<float> timesteps = uniform_trailing_timesteps(kSamplingScheduleT, context.sample_steps);
+    if (timesteps.empty())
+    {
+        failed_stage = "sampling-schedule";
+        return false;
+    }
+
+    ncnn::VkMat current_latent_gpu = initial_noise_gpu;
+    for (std::size_t step_index = 0; step_index < timesteps.size(); ++step_index)
+    {
+        ncnn::VkMat input_patches_gpu;
+        std::fprintf(stderr, "stage=dit-input-patchify step=%zu\n", step_index);
+        if (!make_dit_input_patches_gpu(current_latent_gpu, condition_gpu, plan, context.vkdev,
+                                        context.dit_blob_allocator, context.dit_staging_allocator,
+                                        input_patches_gpu, context.pipeline_cache.get()))
+        {
+            failed_stage = "dit-input-patchify";
+            return false;
+        }
+
+        ncnn::VkMat prediction_gpu;
+        std::fprintf(stderr, "stage=dit-stack step=%zu\n", step_index);
+        if (!dit.run(input_patches_gpu, context.text, timesteps[step_index], plan, prediction_gpu))
+        {
+            context.clear_cached_dit();
+            failed_stage = "dit-stack";
+            return false;
+        }
+
+        ncnn::VkMat sample_patches_gpu;
+        std::fprintf(stderr, "stage=noise-patchify step=%zu\n", step_index);
+        if (!patch_latent_for_dit_output_gpu(current_latent_gpu, plan, context.vkdev,
+                                             context.dit_blob_allocator, context.dit_staging_allocator,
+                                             sample_patches_gpu, context.pipeline_cache.get()))
+        {
+            failed_stage = "noise-patchify";
+            return false;
+        }
+
+        const float next_timestep = step_index + 1 < timesteps.size() ? timesteps[step_index + 1] : 0.f;
+        const float normalized_delta = (next_timestep - timesteps[step_index]) / kSamplingScheduleT;
+        ncnn::VkMat updated_patches_gpu;
+        std::fprintf(stderr, "stage=v-lerp-euler step=%zu\n", step_index);
+        if (!apply_v_lerp_euler_vulkan(prediction_gpu, sample_patches_gpu, normalized_delta, context.vkdev,
+                                       context.dit_blob_allocator, context.dit_staging_allocator,
+                                       updated_patches_gpu))
+        {
+            failed_stage = "v-lerp-euler";
+            return false;
+        }
+
+        ncnn::VkMat updated_latent_gpu;
+        std::fprintf(stderr, "stage=latent-unpatch step=%zu\n", step_index);
+        if (!unpatch_dit_output_gpu(updated_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                    context.dit_staging_allocator, updated_latent_gpu,
+                                    context.pipeline_cache.get()))
+        {
+            failed_stage = "latent-unpatch";
+            return false;
+        }
+        current_latent_gpu = std::move(updated_latent_gpu);
+    }
+
+    output_latent_gpu = std::move(current_latent_gpu);
+    return true;
+}
+
 bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                           const ResolutionPlan& plan,
                           VulkanInferenceContext& context,
@@ -798,53 +876,66 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 }
             }
 
-            ncnn::VkMat input_patches_gpu;
-            std::fprintf(stderr, "stage=dit-input-patchify\n");
-            if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
-                                            context.dit_blob_allocator, context.dit_staging_allocator,
-                                            input_patches_gpu, context.pipeline_cache.get()))
-            {
-                stage_error(frame_index, "dit-input-patchify", "GPU patch assembly returned failure");
-                return false;
-            }
-
-            ncnn::VkMat prediction_gpu;
-            std::fprintf(stderr, "stage=dit-stack\n");
-            if (!dit->run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
-            {
-                context.clear_cached_dit();
-                stage_error(frame_index, "dit-stack", "GPU DiT execution returned failure");
-                return false;
-            }
-
-            ncnn::VkMat noise_patches_gpu;
-            std::fprintf(stderr, "stage=noise-patchify\n");
-            if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                                 context.dit_staging_allocator, noise_patches_gpu,
-                                                 context.pipeline_cache.get()))
-            {
-                stage_error(frame_index, "noise-patchify", "GPU patch assembly returned failure");
-                return false;
-            }
-
-            ncnn::VkMat endpoint_patches_gpu;
-            std::fprintf(stderr, "stage=v-lerp-endpoint\n");
-            if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                                  context.dit_blob_allocator, context.dit_staging_allocator,
-                                                  endpoint_patches_gpu))
-            {
-                stage_error(frame_index, "v-lerp-endpoint", "GPU sampler endpoint returned failure");
-                return false;
-            }
-
             ncnn::VkMat output_latent_gpu;
-            std::fprintf(stderr, "stage=latent-unpatch\n");
-            if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                        context.dit_staging_allocator, output_latent_gpu,
-                                        context.pipeline_cache.get()))
+            if (context.sample_steps == 1)
             {
-                stage_error(frame_index, "latent-unpatch", "GPU patch removal returned failure");
-                return false;
+                ncnn::VkMat input_patches_gpu;
+                std::fprintf(stderr, "stage=dit-input-patchify\n");
+                if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
+                                                context.dit_blob_allocator, context.dit_staging_allocator,
+                                                input_patches_gpu, context.pipeline_cache.get()))
+                {
+                    stage_error(frame_index, "dit-input-patchify", "GPU patch assembly returned failure");
+                    return false;
+                }
+
+                ncnn::VkMat prediction_gpu;
+                std::fprintf(stderr, "stage=dit-stack\n");
+                if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
+                {
+                    context.clear_cached_dit();
+                    stage_error(frame_index, "dit-stack", "GPU DiT execution returned failure");
+                    return false;
+                }
+
+                ncnn::VkMat noise_patches_gpu;
+                std::fprintf(stderr, "stage=noise-patchify\n");
+                if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                                     context.dit_staging_allocator, noise_patches_gpu,
+                                                     context.pipeline_cache.get()))
+                {
+                    stage_error(frame_index, "noise-patchify", "GPU patch assembly returned failure");
+                    return false;
+                }
+
+                ncnn::VkMat endpoint_patches_gpu;
+                std::fprintf(stderr, "stage=v-lerp-endpoint\n");
+                if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                                      context.dit_blob_allocator, context.dit_staging_allocator,
+                                                      endpoint_patches_gpu))
+                {
+                    stage_error(frame_index, "v-lerp-endpoint", "GPU sampler endpoint returned failure");
+                    return false;
+                }
+
+                std::fprintf(stderr, "stage=latent-unpatch\n");
+                if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                            context.dit_staging_allocator, output_latent_gpu,
+                                            context.pipeline_cache.get()))
+                {
+                    stage_error(frame_index, "latent-unpatch", "GPU patch removal returned failure");
+                    return false;
+                }
+            }
+            else
+            {
+                const char* failed_stage = "sampling";
+                if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit,
+                                                  output_latent_gpu, failed_stage))
+                {
+                    stage_error(frame_index, failed_stage, "GPU multi-step sampling returned failure");
+                    return false;
+                }
             }
 
             ncnn::Mat output_latent;
@@ -1160,63 +1251,78 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             }
         }
 
-        ncnn::VkMat input_patches_gpu;
-        std::fprintf(stderr, "stage=dit-input-patchify\n");
-        if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
-                                        context.dit_blob_allocator, context.dit_staging_allocator, input_patches_gpu,
-                                        context.pipeline_cache.get()))
-        {
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
-                                              "GPU patch assembly returned failure");
-            return false;
-        }
-
-        ncnn::VkMat prediction_gpu;
-        std::fprintf(stderr, "stage=dit-stack\n");
-        if (!dit->run(input_patches_gpu, context.text, 1000.f, plan, prediction_gpu))
-        {
-            context.clear_cached_dit();
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("dit-stack", context.diagnostics,
-                                              "GPU DiT execution returned failure");
-            return false;
-        }
-
-        ncnn::VkMat noise_patches_gpu;
-        std::fprintf(stderr, "stage=noise-patchify\n");
-        if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                             context.dit_staging_allocator, noise_patches_gpu,
-                                             context.pipeline_cache.get()))
-        {
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("noise-patchify", context.diagnostics,
-                                              "GPU patch assembly returned failure");
-            return false;
-        }
-
-        ncnn::VkMat endpoint_patches_gpu;
-        std::fprintf(stderr, "stage=v-lerp-endpoint\n");
-        if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                               context.dit_blob_allocator, context.dit_staging_allocator,
-                                               endpoint_patches_gpu))
-        {
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
-                                              "GPU sampler endpoint returned failure");
-            return false;
-        }
-
         ncnn::VkMat output_latent_gpu;
-        std::fprintf(stderr, "stage=latent-unpatch\n");
-        if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                    context.dit_staging_allocator, output_latent_gpu,
-                                    context.pipeline_cache.get()))
+        if (context.sample_steps == 1)
         {
-            error = "frame=" + std::to_string(absolute_index) + " " +
-                    format_vulkan_stage_error("latent-unpatch", context.diagnostics,
-                                              "GPU patch removal returned failure");
-            return false;
+            ncnn::VkMat input_patches_gpu;
+            std::fprintf(stderr, "stage=dit-input-patchify\n");
+            if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
+                                            context.dit_blob_allocator, context.dit_staging_allocator,
+                                            input_patches_gpu, context.pipeline_cache.get()))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
+                                                  "GPU patch assembly returned failure");
+                return false;
+            }
+
+            ncnn::VkMat prediction_gpu;
+            std::fprintf(stderr, "stage=dit-stack\n");
+            if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
+            {
+                context.clear_cached_dit();
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("dit-stack", context.diagnostics,
+                                                  "GPU DiT execution returned failure");
+                return false;
+            }
+
+            ncnn::VkMat noise_patches_gpu;
+            std::fprintf(stderr, "stage=noise-patchify\n");
+            if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                                 context.dit_staging_allocator, noise_patches_gpu,
+                                                 context.pipeline_cache.get()))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("noise-patchify", context.diagnostics,
+                                                  "GPU patch assembly returned failure");
+                return false;
+            }
+
+            ncnn::VkMat endpoint_patches_gpu;
+            std::fprintf(stderr, "stage=v-lerp-endpoint\n");
+            if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                                   context.dit_blob_allocator, context.dit_staging_allocator,
+                                                   endpoint_patches_gpu))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
+                                                  "GPU sampler endpoint returned failure");
+                return false;
+            }
+
+            std::fprintf(stderr, "stage=latent-unpatch\n");
+            if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
+                                        context.dit_staging_allocator, output_latent_gpu,
+                                        context.pipeline_cache.get()))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("latent-unpatch", context.diagnostics,
+                                                  "GPU patch removal returned failure");
+                return false;
+            }
+        }
+        else
+        {
+            const char* failed_stage = "sampling";
+            if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit,
+                                              output_latent_gpu, failed_stage))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error(failed_stage, context.diagnostics,
+                                                  "GPU multi-step sampling returned failure");
+                return false;
+            }
         }
 
         ncnn::Mat output_latent;
@@ -1490,13 +1596,19 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
                                  std::string& error,
                                  std::uint32_t memory_budget_mib,
                                  const PerformanceProfile* profile,
-                                 int vae_tile_size)
+                                 int vae_tile_size,
+                                 int sample_steps)
 {
     error.clear();
 #if NCNN_VULKAN
     if (plan.image_width <= 0 || plan.image_height <= 0 || plan.latent_width <= 0 || plan.latent_height <= 0)
     {
         error = "input image or resolution plan is invalid";
+        return false;
+    }
+    if (sample_steps <= 0)
+    {
+        error = "sampling steps must be a positive integer";
         return false;
     }
     static const PerformanceProfile kDisabledProfile;
@@ -1506,6 +1618,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
                                   *candidate->profile, vae_tile_size))
         return false;
+    candidate->context.sample_steps = sample_steps;
     candidate->profile->report_session_open(candidate->profile->elapsed_ms(open_start));
     session.impl_ = std::move(candidate);
     return true;
@@ -1516,6 +1629,7 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     (void)memory_budget_mib;
     (void)profile;
     (void)vae_tile_size;
+    (void)sample_steps;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif

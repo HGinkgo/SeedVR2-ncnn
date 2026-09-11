@@ -157,4 +157,77 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     return clone.submit_and_wait() == 0;
 }
 
+bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
+                               const ncnn::VkMat& sample,
+                               float normalized_delta,
+                               ncnn::VulkanDevice* vkdev,
+                               ncnn::VkAllocator* blob_allocator,
+                               ncnn::VkAllocator* staging_allocator,
+                               ncnn::VkMat& updated_sample)
+{
+    if (!vkdev || !blob_allocator || !staging_allocator || prediction.empty() || sample.empty() ||
+        prediction.elempack != 1 || !std::isfinite(normalized_delta))
+        return false;
+
+    ncnn::Option opt;
+    opt.use_vulkan_compute = true;
+    opt.use_packing_layout = false;
+    opt.use_fp16_packed = false;
+    opt.use_fp16_storage = false;
+    opt.use_fp16_arithmetic = false;
+    opt.blob_vkallocator = blob_allocator;
+    opt.workspace_vkallocator = blob_allocator;
+    opt.staging_vkallocator = staging_allocator;
+
+    const ncnn::VkMat* sample_input = &sample;
+    ncnn::VkMat unpacked_sample;
+    if (sample.elempack == 4)
+    {
+        ncnn::VkCompute unpack(vkdev);
+        vkdev->convert_packing(sample, unpacked_sample, 1, unpack, opt);
+        if (unpacked_sample.empty() || unpack.submit_and_wait() != 0)
+            return false;
+        sample_input = &unpacked_sample;
+    }
+    if (sample_input->elempack != 1 || prediction.dims != sample_input->dims ||
+        prediction.w != sample_input->w || prediction.h != sample_input->h ||
+        prediction.d != sample_input->d || prediction.c != sample_input->c)
+        return false;
+
+    char param[768];
+    const int length = std::snprintf(
+        param, sizeof(param),
+        "7767517\n"
+        "4 4\n"
+        "Input prediction 0 1 prediction\n"
+        "Input sample 0 1 sample\n"
+        "BinaryOp scaled 1 1 prediction scaled 0=2 1=1 2=%g\n"
+        "BinaryOp updated 2 1 sample scaled updated 0=0\n",
+        static_cast<double>(normalized_delta));
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(param))
+        return false;
+
+    ncnn::Net net;
+    net.opt = opt;
+    net.set_vulkan_device(vkdev);
+    if (net.load_param_mem(param) != 0)
+        return false;
+    const unsigned char* empty_model = nullptr;
+    ncnn::DataReaderFromMemory model_reader(empty_model);
+    if (net.load_model(model_reader) != 0)
+        return false;
+
+    ncnn::Extractor extractor = net.create_extractor();
+    extractor.set_light_mode(false);
+    ncnn::VkCompute compute(vkdev);
+    ncnn::VkMat graph_output;
+    if (extractor.input("prediction", prediction) != 0 || extractor.input("sample", *sample_input) != 0 ||
+        extractor.extract("updated", graph_output, compute) != 0 || compute.submit_and_wait() != 0)
+        return false;
+
+    ncnn::VkCompute clone(vkdev);
+    clone.record_clone(graph_output, updated_sample, net.opt);
+    return clone.submit_and_wait() == 0;
+}
+
 } // namespace seedvr2
