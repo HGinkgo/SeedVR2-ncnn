@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.2
+
+This release closes the low-resolution Vulkan product path and refreshes the
+public showcase:
+
+- Adds opt-in multi-step Euler sampling with `--steps N`; the default one-step
+  path remains unchanged and is the release validation path.
+- Reuses loaded DiT graphs and Vulkan pipelines within an inference session,
+  with optional cold/warm and residency profiling diagnostics.
+- Updates the bundled ncnn submodule to the official master revision used by
+  the release validation builds.
+- Keeps the compact public verification surface and documents the supported
+  Linux/Windows x86_64 runtime boundary.
+- Replaces the showcase assets with a frame from the official SeedVR2 demo and
+  records the source attribution in both READMEs.
+
+The validated target matrix remains `128x128`, `128x256`, and `256x256`.
+720p and long-duration video remain outside the supported release boundary.
+
 ## 0.1.1
 
 This release aligns the portable runtime with the current low-resolution

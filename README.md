@@ -6,23 +6,23 @@
 
 ## 效果展示
 
-下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。图像和视频分别展示本项目支持的两类工作流；当前发布线的最大目标为 `256x256`。
+下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。当前发布线的最大目标为 `256x256`。
 
-### 图像增强
+### 官方示例图像增强
 
-左图为 `128x128` 输入，右图为显式 `256x256` 目标的实际输出。
+左图为 SeedVR2 官方视频示例的一帧降采样到 `64x64` 后的输入，右图为显式 `256x256` 目标的实际输出。展示流程先将同一图像放大到 `256x256` 模型画布，再执行已验证的固定尺寸路径。
 
 | 输入 | 输出 |
 | --- | --- |
-| <img src="assets/showcase-image-input-128.png" alt="128x128 风景输入图" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 风景输出图" width="256"> |
+| <img src="assets/showcase-image-input-64.png" alt="64x64 SeedVR2 官方示例低分辨率输入图" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 官方示例输出图" width="256"> |
 
-### 视频增强
+### 对比预览
 
-下面是同一连续序列的输入与实际 `256x256` 输出对照。输入与输出 AVI 均为连续 3 秒、36 帧、12 fps；GIF 仅作逐帧并排预览（左：放大的 `128x128` 输入；右：输出）：
+下面的 GIF 是同一张输入与输出的并排对比预览（左：最近邻放大的 `64x64` 输入；右：实际输出），用于直观看清低分辨率输入和恢复结果的差异；它不是视频推理结果。
 
-![连续视频输入与输出对照](assets/showcase-video-128-to-256.gif)
+![SeedVR2 官方示例低分辨率输入与 256x256 输出对比](assets/showcase-image-comparison.gif)
 
-示例源图来自 [ArrayFire assets](https://github.com/arrayfire/assets/blob/master/examples/images/README.md)，以 CC0 1.0 发布。视频输入是由该实景图生成的连续平移镜头；提交的展示资产仅包含输入裁剪及本项目实际生成的图像/视频结果。
+示例素材来自 [SeedVR2 官方示例空间](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)，对应视频由其公开的 [SeedVR_VideoDemos 数据集](https://huggingface.co/datasets/Iceclear/SeedVR_VideoDemos) 提供。仓库仅提交其中一帧的裁剪、降采样 `64x64` 输入和本项目实际生成的输出；视频素材的版权和使用条件以原作者及数据集说明为准，本项目不主张拥有素材或与版权方存在关联。
 
 ## 能做什么
 
