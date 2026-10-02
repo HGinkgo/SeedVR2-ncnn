@@ -5,6 +5,7 @@ ROADMAP.md
 
 # Local build output
 build/
+build-prototype/
 build-vulkan/
 build-awa-test/
 build-vulkan-asan/

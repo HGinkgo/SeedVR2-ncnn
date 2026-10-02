@@ -173,12 +173,13 @@ class ProfileScope final
 {
 public:
     ProfileScope(const PerformanceProfile& profile, const char* name)
-        : profile_(profile), name_(name), start_(PerformanceProfile::Clock::now())
+        : profile_(profile), name_(name),
+          start_(profile.enabled() ? PerformanceProfile::Clock::now() : PerformanceProfile::Clock::time_point{})
     {
     }
 
     ProfileScope(const PerformanceProfile& profile, const char* name, std::size_t frame_index)
-        : profile_(profile), name_(name), start_(PerformanceProfile::Clock::now())
+        : ProfileScope(profile, name)
     {
         frame_index_ = frame_index;
         has_frame_ = true;
@@ -186,6 +187,8 @@ public:
 
     ~ProfileScope()
     {
+        if (!profile_.enabled())
+            return;
         const double elapsed_ms = profile_.elapsed_ms(start_);
         if (has_frame_)
             profile_.report_frame(name_, frame_index_, elapsed_ms);

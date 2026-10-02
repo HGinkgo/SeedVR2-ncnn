@@ -5,6 +5,7 @@
 
 #include "datareader.h"
 #include "net.h"
+#include "inference/vulkan_benchmark.h"
 
 namespace seedvr2
 {
@@ -66,7 +67,8 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
     ncnn::VkMat graph_output;
-    if (extractor.input("prediction", positive_output) != 0 || extractor.input("sample", *sample_input) != 0 ||
+    if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("prediction", positive_output) != 0 ||
+        extractor.input("sample", *sample_input) != 0 ||
         extractor.extract("endpoint", graph_output, compute) != 0 || compute.submit_and_wait() != 0)
         return false;
 
@@ -151,7 +153,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
     ncnn::VkMat graph_output;
-    if (extractor.input("positive", positive_output) != 0 || extractor.input("negative", negative_output) != 0 ||
+    if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("positive", positive_output) != 0 ||
+        extractor.input("negative", negative_output) != 0 ||
         extractor.input("sample", *sample_input) != 0 || extractor.extract("updated", graph_output, compute) != 0 ||
         compute.submit_and_wait() != 0)
         return false;
@@ -227,7 +230,8 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
     ncnn::VkMat graph_output;
-    if (extractor.input("prediction", prediction) != 0 || extractor.input("sample", *sample_input) != 0 ||
+    if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("prediction", prediction) != 0 ||
+        extractor.input("sample", *sample_input) != 0 ||
         extractor.extract("updated", graph_output, compute) != 0 || compute.submit_and_wait() != 0)
         return false;
 

@@ -1,0 +1,40 @@
+#version 450
+
+layout(binding = 0) readonly buffer bottom_blob { sfp bottom_blob_data[]; };
+layout(binding = 1) writeonly buffer top_blob { sfp top_blob_data[]; };
+layout(binding = 2) readonly buffer weight_blob { float weight_data[]; };
+layout(binding = 3) readonly buffer bias_blob { float bias_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int input_w;
+    int input_h;
+    int input_d;
+    int input_c;
+    int input_cstep;
+    int num_output;
+    int bias_term;
+    int output_cstep;
+} p;
+
+void main()
+{
+    const int x = int(gl_GlobalInvocationID.x);
+    const int y_depth = int(gl_GlobalInvocationID.y);
+    const int output_channel = int(gl_GlobalInvocationID.z);
+    if (x >= p.input_w || y_depth >= p.input_h * p.input_d || output_channel >= p.num_output)
+        return;
+
+    const int plane = p.input_w * p.input_h;
+    const int depth = y_depth / p.input_h;
+    const int y = y_depth % p.input_h;
+    const int spatial_index = depth * plane + y * p.input_w + x;
+    float sum = p.bias_term == 1 ? bias_data[output_channel] : 0.f;
+    const int weight_offset = output_channel * p.input_c;
+    for (int input_channel = 0; input_channel < p.input_c; input_channel++)
+    {
+        const int input_offset = input_channel * p.input_cstep + spatial_index;
+        sum += buffer_ld1(bottom_blob_data, input_offset) * weight_data[weight_offset + input_channel];
+    }
+    buffer_st1(top_blob_data, output_channel * p.output_cstep + spatial_index, sum);
+}

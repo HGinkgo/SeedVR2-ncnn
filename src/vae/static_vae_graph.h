@@ -52,6 +52,7 @@ bool prepare_vae_graph(const std::filesystem::path& stem,
                        int height,
                        int tile_size,
                        PreparedVaeGraph& prepared,
-                       std::string& error);
+                       std::string& error,
+                       bool enable_fixed_256_pointwise_conv3d = false);
 
 } // namespace seedvr2

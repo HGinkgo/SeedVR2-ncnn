@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,11 +140,14 @@ bool drop_baked_reshape_shape_inputs(std::string& line)
 
 void migrate_legacy_depth_to_space_lines(std::string& param)
 {
+    std::string migrated;
+    migrated.reserve(param.size());
     std::size_t line_start = 0;
     while (line_start < param.size())
     {
         const std::size_t newline = param.find('\n', line_start);
-        const std::size_t line_end = newline == std::string::npos ? param.size() : newline;
+        const bool has_newline = newline != std::string::npos;
+        const std::size_t line_end = has_newline ? newline : param.size();
         std::string line = param.substr(line_start, line_end - line_start);
         std::istringstream fields(line);
         std::vector<std::string> tokens;
@@ -172,11 +176,40 @@ void migrate_legacy_depth_to_space_lines(std::string& param)
                 line = rewritten.str();
             }
         }
-        param.replace(line_start, line_end - line_start, line);
-        line_start += line.size();
-        if (newline != std::string::npos)
-            line_start++;
+        migrated.append(line);
+        if (has_newline)
+            migrated.push_back('\n');
+        line_start = has_newline ? newline + 1 : param.size();
     }
+    param = std::move(migrated);
+}
+
+bool migrate_fixed_256_pointwise_conv3d_lines(std::string& param, std::size_t& replaced)
+{
+    static constexpr std::string_view target_names[] = {
+        "conv3d_11", "conv3d_19", "conv3d_23", "conv3d_28", "conv3d_32"};
+    static constexpr std::string_view source_type = "Convolution3D";
+    static constexpr std::string_view replacement_type = "SeedVR2PointwiseConv3D";
+    replaced = 0;
+    for (const std::string_view target_name : target_names)
+    {
+        const std::string needle = std::string(source_type) + " " + std::string(target_name) + " ";
+        std::size_t search_start = 0;
+        while (true)
+        {
+            const std::size_t match = param.find(needle, search_start);
+            if (match == std::string::npos)
+                break;
+            if (match == 0 || param[match - 1] == '\n')
+            {
+                param.replace(match, source_type.size(), replacement_type);
+                replaced++;
+                break;
+            }
+            search_start = match + needle.size();
+        }
+    }
+    return replaced == std::size(target_names);
 }
 
 } // namespace
@@ -303,7 +336,8 @@ bool prepare_vae_graph(const std::filesystem::path& stem,
                        int height,
                        int tile_size,
                        PreparedVaeGraph& prepared,
-                       std::string& error)
+                       std::string& error,
+                       bool enable_fixed_256_pointwise_conv3d)
 {
     prepared = PreparedVaeGraph();
     error.clear();
@@ -324,6 +358,16 @@ bool prepare_vae_graph(const std::filesystem::path& stem,
     }
     std::string dynamic_param((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     migrate_legacy_depth_to_space_lines(dynamic_param);
+    if (enable_fixed_256_pointwise_conv3d && width == 256 && height == 256)
+    {
+        std::size_t replaced_pointwise_nodes = 0;
+        if (!migrate_fixed_256_pointwise_conv3d_lines(dynamic_param, replaced_pointwise_nodes))
+        {
+            error = "fixed 256x256 VAE graph must contain five pointwise Conv3D nodes; found " +
+                    std::to_string(replaced_pointwise_nodes);
+            return false;
+        }
+    }
     std::size_t removed_fields = 0;
     if (!materialize_static_vae_param(dynamic_param, width, height, prepared.param_contents, removed_fields, error))
         return false;

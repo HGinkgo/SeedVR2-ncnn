@@ -26,6 +26,7 @@
 #include "pipelinecache.h"
 #include "sampler/sampler.h"
 #include "sampler/vulkan_sampler.h"
+#include "inference/vulkan_benchmark.h"
 #include "vae/temporal_pad.h"
 #include "vae/static_vae_graph.h"
 #include "vulkan/transient_staging_allocator.h"
@@ -360,11 +361,13 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
                             VulkanInferenceContext& context,
                             ncnn::Mat& latent,
                             std::string& error,
+                            const PerformanceProfile& profile,
                             std::size_t frame_index)
 {
     const ncnn::Option encode_opt = encode.opt;
     ncnn::VkMat sample_gpu;
     {
+        const ProfileScope scope(profile, "vae-encode-upload", frame_index);
         ncnn::VkCompute compute(context.vkdev);
         compute.record_upload(sample, sample_gpu, encode_opt);
         if (compute.submit_and_wait() != 0)
@@ -377,9 +380,15 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
     }
     ncnn::VkMat latent_gpu;
     {
+        const ProfileScope scope(profile, "vae-encode-extract", frame_index);
         ncnn::Extractor extractor = encode.create_extractor();
         extractor.set_light_mode(vae_graph_uses_light_mode(context.vae_graph_mode));
         ncnn::VkCompute compute(context.vkdev);
+        if (!prepare_ncnn_layer_benchmark(compute, encode))
+        {
+            error = "frame=" + std::to_string(frame_index) + " stage=vae-encode benchmark query-pool creation failed";
+            return false;
+        }
         if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
             compute.submit_and_wait() != 0)
         {
@@ -391,6 +400,7 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
     }
     sample_gpu.release();
     {
+        const ProfileScope scope(profile, "vae-encode-download", frame_index);
         ncnn::VkCompute compute(context.vkdev);
         compute.record_download(latent_gpu, latent, encode_opt);
         if (compute.submit_and_wait() != 0 || latent.empty())
@@ -409,10 +419,12 @@ bool run_decode_tile_vulkan(const ncnn::Mat& latent,
                             VulkanInferenceContext& context,
                             ncnn::Mat& reconstruction,
                             std::string& error,
+                            const PerformanceProfile& profile,
                             std::size_t frame_index)
 {
     ncnn::VkMat latent_gpu;
     {
+        const ProfileScope scope(profile, "vae-decode-upload", frame_index);
         ncnn::VkCompute compute(context.vkdev);
         compute.record_upload(latent, latent_gpu, decode.opt);
         if (compute.submit_and_wait() != 0)
@@ -423,6 +435,7 @@ bool run_decode_tile_vulkan(const ncnn::Mat& latent,
             return false;
         }
     }
+    const ProfileScope extract_scope(profile, "vae-decode-extract-download", frame_index);
     ncnn::Extractor extractor = decode.create_extractor();
     extractor.set_light_mode(vae_graph_uses_light_mode(context.vae_graph_mode));
     if (extractor.input("in0", latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
@@ -641,7 +654,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     if (!prepare_vae_graph(graphs.vae_encode_stem, plan.image_width, plan.image_height, vae_tile_size,
                            context.encode_vae_graph, error) ||
         !prepare_vae_graph(graphs.vae_decode_stem, plan.image_width, plan.image_height, vae_tile_size,
-                           context.decode_vae_graph, error))
+                           context.decode_vae_graph, error, true))
     {
         stage_error("load-vae-graph", error.c_str());
         return false;
@@ -706,7 +719,8 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
                         ncnn::Mat latent_tile;
                         if (!crop_float_mat(sample, x_range.offset, y_range.offset, x_range.size, y_range.size,
                                             sample_tile) ||
-                            !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, frame_index))
+                            !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, profile,
+                                                    frame_index))
                             return false;
                         tile_latents.push_back(std::move(latent_tile));
                         clear_vae_tile_allocators(context, true);
@@ -717,7 +731,7 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
                     return false;
                 }
             }
-            else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, frame_index))
+            else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, profile, frame_index))
                 return false;
             condition_latents.push_back(std::move(latent));
         }
@@ -1016,7 +1030,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
                         }
                         ncnn::Mat reconstruction_tile;
                         if (!run_decode_tile_vulkan(latent_tile, decode, context, reconstruction_tile, error,
-                                                    frame_index))
+                                                    profile, frame_index))
                             return false;
                         tile_reconstructions.push_back(std::move(reconstruction_tile));
                         clear_vae_tile_allocators(context, false);
@@ -1029,7 +1043,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
                 }
             }
             else if (!run_decode_tile_vulkan(output_latents[frame_index], decode, context, reconstruction, error,
-                                             frame_index))
+                                             profile, frame_index))
                 return false;
             if (!reconstruction_to_rgb(reconstruction, plan, outputs.emplace_back()))
             {
@@ -1122,18 +1136,31 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         const ProfileScope frame_scope(profile, "vae-encode", absolute_index);
         ncnn::Mat sample;
         RgbImage reference;
-        if (!prepare_color_reference(input, plan, reference, error) || !reference_spool.append(reference, error))
+        if (!prepare_color_reference(input, plan, reference, error))
         {
             if (error.empty())
                 error = "frame=" + std::to_string(absolute_index) + " failed to spool color reference";
             profile.report("video-read", read_ms);
             return false;
         }
-        if (!prepare_input(input, plan, sample))
         {
-            error = "frame=" + std::to_string(absolute_index) + " failed to prepare the input image";
-            profile.report("video-read", read_ms);
-            return false;
+            const ProfileScope scope(profile, "rgb-reference-spool-write", absolute_index);
+            if (!reference_spool.append(reference, error))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) + " failed to spool color reference";
+                profile.report("video-read", read_ms);
+                return false;
+            }
+        }
+        {
+            const ProfileScope scope(profile, "video-input-preprocess", absolute_index);
+            if (!prepare_input(input, plan, sample))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " failed to prepare the input image";
+                profile.report("video-read", read_ms);
+                return false;
+            }
         }
 
         std::fprintf(stderr, "stage=vae-encode\n");
@@ -1151,7 +1178,8 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
                     ncnn::Mat latent_tile;
                     if (!crop_float_mat(sample, x_range.offset, y_range.offset, x_range.size, y_range.size,
                                         sample_tile) ||
-                        !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, absolute_index))
+                        !run_encode_tile_vulkan(sample_tile, encode, context, latent_tile, error, profile,
+                                                absolute_index))
                     {
                         profile.report("video-read", read_ms);
                         return false;
@@ -1166,18 +1194,33 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
                 return false;
             }
         }
-        else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, absolute_index))
+        else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, profile, absolute_index))
         {
             profile.report("video-read", read_ms);
             return false;
         }
         LatentFrame stored;
-        if (!ncnn_mat_to_latent_frame(latent, stored) || !condition_spool.append(stored, error))
         {
-            if (error.empty())
-                error = "frame=" + std::to_string(absolute_index) + " stage=vae-encode latent spool append failed";
-            profile.report("video-read", read_ms);
-            return false;
+            const ProfileScope scope(profile, "encode-latent-materialize", absolute_index);
+            if (!ncnn_mat_to_latent_frame(latent, stored))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=vae-encode latent spool append failed";
+                profile.report("video-read", read_ms);
+                return false;
+            }
+        }
+        {
+            const ProfileScope scope(profile, "encode-latent-spool-write", absolute_index);
+            if (!condition_spool.append(stored, error))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=vae-encode latent spool append failed";
+                profile.report("video-read", read_ms);
+                return false;
+            }
         }
         frame_count++;
     }
@@ -1187,8 +1230,11 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         error = "stage=video-decode failed: video contains no decodable frames";
         return false;
     }
-    if (!condition_spool.rewind(error))
-        return false;
+    {
+        const ProfileScope scope(profile, "encode-latent-spool-rewind");
+        if (!condition_spool.rewind(error))
+            return false;
+    }
     encode.clear();
     context.encode_blob_allocator->clear();
     context.encode_staging_allocator->clear();
@@ -1227,24 +1273,35 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
 
     for (;;)
     {
+        const std::size_t absolute_index = frame_offset + frame_count;
         LatentFrame stored;
-        if (!condition_spool.read_next(stored, error))
+        const auto spool_read_start = profile.enabled() ? PerformanceProfile::Clock::now()
+                                                        : PerformanceProfile::Clock::time_point{};
+        const bool has_latent = condition_spool.read_next(stored, error);
+        if (has_latent && profile.enabled())
+            profile.report_frame("dit-latent-spool-read", absolute_index,
+                                 profile.elapsed_ms(spool_read_start));
+        if (!has_latent)
         {
             if (!error.empty())
                 return false;
             break;
         }
-        const std::size_t absolute_index = frame_offset + frame_count;
         const ProfileScope frame_scope(profile, "dit-stack", absolute_index);
         ncnn::Mat condition_latent;
-        if (!latent_frame_to_ncnn_mat(stored, condition_latent))
         {
-            error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool record is invalid";
-            return false;
+            const ProfileScope scope(profile, "dit-latent-materialize", absolute_index);
+            if (!latent_frame_to_ncnn_mat(stored, condition_latent))
+            {
+                error = "frame=" + std::to_string(absolute_index) +
+                        " stage=handoff-latent latent spool record is invalid";
+                return false;
+            }
         }
         ncnn::VkMat condition_gpu;
         ncnn::VkMat noise_gpu;
         {
+            const ProfileScope scope(profile, "dit-latent-upload", absolute_index);
             ncnn::VkCompute compute(context.vkdev);
             compute.record_upload(condition_latent, condition_gpu, dit_opt);
             compute.record_upload(noise, noise_gpu, dit_opt);
@@ -1263,60 +1320,76 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         {
             ncnn::VkMat input_patches_gpu;
             std::fprintf(stderr, "stage=dit-input-patchify\n");
-            if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
-                                            context.dit_blob_allocator, context.dit_staging_allocator,
-                                            input_patches_gpu, context.pipeline_cache.get()))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
-                                                  "GPU patch assembly returned failure");
-                return false;
+                const ProfileScope scope(profile, "dit-input-patchify", absolute_index);
+                if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
+                                                context.dit_blob_allocator, context.dit_staging_allocator,
+                                                input_patches_gpu, context.pipeline_cache.get()))
+                {
+                    error = "frame=" + std::to_string(absolute_index) + " " +
+                            format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
+                                                      "GPU patch assembly returned failure");
+                    return false;
+                }
             }
 
             ncnn::VkMat prediction_gpu;
             std::fprintf(stderr, "stage=dit-stack\n");
-            if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
             {
-                context.clear_cached_dit();
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("dit-stack", context.diagnostics,
-                                                  "GPU DiT execution returned failure");
-                return false;
+                const ProfileScope scope(profile, "dit-stack-call", absolute_index);
+                if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
+                {
+                    context.clear_cached_dit();
+                    error = "frame=" + std::to_string(absolute_index) + " " +
+                            format_vulkan_stage_error("dit-stack", context.diagnostics,
+                                                      "GPU DiT execution returned failure");
+                    return false;
+                }
             }
 
             ncnn::VkMat noise_patches_gpu;
             std::fprintf(stderr, "stage=noise-patchify\n");
-            if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                                 context.dit_staging_allocator, noise_patches_gpu,
-                                                 context.pipeline_cache.get()))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("noise-patchify", context.diagnostics,
-                                                  "GPU patch assembly returned failure");
-                return false;
+                const ProfileScope scope(profile, "dit-output-pack", absolute_index);
+                if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev,
+                                                     context.dit_blob_allocator,
+                                                     context.dit_staging_allocator, noise_patches_gpu,
+                                                     context.pipeline_cache.get()))
+                {
+                    error = "frame=" + std::to_string(absolute_index) + " " +
+                            format_vulkan_stage_error("noise-patchify", context.diagnostics,
+                                                      "GPU patch assembly returned failure");
+                    return false;
+                }
             }
 
             ncnn::VkMat endpoint_patches_gpu;
             std::fprintf(stderr, "stage=v-lerp-endpoint\n");
-            if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                                   context.dit_blob_allocator, context.dit_staging_allocator,
-                                                   endpoint_patches_gpu))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
-                                                  "GPU sampler endpoint returned failure");
-                return false;
+                const ProfileScope scope(profile, "dit-sampler", absolute_index);
+                if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                                      context.dit_blob_allocator, context.dit_staging_allocator,
+                                                      endpoint_patches_gpu))
+                {
+                    error = "frame=" + std::to_string(absolute_index) + " " +
+                            format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
+                                                      "GPU sampler endpoint returned failure");
+                    return false;
+                }
             }
 
             std::fprintf(stderr, "stage=latent-unpatch\n");
-            if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
-                                        context.dit_staging_allocator, output_latent_gpu,
-                                        context.pipeline_cache.get()))
             {
-                error = "frame=" + std::to_string(absolute_index) + " " +
-                        format_vulkan_stage_error("latent-unpatch", context.diagnostics,
-                                                  "GPU patch removal returned failure");
-                return false;
+                const ProfileScope scope(profile, "dit-output-unpack", absolute_index);
+                if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev,
+                                            context.dit_blob_allocator, context.dit_staging_allocator,
+                                            output_latent_gpu, context.pipeline_cache.get()))
+                {
+                    error = "frame=" + std::to_string(absolute_index) + " " +
+                            format_vulkan_stage_error("latent-unpatch", context.diagnostics,
+                                                      "GPU patch removal returned failure");
+                    return false;
+                }
             }
         }
         else
@@ -1335,6 +1408,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         ncnn::Mat output_latent;
         std::fprintf(stderr, "stage=handoff-latent\n");
         {
+            const ProfileScope scope(profile, "dit-latent-download", absolute_index);
             ncnn::VkCompute compute(context.vkdev);
             compute.record_download(output_latent_gpu, output_latent, dit_opt);
             if (compute.submit_and_wait() != 0 || output_latent.empty())
@@ -1346,17 +1420,34 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             }
         }
         LatentFrame output_stored;
-        if (!ncnn_mat_to_latent_frame(output_latent, output_stored) || !output_spool.append(output_stored, error))
         {
-            if (error.empty())
-                error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool append failed";
-            return false;
+            const ProfileScope scope(profile, "dit-latent-materialize-output", absolute_index);
+            if (!ncnn_mat_to_latent_frame(output_latent, output_stored))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=handoff-latent latent spool append failed";
+                return false;
+            }
+        }
+        {
+            const ProfileScope scope(profile, "dit-latent-spool-write", absolute_index);
+            if (!output_spool.append(output_stored, error))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=handoff-latent latent spool append failed";
+                return false;
+            }
         }
         frame_count++;
     }
 
-    if (!output_spool.rewind(error))
-        return false;
+    {
+        const ProfileScope scope(profile, "dit-latent-spool-rewind");
+        if (!output_spool.rewind(error))
+            return false;
+    }
     context.dit_blob_allocator->clear();
     context.dit_staging_allocator->clear();
     profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
@@ -1393,7 +1484,13 @@ bool decode_video_vulkan(LatentSpool& output_spool,
     for (;;)
     {
         LatentFrame stored;
-        if (!output_spool.read_next(stored, error))
+        const auto spool_read_start = profile.enabled() ? PerformanceProfile::Clock::now()
+                                                        : PerformanceProfile::Clock::time_point{};
+        const bool has_latent = output_spool.read_next(stored, error);
+        if (has_latent && profile.enabled())
+            profile.report_frame("decode-latent-spool-read", frame_offset + frame_count,
+                                 profile.elapsed_ms(spool_read_start));
+        if (!has_latent)
         {
             if (!error.empty())
                 return false;
@@ -1402,10 +1499,14 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         const std::size_t absolute_index = frame_offset + frame_count;
         const ProfileScope frame_scope(profile, "vae-decode", absolute_index);
         ncnn::Mat output_latent;
-        if (!latent_frame_to_ncnn_mat(stored, output_latent))
         {
-            error = "frame=" + std::to_string(absolute_index) + " stage=handoff-latent latent spool record is invalid";
-            return false;
+            const ProfileScope scope(profile, "decode-latent-materialize", absolute_index);
+            if (!latent_frame_to_ncnn_mat(stored, output_latent))
+            {
+                error = "frame=" + std::to_string(absolute_index) +
+                        " stage=handoff-latent latent spool record is invalid";
+                return false;
+            }
         }
         ncnn::Mat reconstruction;
         std::fprintf(stderr, "stage=vae-decode\n");
@@ -1427,7 +1528,7 @@ bool decode_video_vulkan(LatentSpool& output_spool,
                     }
                     ncnn::Mat reconstruction_tile;
                     if (!run_decode_tile_vulkan(latent_tile, decode, context, reconstruction_tile, error,
-                                                absolute_index))
+                                                profile, absolute_index))
                         return false;
                     tile_reconstructions.push_back(std::move(reconstruction_tile));
                     clear_vae_tile_allocators(context, false);
@@ -1439,24 +1540,46 @@ bool decode_video_vulkan(LatentSpool& output_spool,
                 return false;
             }
         }
-        else if (!run_decode_tile_vulkan(output_latent, decode, context, reconstruction, error, absolute_index))
+        else if (!run_decode_tile_vulkan(output_latent, decode, context, reconstruction, error, profile,
+                                         absolute_index))
             return false;
         RgbImage output;
-        if (!reconstruction_to_rgb(reconstruction, plan, output))
         {
-            error = "frame=" + std::to_string(absolute_index) + " stage=output-postprocess failed";
-            return false;
+            const ProfileScope scope(profile, "decode-reconstruction-to-rgb", absolute_index);
+            if (!reconstruction_to_rgb(reconstruction, plan, output))
+            {
+                error = "frame=" + std::to_string(absolute_index) + " stage=output-postprocess failed";
+                return false;
+            }
         }
         RgbImage reference;
-        if (!reference_spool.read_next(reference, error) || !apply_wavelet_color_fix(output, reference, output, error))
         {
-            if (error.empty())
-                error = "frame=" + std::to_string(absolute_index) + " stage=color-reconstruction failed";
-            return false;
+            const ProfileScope scope(profile, "decode-rgb-reference-spool-read", absolute_index);
+            if (!reference_spool.read_next(reference, error))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=color-reconstruction reference read failed";
+                return false;
+            }
+        }
+        {
+            const ProfileScope scope(profile, "decode-wavelet-color-fix", absolute_index);
+            if (!apply_wavelet_color_fix(output, reference, output, error))
+            {
+                if (error.empty())
+                    error = "frame=" + std::to_string(absolute_index) +
+                            " stage=color-reconstruction failed";
+                return false;
+            }
         }
         const auto write_start = PerformanceProfile::Clock::now();
         std::string write_error;
-        const bool write_ok = writer(output, write_error);
+        bool write_ok = false;
+        {
+            const ProfileScope scope(profile, "video-write-frame", absolute_index);
+            write_ok = writer(output, write_error);
+        }
         write_ms += profile.elapsed_ms(write_start);
         if (!write_ok)
         {

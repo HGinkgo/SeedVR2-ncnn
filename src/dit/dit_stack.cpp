@@ -13,6 +13,7 @@
 #include "net.h"
 #include "pipelinecache.h"
 #include "inference/performance_profile.h"
+#include "inference/vulkan_benchmark.h"
 
 namespace seedvr2
 {
@@ -188,7 +189,8 @@ bool unpack_to_pack1(ncnn::Net& net, const ncnn::VkMat& packed, ncnn::VulkanDevi
     ncnn::Extractor extractor = net.create_extractor();
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
-    return extractor.input("in0", packed) == 0 && extractor.extract("out0", unpacked, compute) == 0 &&
+    return prepare_ncnn_layer_benchmark(compute, net) && extractor.input("in0", packed) == 0 &&
+           extractor.extract("out0", unpacked, compute) == 0 &&
            compute.submit_and_wait() == 0;
 }
 
@@ -450,6 +452,8 @@ bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
     ncnn::Extractor extractor = net.create_extractor();
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
+    if (!prepare_ncnn_layer_benchmark(compute, net))
+        return false;
     const int noise_ret = extractor.input("noise", noise_pack1);
     const int condition_ret = extractor.input("condition", condition_pack1);
     const int mask_ret = extractor.input("mask", mask_pack1);
@@ -503,7 +507,8 @@ bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
     ncnn::VkMat packed_patches;
-    if (extractor.input("latent", latent_pack1) != 0 || extractor.extract("patches", packed_patches, compute) != 0 ||
+    if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("latent", latent_pack1) != 0 ||
+        extractor.extract("patches", packed_patches, compute) != 0 ||
         compute.submit_and_wait() != 0 || !unpack_gpu_to_pack1(packed_patches, vkdev, net.opt, patches))
         return false;
     return !patches.empty() && patches.dims == 2 && patches.w == kOutputPatchWidth &&
@@ -542,7 +547,8 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
     extractor.set_light_mode(false);
     ncnn::VkCompute compute(vkdev);
     ncnn::VkMat packed_latent;
-    if (extractor.input("patches", patches_pack1) != 0 || extractor.extract("latent", packed_latent, compute) != 0 ||
+    if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("patches", patches_pack1) != 0 ||
+        extractor.extract("latent", packed_latent, compute) != 0 ||
         compute.submit_and_wait() != 0 || !unpack_gpu_to_pack1(packed_latent, vkdev, net.opt, latent))
         return false;
     return is_plan_latent(latent, plan);
@@ -661,7 +667,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     {
         ncnn::Extractor extractor = dit_input.create_extractor();
         ncnn::VkCompute compute(vkdev);
-        if (extractor.input("in0", input_patches_pack1) != 0 || extractor.input("in1", text) != 0 ||
+        if (!prepare_ncnn_layer_benchmark(compute, dit_input) ||
+            extractor.input("in0", input_patches_pack1) != 0 || extractor.input("in1", text) != 0 ||
             extractor.extract("out0", video_packed, compute) != 0 ||
             extractor.extract("out1", text_packed, compute) != 0 || compute.submit_and_wait() != 0)
         {
@@ -699,7 +706,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
             return false;
         }
         ncnn::VkCompute compute(vkdev);
-        if (extractor.extract("out0", embedding_packed, compute) != 0 || compute.submit_and_wait() != 0)
+        if (!prepare_ncnn_layer_benchmark(compute, dit_embedding) ||
+            extractor.extract("out0", embedding_packed, compute) != 0 || compute.submit_and_wait() != 0)
         {
             std::fprintf(stderr, "run_dit_stack_gpu: timestep embedding failed\n");
             return false;
@@ -720,6 +728,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         ncnn::VkMat next_video;
         ncnn::VkMat next_text;
         ncnn::VkCompute compute(vkdev);
+        if (!prepare_ncnn_layer_benchmark(compute, block))
+            return false;
         const int video_input_status = extractor.input("in0", video_gpu);
         const int text_input_status = extractor.input("in1", text_gpu);
         const int embedding_input_status = extractor.input("in2", embedding_gpu);
@@ -757,7 +767,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     {
         ncnn::Extractor extractor = dit_output.create_extractor();
         ncnn::VkCompute compute(vkdev);
-        if (extractor.input("in0", video_matrix_final) != 0 || extractor.input("in1", embedding_gpu) != 0 ||
+        if (!prepare_ncnn_layer_benchmark(compute, dit_output) ||
+            extractor.input("in0", video_matrix_final) != 0 || extractor.input("in1", embedding_gpu) != 0 ||
             extractor.extract("out0", output_packed, compute) != 0 || compute.submit_and_wait() != 0)
         {
             std::fprintf(stderr, "run_dit_stack_gpu: output graph execution failed\n");

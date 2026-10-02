@@ -65,6 +65,7 @@ add_executable(seedvr2-ncnn
     src/sampler/sampler.cpp
     src/vae/temporal_pad.cpp
     src/vae/causal_conv3d.cpp
+    src/vae/pointwise_conv3d.cpp
     src/vae/depth_to_space.cpp
     src/vae/static_vae_graph.cpp)
 target_link_libraries(seedvr2-ncnn PRIVATE ncnn)
@@ -149,10 +150,26 @@ if(SEEDVR2_ENABLE_VULKAN)
         COMMENT "Preprocessing SeedVR2 VAE causal convolution shader"
         VERBATIM)
     set_source_files_properties("${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}" PROPERTIES GENERATED TRUE)
+    set(SEEDVR2_POINTWISE_CONV3D_SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vae/shader/pointwise_conv3d.comp")
+    set(SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER
+        "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader/pointwise_conv3d.comp.hex.h")
+    add_custom_command(
+        OUTPUT "${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader"
+        COMMAND ${CMAKE_COMMAND}
+            -DSHADER_SRC=${SEEDVR2_POINTWISE_CONV3D_SHADER_SRC}
+            -DSHADER_COMP_HEADER=${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/cmake/ncnn_generate_shader_comp_header.cmake"
+        DEPENDS "${SEEDVR2_POINTWISE_CONV3D_SHADER_SRC}"
+        COMMENT "Preprocessing SeedVR2 VAE pointwise convolution shader"
+        VERBATIM)
+    set_source_files_properties("${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}" PROPERTIES GENERATED TRUE)
     target_sources(seedvr2-ncnn PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}")
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}")
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}")
+    target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}")
     target_include_directories(seedvr2-ncnn PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
 endif()
 
