@@ -16,12 +16,6 @@ The left image is a frame from an official SeedVR2 video example, downsampled to
 | --- | --- |
 | <img src="assets/showcase-image-input-64.png" alt="64x64 low-resolution SeedVR2 official example input" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 official example output" width="256"> |
 
-### Comparison Preview
-
-This GIF is a side-by-side comparison of the same input and output (left: nearest-neighbor enlargement of the `64x64` input; right: actual output). It is a visual comparison preview, not a video inference result:
-
-![SeedVR2 official example low-resolution input and 256x256 output comparison](assets/showcase-image-comparison.gif)
-
 ### Official Example Video Inference
 
 `assets/showcase-video-official-1_1-ncnn-256.avi` is the official example video input from the same public source. The BF16 Vulkan path processed its first 36 frames at `256x256`; the 36-frame RGB AVI output remains in the local acceptance workspace rather than being committed as a large generated asset. The fixed input SHA256 is `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`; the output SHA256 is `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`.

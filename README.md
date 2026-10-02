@@ -16,12 +16,6 @@
 | --- | --- |
 | <img src="assets/showcase-image-input-64.png" alt="64x64 SeedVR2 官方示例低分辨率输入图" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 官方示例输出图" width="256"> |
 
-### 对比预览
-
-下面的 GIF 是同一张输入与输出的并排对比预览（左：最近邻放大的 `64x64` 输入；右：实际输出），用于直观看清低分辨率输入和恢复结果的差异；它不是视频推理结果。
-
-![SeedVR2 官方示例低分辨率输入与 256x256 输出对比](assets/showcase-image-comparison.gif)
-
 ### 官方示例视频推理
 
 `assets/showcase-video-official-1_1-ncnn-256.avi` 是同一公开来源的官方视频示例输入。本分支使用 BF16 Vulkan 路径处理其前 36 帧，输出 36 帧 `256x256` RGB AVI；该输出保留在本地验收目录，不作为仓库媒体资产提交。固定复现实验的输入 SHA256 为 `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`，输出 SHA256 为 `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`。
