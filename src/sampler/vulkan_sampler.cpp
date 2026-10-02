@@ -23,6 +23,8 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
+    opt.use_bf16_packed = true;
+    opt.use_bf16_storage = true;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
@@ -94,6 +96,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
+    opt.use_bf16_packed = true;
+    opt.use_bf16_storage = true;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
@@ -172,6 +176,8 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
+    opt.use_bf16_packed = true;
+    opt.use_bf16_storage = true;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;

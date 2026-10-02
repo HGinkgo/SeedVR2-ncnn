@@ -25,7 +25,7 @@ std::string format_profile_line(const char* name,
                                 double elapsed_ms);
 
 // Profile line carrying a stable non-timing mode, e.g.:
-//   profile name=vae-graph mode=static-256
+//   profile name=vae-graph mode=static-256|static-shape|dynamic
 std::string format_profile_mode_line(const char* name, const char* mode);
 
 // Residency checkpoint, e.g.:

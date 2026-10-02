@@ -1,12 +1,12 @@
 # SeedVR2-ncnn
 
-适用于 Linux 和 Windows x86_64 的 SeedVR2 原生 C++ / ncnn / Vulkan 图像与视频增强命令行工具。
+面向 Linux x86_64 的 SeedVR2 原生 C++ / ncnn / Vulkan 图像与视频增强命令行工具。
 
 [下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
 ## 效果展示
 
-下列结果由当前 `main` 的 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。当前发布线的最大目标为 `256x256`。
+下列结果由本延伸分支的 BF16 Vulkan CLI 在 RTX 3090 的 GPU 0 上实际生成。当前验证线的最大目标为 `256x256`。
 
 ### 官方示例图像增强
 
@@ -22,12 +22,16 @@
 
 ![SeedVR2 官方示例低分辨率输入与 256x256 输出对比](assets/showcase-image-comparison.gif)
 
+### 官方示例视频推理
+
+`assets/showcase-video-official-1_1-ncnn-256.avi` 是同一公开来源的官方视频示例输入。本分支使用 BF16 Vulkan 路径处理其前 36 帧，输出 36 帧 `256x256` RGB AVI；该输出保留在本地验收目录，不作为仓库媒体资产提交。固定复现实验的输入 SHA256 为 `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`，输出 SHA256 为 `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`。
+
 示例素材来自 [SeedVR2 官方示例空间](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)，对应视频由其公开的 [SeedVR_VideoDemos 数据集](https://huggingface.co/datasets/Iceclear/SeedVR_VideoDemos) 提供。仓库仅提交其中一帧的裁剪、降采样 `64x64` 输入和本项目实际生成的输出；视频素材的版权和使用条件以原作者及数据集说明为准，本项目不主张拥有素材或与版权方存在关联。
 
 ## 能做什么
 
-- 使用 Vulkan GPU 运行 FP32 SeedVR2 模型，无需 Python、PyTorch 或 CUDA。
-- 处理 PNG/JPEG 图片；处理 RGB24 AVI 视频。Linux/Windows 运行包带有 LGPL FFmpeg 运行时，可读取常见压缩视频输入；视频输出固定为 RGB24 AVI。
+- 本延伸分支使用 BF16 存储和必要的 FP32 累加；`128x128`、`256x256` 图片及 `256x256`/36 帧视频路径已完成固定输入回归。比赛截止时的提交快照保留在 Git 历史中。
+- 处理 PNG/JPEG 图片和 RGB24 AVI 视频；视频输出固定为 RGB24 AVI。当前发布边界为 Linux x86_64。
 - 根据输入自动规划目标尺寸，或使用 `--width` 和 `--height` 指定目标尺寸。
 - 支持单张图片、最多两张图片的一次调用，以及单个视频文件。
 - 不提供文生图、文生视频或图生视频生成工作流；输入内容保持为图片或视频增强任务。
@@ -50,12 +54,6 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
   --input input.png \
   --output output.png \
   --gpu-id 0
-```
-
-Windows 在运行包目录中使用同样的参数：
-
-```bat
-seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output.png --gpu-id 0
 ```
 
 将视频处理到指定的低分辨率目标：
@@ -148,7 +146,7 @@ seedvr2-ncnn.bat --model-dir models\seedvr2-3b --input input.png --output output
 
 模型目录必须是 ModelScope 发布的完整动态包：根目录含有 `manifest.sha256`（75 条记录），且包内不能有符号链接。将该目录传给 `--model-dir`。
 
-当前模型为 FP32，通常需要约 10 GiB 或以上的 Vulkan heap。RTX 3090 是低分辨率路径的验收基线；6 GiB 级显卡不在端到端支持范围内。Linux x86_64 运行包以 Ubuntu 22.04（glibc 2.35）为兼容基线构建，Windows GPU 驱动需由系统自行提供。
+当前模型包仍以 FP32 权重格式导入；Vulkan 推理路径使用 BF16 张量存储，并在需要处使用 FP32 累加。固定输入回归基于 RTX 3090、驱动 `580.95.05`、ncnn `c6b351b56fbe32e0381ae00331e3df649b20d7b7` 和模型 manifest SHA256 `a4285a52f34b05408877ffcb97e98a6fccfebea38b636260d1b11fe93cbecee5`。Linux x86_64 运行包以 Ubuntu 22.04（glibc 2.35）为兼容基线构建。
 
 ## 当前边界
 

@@ -12,6 +12,7 @@ enum class VaeGraphMode
 {
     Dynamic,
     Static256,
+    StaticShape,
 };
 
 struct PreparedVaeGraph final
@@ -28,16 +29,24 @@ VaeGraphMode select_vae_graph_mode(int width, int height, int tile_size);
 bool vae_graph_uses_light_mode(VaeGraphMode mode);
 const char* vae_graph_mode_name(VaeGraphMode mode);
 
-// Remove only quoted shape-expression fields from Reshape layers. Numeric
-// shape parameters and all fields on other layer types are preserved.
+// Remove quoted shape-expression fields from Reshape layers and scale the
+// exported 256x256 spatial dimensions to the requested fixed shape.
+bool materialize_static_vae_param(std::string_view dynamic_param,
+                                  int width,
+                                  int height,
+                                  std::string& static_param,
+                                  std::size_t& removed_fields,
+                                  std::string& error);
+
+// Preserve the historical 256x256 helper contract for focused callers.
 bool materialize_static_vae_param(std::string_view dynamic_param,
                                   std::string& static_param,
                                   std::size_t& removed_fields,
                                   std::string& error);
 
-// Prepare one VAE graph for the requested route. A plain 256x256 route is
-// materialized in memory when the package contains dynamic Reshape metadata;
-// other routes keep the original path-based load.
+// Prepare one VAE graph for the requested route. Supported fixed shapes are
+// materialized when the package contains dynamic Reshape metadata; other
+// routes keep path-based loading.
 bool prepare_vae_graph(const std::filesystem::path& stem,
                        int width,
                        int height,

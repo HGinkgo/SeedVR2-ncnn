@@ -178,7 +178,7 @@ int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& to
                                   ncnn::VkCompute& cmd, const ncnn::Option& opt) const
 {
     if (bottom_blob.dims != 4 || bottom_blob.n != 1 || bottom_blob.elempack != 1 ||
-        bottom_blob.empty() || bottom_blob.elemsize != 4u || prepend_ <= 0 || pipeline_ == 0 ||
+        bottom_blob.empty() || bottom_blob.elemsize != 2u || prepend_ <= 0 || pipeline_ == 0 ||
         weight_data_gpu.empty() || (bias_term && bias_data_gpu.empty()))
         return -1;
 

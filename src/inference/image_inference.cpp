@@ -116,6 +116,8 @@ ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator,
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
+    opt.use_bf16_packed = true;
+    opt.use_bf16_storage = true;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
@@ -587,6 +589,11 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         error = "requested Vulkan GPU is unavailable";
         return false;
     }
+    if (!context.vkdev->info.support_bf16_storage())
+    {
+        error = "selected Vulkan GPU does not support BF16 storage";
+        return false;
+    }
     context.pipeline_cache = std::make_unique<ncnn::PipelineCache>(context.vkdev);
 
     context.diagnostics.gpu_id = selected_gpu;
@@ -595,7 +602,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     context.diagnostics.max_allocation_mib = query_max_allocation_mib(context.vkdev);
     context.diagnostics.target_width = plan.image_width;
     context.diagnostics.target_height = plan.image_height;
-    std::fprintf(stderr, "vulkan-gpu=%d name=%s heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
+    std::fprintf(stderr, "vulkan-gpu=%d name=%s precision=bf16-storage-fp32-accumulation heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
                  context.diagnostics.gpu_id, context.diagnostics.device_name.c_str(),
                  context.diagnostics.heap_budget_mib,
                  static_cast<unsigned long long>(context.diagnostics.max_allocation_mib),
@@ -1547,8 +1554,12 @@ bool run_vulkan_image_batch(const std::vector<RgbImage>& inputs,
 
     std::vector<ncnn::Mat> condition_latents;
     std::vector<ncnn::Mat> output_latents;
-    if (!encode_batch_vulkan(inputs, plan, context, condition_latents, error, profile, frame_offset) ||
-        !denoise_batch_vulkan(condition_latents, plan, context, output_latents, error, profile, frame_offset) ||
+    if (!encode_batch_vulkan(inputs, plan, context, condition_latents, error, profile, frame_offset))
+    {
+        outputs.clear();
+        return false;
+    }
+    if (!denoise_batch_vulkan(condition_latents, plan, context, output_latents, error, profile, frame_offset) ||
         !decode_batch_vulkan(output_latents, plan, context, outputs, error, profile, frame_offset))
     {
         outputs.clear();

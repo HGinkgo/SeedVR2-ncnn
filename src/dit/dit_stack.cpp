@@ -78,6 +78,8 @@ void configure_dit_vulkan_net(ncnn::Net& net,
 {
     net.opt.use_vulkan_compute = true;
     net.opt.use_packing_layout = false;
+    net.opt.use_bf16_packed = true;
+    net.opt.use_bf16_storage = true;
     net.opt.use_fp16_packed = false;
     net.opt.use_fp16_storage = false;
     net.opt.use_fp16_arithmetic = false;
@@ -152,7 +154,7 @@ bool is_plan_latent(const ncnn::VkMat& value, const ResolutionPlan& plan)
 {
     return !value.empty() && (value.dims == 3 || value.dims == 4) && value.w == plan.latent_width &&
            value.h == plan.latent_height && value.d == 1 && value.c == kLatentChannels && value.elempack == 1 &&
-           value.elemsize == 4u;
+           value.elemsize == 2u;
 }
 
 void collapse_single_frame(ncnn::VkMat& value)
@@ -584,6 +586,8 @@ bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
+    opt.use_bf16_packed = true;
+    opt.use_bf16_storage = true;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
@@ -617,6 +621,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     ncnn::Option input_opt;
     input_opt.use_vulkan_compute = true;
     input_opt.use_packing_layout = false;
+    input_opt.use_bf16_packed = true;
+    input_opt.use_bf16_storage = true;
     input_opt.use_fp16_packed = false;
     input_opt.use_fp16_storage = false;
     input_opt.use_fp16_arithmetic = false;
