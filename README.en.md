@@ -18,7 +18,11 @@ The left image is a frame from an official SeedVR2 video example, downsampled to
 
 ### Official Example Video Inference
 
-`assets/showcase-video-official-1_1-ncnn-256.avi` is the official example video input from the same public source. The BF16 Vulkan path processed its first 36 frames at `256x256`; the 36-frame RGB AVI output remains in the local acceptance workspace rather than being committed as a large generated asset. The fixed input SHA256 is `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`; the output SHA256 is `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`.
+The left side is the official example video input; the right side is the output produced by this project's BF16 Vulkan path. The repository provides the complete [input video](assets/showcase-video-official-1_1-ncnn-256.avi) and [output video](assets/showcase-video-output-bf16-256.avi); the GIF below is a 12-frame preview for the README.
+
+![Official example video input and SeedVR2-ncnn BF16 output comparison](assets/showcase-video-comparison-bf16.gif)
+
+The fixed run processed the first 36 frames at `256x256` and wrote an RGB AVI. The input SHA256 is `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`; the output SHA256 is `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`.
 
 The example frame comes from the [official SeedVR2 demo Space](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B), using the public [SeedVR_VideoDemos dataset](https://huggingface.co/datasets/Iceclear/SeedVR_VideoDemos). The repository contains a cropped, downsampled `64x64` input frame and its paired `256x256` output; rights and usage terms for the video remain with its original authors and dataset, and this project claims no ownership or affiliation.
 

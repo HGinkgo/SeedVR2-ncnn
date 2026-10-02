@@ -18,7 +18,11 @@
 
 ### 官方示例视频推理
 
-`assets/showcase-video-official-1_1-ncnn-256.avi` 是同一公开来源的官方视频示例输入。本分支使用 BF16 Vulkan 路径处理其前 36 帧，输出 36 帧 `256x256` RGB AVI；该输出保留在本地验收目录，不作为仓库媒体资产提交。固定复现实验的输入 SHA256 为 `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`，输出 SHA256 为 `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`。
+左侧是官方示例视频输入，右侧是本项目 BF16 Vulkan 路径处理后的输出。仓库同时提供完整的 [输入视频](assets/showcase-video-official-1_1-ncnn-256.avi) 和 [输出视频](assets/showcase-video-output-bf16-256.avi)；下方 GIF 只截取前 12 帧用于 README 预览。
+
+![官方示例视频输入与 SeedVR2-ncnn BF16 输出对比](assets/showcase-video-comparison-bf16.gif)
+
+本次固定运行处理输入视频的前 36 帧，输出为 `256x256` RGB AVI。输入 SHA256 为 `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`，输出 SHA256 为 `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`。
 
 示例素材来自 [SeedVR2 官方示例空间](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)，对应视频由其公开的 [SeedVR_VideoDemos 数据集](https://huggingface.co/datasets/Iceclear/SeedVR_VideoDemos) 提供。仓库提交其中一帧的裁剪、降采样 `64x64` 输入，以及与该输入配对的 `256x256` 输出；视频素材的版权和使用条件以原作者及数据集说明为准，本项目不主张拥有素材或与版权方存在关联。
 
