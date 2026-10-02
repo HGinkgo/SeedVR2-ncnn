@@ -1,185 +1,104 @@
 # SeedVR2-ncnn
 
-Native C++ / ncnn / Vulkan image and video enhancement CLI for SeedVR2 on Linux x86_64.
+Native C++ / ncnn / Vulkan SeedVR2 image and video enhancement CLI for Linux x86_64.
 
-[Runtime downloads](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) | [Model download](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [Chinese](README.md)
+[中文](README.md) · [Runtime](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
 
 ## Showcase
 
-The following results use an official SeedVR2 example input; the input and output images come from the same frame. The current validation line has a maximum target of `256x256`.
-
-### Official Example Image Restoration
-
-The left image is a frame from an official SeedVR2 video example, downsampled to `64x64`; the right image is the actual output at an explicit `256x256` target. The showcase first enlarges that same image to the `256x256` model canvas, then uses the validated fixed-shape path.
+An official example frame is downsampled to `64x64` and restored with the fixed `256x256` path:
 
 | Input | Output |
 | --- | --- |
-| <img src="assets/showcase-image-input-64.png" alt="64x64 low-resolution SeedVR2 official example input" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 official example output" width="256"> |
+| <img src="assets/showcase-image-input-64.png" alt="64x64 input" width="256"> | <img src="assets/showcase-image-output-256.png" alt="256x256 output" width="256"> |
 
-### Official Example Video Inference
+The input comes from the [official SeedVR2 demo](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B). The video input and inference output are not presented as a quality showcase because video quality attribution is not yet complete.
 
-The left side is the official example video input; the right side is the output produced by this project's BF16 Vulkan path. The repository provides the complete [input video](assets/showcase-video-official-1_1-ncnn-256.avi) and [output video](assets/showcase-video-output-bf16-256.avi); the GIF below is a 12-frame preview for the README.
+## Features
 
-![Official example video input and SeedVR2-ncnn BF16 output comparison](assets/showcase-video-comparison-bf16.gif)
-
-The fixed run processed the first 36 frames at `256x256` and wrote an RGB AVI. The input SHA256 is `5b16698d7bbafdc00aa4ee87134ea82dcc8976dde59d78ff5db21054c89ae8ac`; the output SHA256 is `e940fa0d8dde1edfd7f723fe889db7b8d87e44611d4a75127d1d2f33a5215b55`.
-
-The example frame comes from the [official SeedVR2 demo Space](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B), using the public [SeedVR_VideoDemos dataset](https://huggingface.co/datasets/Iceclear/SeedVR_VideoDemos). The repository contains a cropped, downsampled `64x64` input frame and its paired `256x256` output; rights and usage terms for the video remain with its original authors and dataset, and this project claims no ownership or affiliation.
-
-## What It Does
-
-- This continuation branch uses BF16 storage with FP32 accumulation where required; fixed-input regression has passed for `128x128`, `256x256`, and `256x256`/36-frame video paths. The competition submission remains available in Git history.
-- Processes PNG/JPEG images and RGB24 AVI video. The current product boundary is Linux x86_64; video output is always RGB24 AVI.
-- Plans an output size automatically from the input or accepts an explicit `--width` and `--height`.
-- Handles one image, up to two images in one invocation, or one video file.
-- Does not provide text-to-image, text-to-video, or image-to-video generation workflows; it enhances supplied images and video.
-- Standard output applies reference-guided color reconstruction, retaining generated high-frequency detail while reconstructing low-frequency color from the input.
+- Native C++ inference without Python, PyTorch, or a CUDA runtime.
+- Linux NVIDIA Vulkan with BF16 storage and FP32 accumulation where required.
+- PNG/JPEG images and RGB24 AVI video.
+- Validated fixed targets: `128x128`, `128x256`, and `256x256`.
+- One-step Euler is the default; multi-step sampling and VAE tiling are experimental.
 
 ## Quick Start
 
-1. Download and extract the appropriate runtime package from [Releases](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest).
-2. Download the model from [ModelScope](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) into the runtime directory. With the ModelScope CLI installed:
+Download the model:
 
 ```bash
 modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
 ```
 
-3. Run an image on Linux:
+Image:
 
 ```bash
 ./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.png \
   --output output.png \
+  --width 256 --height 256 \
   --gpu-id 0
 ```
 
-Process a video at an explicit low-resolution target:
+Video:
 
 ```bash
 ./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
-  --width 128 --height 128 \
+  --width 256 --height 256 \
   --gpu-id 0
 ```
 
-Use `--help` for all options. Model weights are distributed separately; the runtime itself has no Python, PyTorch, or CUDA dependency.
+The runtime does not require Python, PyTorch, or CUDA. Use `--help` for all options.
 
-The release-validated default uses one sampling step. `--steps N` enables experimental multi-step Euler sampling (`N` must be a positive integer); it increases DiT compute time with the step count and changes the generated result:
+## Validation
 
-```bash
-./seedvr2-ncnn \
-  --model-dir models/seedvr2-3b \
-  --input input.png --output output.png \
-  --width 256 --height 256 \
-  --steps 4 --gpu-id 0
-```
+Fixed-input regression environment: RTX 3090, driver `580.95.05`, ncnn
+`c6b351b56fbe32e0381ae00331e3df649b20d7b7`, BF16 Vulkan.
 
-For a directory of images, the batch mode reuses one model session for consecutive inputs with the same target plan:
-
-```bash
-./seedvr2-ncnn \
-  --model-dir models/seedvr2-3b \
-  --input-dir frames \
-  --output-dir enhanced \
-  --scale 2 \
-  --gpu-id 0
-```
-
-Video processing can select a bounded segment, which is useful for quick previews of longer material:
-
-```bash
-./seedvr2-ncnn \
-  --model-dir models/seedvr2-3b \
-  --input clip.avi \
-  --output preview.avi \
-  --width 256 --height 256 \
-  --start-frame 12 --frames 48 \
-  --gpu-id 0
-```
-
-When GPU memory is tight, the experimental VAE tile path processes and stitches spatial tiles. It does not change model weights or the default path; tile edges must be multiples of 16:
-
-```bash
-./seedvr2-ncnn \
-  --model-dir models/seedvr2-3b \
-  --input large.png --output enhanced.png \
-  --width 256 --height 256 \
-  --vae-tile-size 128 --gpu-id 0
-```
-
-Runtime packages can run `--check-model --model-dir models/seedvr2-3b` to validate the dynamic package manifest, record count, and symlink constraints without initializing Vulkan.
-
-Output postprocessing retains generated high-frequency detail while reconstructing low-frequency color from an input reference. Video mode spools reference frames to a process-local temporary file instead of retaining the whole clip in memory.
-
-## Dynamic Resolution
-
-Automatic mode preserves the input aspect ratio, aligns the target to 16 pixels, and center-crops when necessary. Target area is capped at `256x256`; inputs already below that cap are not enlarged merely to fill it. Explicit `--width` / `--height` values use the same cap.
-
-| Release-validated target | Image | AVI |
+| Target | Image | AVI |
 | --- | --- | --- |
-| `128x128` | Verified | Verified (two frames) |
-| `128x256` | Verified | - |
-| `256x256` | Verified | Verified (continuous 36 frames) |
+| `128x128` | verified | verified, 2 frames |
+| `128x256` | verified | - |
+| `256x256` | verified | verified, 36 frames |
 
-Other dynamic sizes that meet the 16-pixel alignment and area limit can be requested, but are outside the current release validation promise.
+The `256x256 / 36-frame` baseline is `660.7 s` video-batch time, `664.8 s`
+end-to-end time, and `1515 MiB` peak RSS. This is a performance baseline,
+not a cross-engine comparison or a video-quality acceptance result.
 
-For a plain `256x256` target without `--vae-tile-size`, the runtime automatically materializes the dynamic VAE parameters in memory and enables ncnn's light execution mode. The model package files and dynamic paths for other sizes are unchanged; this is an internal equivalent path and needs no extra CLI option.
+Model manifest SHA256: `a4285a52f34b05408877ffcb97e98a6fccfebea38b636260d1b11fe93cbecee5`.
 
-The release validation table covers the default one-step sampler. Multi-step sampling remains experimental. GPU end-to-end acceptance passed on a `256x256`, 36-frame video; the four-step path produces the expected different sampling trajectory but is not part of the default release quality promise.
+## Build
 
-## Inputs and Outputs
-
-| Workflow | Input | Output |
-| --- | --- | --- |
-| Images | PNG, JPEG | PNG, JPEG |
-| Base video path | RGB24 AVI | RGB24 AVI |
-| Runtime with FFmpeg | Common compressed video formats | RGB24 AVI |
-
-Repeat `--input` and `--output` once each to process two images in one invocation. Video input requires exactly one input and one `.avi` output.
-
-## Model and Hardware
-
-`--model-dir` must point to the complete dynamic package published on ModelScope: the directory contains `manifest.sha256` with 75 records and no symbolic links.
-
-The model package is still imported with FP32 weights; Vulkan inference uses BF16 tensor storage and FP32 accumulation where required. Fixed-input regression uses an RTX 3090, driver `580.95.05`, ncnn `c6b351b56fbe32e0381ae00331e3df649b20d7b7`, and model manifest SHA256 `a4285a52f34b05408877ffcb97e98a6fccfebea38b636260d1b11fe93cbecee5`. The Linux x86_64 runtime uses Ubuntu 22.04 (glibc 2.35) as its compatibility baseline.
-
-## Current Boundaries
-
-- This release line targets low-resolution output; 720p and long video are not supported or validated yet.
-- macOS is out of scope.
-- Model weights and third-party dependencies remain under their respective licenses.
-
-## Build From Source
-
-The CPU build needs CMake and a C++17 compiler:
+CPU:
 
 ```bash
-cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build \
+  -DSEEDVR2_ENABLE_VULKAN=OFF \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-The Vulkan build needs a local Vulkan SDK, Vulkan-capable GPU, and compatible driver:
+Vulkan:
 
 ```bash
-cmake -S . -B build-vulkan -DSEEDVR2_ENABLE_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build-vulkan \
+  -DSEEDVR2_ENABLE_VULKAN=ON \
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build-vulkan --parallel
 ```
 
-For compressed video input, also configure `-DSEEDVR2_ENABLE_FFMPEG=ON` and provide FFmpeg development libraries.
+Compressed video input additionally requires `-DSEEDVR2_ENABLE_FFMPEG=ON`.
 
-## Development and Tests
+## Scope
 
-The public verification surface stays compact: `SEEDVR2_BUILD_TESTS=ON` builds one fast runtime contract check for CLI behavior, low-resolution planning, and AVI I/O; `tests/smoke.sh` is the lightweight executable smoke test. Model export, GPU numerical comparison, and performance work remain local acceptance workflows rather than daily repository targets.
-
-```bash
-cmake -S . -B build -DSEEDVR2_ENABLE_VULKAN=OFF -DSEEDVR2_BUILD_TESTS=ON
-cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure
-```
+- Current product line: Linux x86_64 NVIDIA Vulkan.
+- Output target is capped at `256x256`; 720p and long video are not validated.
+- Model weights and third-party dependencies retain their own licenses.
 
 ## License
 
-ncnn uses the BSD-3-Clause license. SeedVR2 models, weights, and other third-party dependencies are subject to their respective licenses.
+ncnn uses BSD-3-Clause. SeedVR2 models, weights, and other third-party dependencies retain their respective licenses.
