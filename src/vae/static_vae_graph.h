@@ -38,12 +38,6 @@ bool materialize_static_vae_param(std::string_view dynamic_param,
                                   std::size_t& removed_fields,
                                   std::string& error);
 
-// Preserve the historical 256x256 helper contract for focused callers.
-bool materialize_static_vae_param(std::string_view dynamic_param,
-                                  std::string& static_param,
-                                  std::size_t& removed_fields,
-                                  std::string& error);
-
 // Prepare one VAE graph for the requested route. Supported fixed shapes are
 // materialized when the package contains dynamic Reshape metadata; other
 // routes keep path-based loading.

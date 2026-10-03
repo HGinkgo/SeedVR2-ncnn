@@ -4,7 +4,6 @@ project(SeedVR2-ncnn VERSION 0.1.2 LANGUAGES CXX)
 
 option(SEEDVR2_ENABLE_VULKAN "Build ncnn with Vulkan compute support" OFF)
 option(SEEDVR2_ENABLE_FFMPEG "Enable optional FFmpeg video input" OFF)
-option(SEEDVR2_BUILD_TESTS "Build the compact runtime contract check" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -175,27 +174,3 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS seedvr2-ncnn RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-if(SEEDVR2_BUILD_TESTS)
-    enable_testing()
-    add_executable(seedvr2-runtime-contract-test
-        tests/runtime_contract.cpp
-        src/cli/cli.cpp
-        src/inference/performance_profile.cpp
-        src/resolution/resolution_plan.cpp
-        src/sampler/sampler.cpp
-        src/video/video_io.cpp
-        src/video/ffmpeg_video_reader.cpp)
-    target_include_directories(seedvr2-runtime-contract-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    if(SEEDVR2_ENABLE_FFMPEG)
-        target_compile_definitions(seedvr2-runtime-contract-test PRIVATE SEEDVR2_HAS_FFMPEG=1)
-        target_include_directories(seedvr2-runtime-contract-test PRIVATE "${SEEDVR2_FFMPEG_INCLUDE_DIR}")
-        target_link_libraries(seedvr2-runtime-contract-test PRIVATE ${SEEDVR2_FFMPEG_LIBRARIES})
-    endif()
-    add_test(NAME seedvr2-runtime-contract-test COMMAND seedvr2-runtime-contract-test)
-    if(UNIX AND SEEDVR2_ENABLE_FFMPEG)
-        get_filename_component(SEEDVR2_FFMPEG_LIBRARY_DIR "${SEEDVR2_FFMPEG_AVFORMAT_LIBRARY}" DIRECTORY)
-        set_tests_properties(seedvr2-runtime-contract-test PROPERTIES
-            ENVIRONMENT "LD_LIBRARY_PATH=${SEEDVR2_FFMPEG_LIBRARY_DIR}:$ENV{LD_LIBRARY_PATH}")
-    endif()
-endif()

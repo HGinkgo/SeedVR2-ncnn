@@ -323,14 +323,6 @@ bool materialize_static_vae_param(std::string_view dynamic_param,
     return true;
 }
 
-bool materialize_static_vae_param(std::string_view dynamic_param,
-                                  std::string& static_param,
-                                  std::size_t& removed_fields,
-                                  std::string& error)
-{
-    return materialize_static_vae_param(dynamic_param, 256, 256, static_param, removed_fields, error);
-}
-
 bool prepare_vae_graph(const std::filesystem::path& stem,
                        int width,
                        int height,
