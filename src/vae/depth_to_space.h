@@ -40,5 +40,3 @@ private:
 };
 
 ncnn::Layer* SeedVR2DepthToSpace_layer_creator(void* userdata);
-
-void register_seedvr2_vae_layers(ncnn::Net& net);

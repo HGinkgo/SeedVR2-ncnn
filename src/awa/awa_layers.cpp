@@ -738,7 +738,12 @@ int SeedVR2MMRoPE::upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt)
 {
     if (rotations_cpu_.empty())
         return -1;
-    cmd.record_upload(rotations_cpu_, rotations_gpu_, opt);
+    ncnn::Option rotation_opt = opt;
+    rotation_opt.use_bf16_packed = false;
+    rotation_opt.use_bf16_storage = false;
+    rotation_opt.use_fp16_packed = false;
+    rotation_opt.use_fp16_storage = false;
+    cmd.record_upload(rotations_cpu_, rotations_gpu_, rotation_opt);
     return rotations_gpu_.empty() ? -100 : 0;
 }
 

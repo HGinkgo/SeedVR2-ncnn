@@ -7,11 +7,6 @@
 namespace seedvr2
 {
 
-bool load_conditioning_f32(const char* path, ncnn::Mat& condition)
-{
-    return load_conditioning_f32(path, kConditioningTokens, condition);
-}
-
 bool load_conditioning_f32(const char* path, int tokens, ncnn::Mat& condition)
 {
     if (!path || !is_supported_conditioning_tokens(tokens))

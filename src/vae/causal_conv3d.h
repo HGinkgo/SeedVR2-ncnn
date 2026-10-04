@@ -21,12 +21,15 @@ public:
 #endif
 
 private:
+    bool supports_output_channel4() const;
+
     int prepend_ = 0;
 
 #if NCNN_VULKAN
     ncnn::VkMat weight_data_gpu;
     ncnn::VkMat bias_data_gpu;
     ncnn::Pipeline* pipeline_ = 0;
+    ncnn::Pipeline* output_channel4_pipeline_ = 0;
 #endif
 };
 
