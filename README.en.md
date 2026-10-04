@@ -14,13 +14,17 @@ An official example frame is downsampled to `64x64` and restored with the fixed 
 
 The input comes from the [official SeedVR2 demo](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B).
 
-Video inference result (36 frames, 256x256, RGB24 AVI):
+Video inference result (36 frames, `64x64` input restored to `256x256`, RGB24 AVI):
+
+The comparison GIF shows the `64x64` input on the left and the ncnn Vulkan `256x256` enhanced output on the right:
+
+![Official video input and SeedVR2-ncnn output comparison](assets/showcase-video-comparison-bf16.gif)
 
 <video controls width="256" preload="metadata">
   <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
 </video>
 
-[Download the video result](assets/showcase-video-output-256.avi). This file showcases the ncnn Vulkan inference output and is not an independent video-quality acceptance result.
+The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [output video](assets/showcase-video-output-256.avi) are included. The input is made by bilinearly downsampling the first 36 frames of the official `256x256` example video to `64x64`. Input SHA256: `3dd09c43e867587e329bace29b71ecde09ce444789892ab1c939495b9e1c8f0a`; output SHA256: `75c8e8be2e11b7c19f001872e46ba45b6a91cc116bf19f9e7ac58c849bfd0114`. This file showcases the ncnn Vulkan inference output and is not an independent video-quality acceptance result.
 
 ## Features
 

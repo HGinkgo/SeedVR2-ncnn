@@ -14,13 +14,17 @@
 
 输入来自 [SeedVR2 官方示例](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)；输出为本项目保存的配对示例。
 
-视频推理结果（36 帧、256x256、RGB24 AVI）：
+视频推理结果（36 帧、`64x64` 输入恢复到 `256x256`、RGB24 AVI）：
+
+下方对比 GIF 左侧为 `64x64` 输入，右侧为 ncnn Vulkan `256x256` 增强输出：
+
+![官方示例视频输入与 SeedVR2-ncnn 输出对比](assets/showcase-video-comparison-bf16.gif)
 
 <video controls width="256" preload="metadata">
   <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
 </video>
 
-[下载视频结果](assets/showcase-video-output-256.avi)。该视频用于展示 ncnn Vulkan 推理产物，不作为独立的画质验收结论。
+完整[输入视频](assets/showcase-video-input-64.avi)和 ncnn Vulkan [输出视频](assets/showcase-video-output-256.avi)均已提供。输入由官方 `256x256` 示例视频前 36 帧双线性降采样到 `64x64`，输入 SHA256 为 `3dd09c43e867587e329bace29b71ecde09ce444789892ab1c939495b9e1c8f0a`，输出 SHA256 为 `75c8e8be2e11b7c19f001872e46ba45b6a91cc116bf19f9e7ac58c849bfd0114`。该视频用于展示 ncnn Vulkan 推理产物，不作为独立的画质验收结论。
 
 ## Features
 
