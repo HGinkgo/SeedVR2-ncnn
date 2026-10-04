@@ -12,7 +12,15 @@ An official example frame is downsampled to `64x64` and restored with the fixed 
 | --- | --- |
 | <img src="assets/showcase-image-input-64.png" alt="64x64 input" width="256"> | <img src="assets/showcase-image-output-256.png" alt="256x256 output" width="256"> |
 
-The input comes from the [official SeedVR2 demo](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B). The video input and inference output are not presented as a quality showcase because video quality attribution is not yet complete.
+The input comes from the [official SeedVR2 demo](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B).
+
+Video inference result (36 frames, 256x256, RGB24 AVI):
+
+<video controls width="256" preload="metadata">
+  <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
+</video>
+
+[Download the video result](assets/showcase-video-output-256.avi). This file showcases the ncnn Vulkan inference output and is not an independent video-quality acceptance result.
 
 ## Features
 
@@ -44,15 +52,17 @@ Image:
 Video:
 
 ```bash
-./seedvr2-ncnn \
+tools/with-nvidia-vulkan-runtime.sh \
+  ./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
   --width 256 --height 256 \
+  --frames 36 \
   --gpu-id 0
 ```
 
-The runtime does not require Python, PyTorch, or CUDA. Use `--help` for all options.
+This processes the first 36 input frames and writes an RGB24 AVI. Omit `--frames` to process the whole video. The default build supports AVI; compressed video input requires a build with `-DSEEDVR2_ENABLE_FFMPEG=ON`. The runtime does not require Python, PyTorch, or CUDA. Use `--help` for all options.
 
 ## Validation
 

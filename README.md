@@ -12,7 +12,15 @@
 | --- | --- |
 | <img src="assets/showcase-image-input-64.png" alt="64x64 SeedVR2 官方示例低分辨率输入图" width="256"> | <img src="assets/showcase-image-output-256.png" alt="SeedVR2-ncnn 256x256 官方示例输出图" width="256"> |
 
-输入来自 [SeedVR2 官方示例](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)；输出为本项目保存的配对示例。视频输入和推理输出不作为画质 showcase，避免将尚未完成质量归因的结果误作质量承诺。
+输入来自 [SeedVR2 官方示例](https://huggingface.co/spaces/ByteDance-Seed/SeedVR2-3B)；输出为本项目保存的配对示例。
+
+视频推理结果（36 帧、256x256、RGB24 AVI）：
+
+<video controls width="256" preload="metadata">
+  <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
+</video>
+
+[下载视频结果](assets/showcase-video-output-256.avi)。该视频用于展示 ncnn Vulkan 推理产物，不作为独立的画质验收结论。
 
 ## Features
 
@@ -44,15 +52,17 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
 视频：
 
 ```bash
-./seedvr2-ncnn \
+tools/with-nvidia-vulkan-runtime.sh \
+  ./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
-  --width 128 --height 128 \
+  --width 256 --height 256 \
+  --frames 36 \
   --gpu-id 0
 ```
 
-运行包不需要 Python、PyTorch 或 CUDA。使用 `--help` 查看完整参数。
+该命令处理输入视频的前 36 帧，并将结果写入 RGB24 AVI。省略 `--frames` 时处理整个视频；默认构建支持 AVI，压缩视频输入需要使用 `-DSEEDVR2_ENABLE_FFMPEG=ON` 构建。运行包不需要 Python、PyTorch 或 CUDA。使用 `--help` 查看完整参数。
 
 ## Validation
 
