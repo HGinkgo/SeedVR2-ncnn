@@ -115,6 +115,28 @@ std::string format_profile_dit_stage_line(const char* stage, double elapsed_ms)
     return line.str();
 }
 
+std::string format_profile_runtime_line(std::size_t graph_loads,
+                                        std::size_t transient_graph_loads,
+                                        double graph_load_ms,
+                                        double transient_graph_load_ms,
+                                        std::size_t submits,
+                                        double submit_ms,
+                                        std::size_t uploads,
+                                        std::size_t downloads)
+{
+    std::ostringstream line;
+    line << "profile name=runtime graph-loads=" << graph_loads
+         << " transient-graph-loads=" << transient_graph_loads;
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.1f", graph_load_ms);
+    line << " graph-load-ms=" << buffer;
+    std::snprintf(buffer, sizeof(buffer), "%.1f", transient_graph_load_ms);
+    line << " transient-graph-load-ms=" << buffer << " submits=" << submits;
+    std::snprintf(buffer, sizeof(buffer), "%.1f", submit_ms);
+    line << " submit-ms=" << buffer << " uploads=" << uploads << " downloads=" << downloads;
+    return line.str();
+}
+
 namespace
 {
 

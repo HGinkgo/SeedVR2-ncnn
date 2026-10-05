@@ -5,6 +5,8 @@
 namespace seedvr2
 {
 
+class PerformanceProfile;
+
 // DiT predictions must be pack1. The sample may be pack1 or pack4; the result is pack1.
 bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             const ncnn::VkMat& negative_output,
@@ -14,7 +16,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             ncnn::VulkanDevice* vkdev,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
-                            ncnn::VkMat& updated_sample);
+                            ncnn::VkMat& updated_sample,
+                            const PerformanceProfile* profile = nullptr);
 
 // Official one-step path: CFG scale one uses only the positive prediction and
 // resolves v_lerp at t=T as x0 = sample - prediction.
@@ -23,7 +26,8 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
                                        ncnn::VulkanDevice* vkdev,
                                        ncnn::VkAllocator* blob_allocator,
                                        ncnn::VkAllocator* staging_allocator,
-                                       ncnn::VkMat& endpoint_sample);
+                                       ncnn::VkMat& endpoint_sample,
+                                       const PerformanceProfile* profile = nullptr);
 
 // Positive-only v_lerp Euler update used by the product path when --steps is
 // greater than one: sample += normalized_delta * prediction.
@@ -33,6 +37,7 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
                                ncnn::VulkanDevice* vkdev,
                                ncnn::VkAllocator* blob_allocator,
                                ncnn::VkAllocator* staging_allocator,
-                               ncnn::VkMat& updated_sample);
+                               ncnn::VkMat& updated_sample,
+                               const PerformanceProfile* profile = nullptr);
 
 } // namespace seedvr2

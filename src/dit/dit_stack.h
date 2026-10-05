@@ -57,7 +57,8 @@ bool make_dit_input_patches_gpu(const ncnn::VkMat& noise,
                                 ncnn::VkAllocator* blob_allocator,
                                 ncnn::VkAllocator* staging_allocator,
                                 ncnn::VkMat& patches,
-                                ncnn::PipelineCache* pipeline_cache = nullptr);
+                                ncnn::PipelineCache* pipeline_cache = nullptr,
+                                const PerformanceProfile* profile = nullptr);
 
 bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
                                      const ResolutionPlan& plan,
@@ -65,7 +66,8 @@ bool patch_latent_for_dit_output_gpu(const ncnn::VkMat& latent,
                                      ncnn::VkAllocator* blob_allocator,
                                      ncnn::VkAllocator* staging_allocator,
                                      ncnn::VkMat& patches,
-                                     ncnn::PipelineCache* pipeline_cache = nullptr);
+                                     ncnn::PipelineCache* pipeline_cache = nullptr,
+                                     const PerformanceProfile* profile = nullptr);
 
 // Convert between the 16-channel latent layout and a (T*H*W)x64 DiT output patch matrix.
 bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
@@ -74,7 +76,8 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
                             ncnn::VkMat& latent,
-                            ncnn::PipelineCache* pipeline_cache = nullptr);
+                            ncnn::PipelineCache* pipeline_cache = nullptr,
+                            const PerformanceProfile* profile = nullptr);
 
 bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
                        const ncnn::Mat& text,

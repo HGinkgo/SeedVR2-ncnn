@@ -10,12 +10,32 @@
 namespace seedvr2
 {
 
+namespace
+{
+
+bool load_sampler_graph(ncnn::Net& net, const char* param, const PerformanceProfile* profile)
+{
+    const auto graph_start = profile && profile->enabled() ? PerformanceProfile::Clock::now()
+                                                             : PerformanceProfile::Clock::time_point{};
+    if (net.load_param_mem(param) != 0)
+        return false;
+    const unsigned char* empty_model = nullptr;
+    ncnn::DataReaderFromMemory model_reader(empty_model);
+    const bool loaded = net.load_model(model_reader) == 0;
+    if (loaded && profile)
+        profile->record_runtime_graph_load(true, profile->elapsed_ms(graph_start));
+    return loaded;
+}
+
+} // namespace
+
 bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
                                       const ncnn::VkMat& sample,
                                       ncnn::VulkanDevice* vkdev,
                                       ncnn::VkAllocator* blob_allocator,
                                       ncnn::VkAllocator* staging_allocator,
-                                      ncnn::VkMat& endpoint_sample)
+                                      ncnn::VkMat& endpoint_sample,
+                                      const PerformanceProfile* profile)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || positive_output.empty() || sample.empty() ||
         positive_output.elempack != 1)
@@ -38,7 +58,7 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
     {
         ncnn::VkCompute unpack(vkdev);
         vkdev->convert_packing(sample, unpacked_sample, 1, unpack, opt);
-        if (unpacked_sample.empty() || unpack.submit_and_wait() != 0)
+        if (unpacked_sample.empty() || submit_and_wait_profiled(unpack, profile) != 0)
             return false;
         sample_input = &unpacked_sample;
     }
@@ -56,11 +76,7 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
         "BinaryOp endpoint 2 1 sample prediction endpoint 0=1\n";
     net.opt = opt;
     net.set_vulkan_device(vkdev);
-    if (net.load_param_mem(kParam) != 0)
-        return false;
-    const unsigned char* empty_model = nullptr;
-    ncnn::DataReaderFromMemory model_reader(empty_model);
-    if (net.load_model(model_reader) != 0)
+    if (!load_sampler_graph(net, kParam, profile))
         return false;
 
     ncnn::Extractor extractor = net.create_extractor();
@@ -69,12 +85,13 @@ bool apply_cfg_v_lerp_endpoint_vulkan(const ncnn::VkMat& positive_output,
     ncnn::VkMat graph_output;
     if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("prediction", positive_output) != 0 ||
         extractor.input("sample", *sample_input) != 0 ||
-        extractor.extract("endpoint", graph_output, compute) != 0 || compute.submit_and_wait() != 0)
+        extractor.extract("endpoint", graph_output, compute) != 0 ||
+        submit_and_wait_profiled(compute, profile) != 0)
         return false;
 
     ncnn::VkCompute clone(vkdev);
     clone.record_clone(graph_output, endpoint_sample, net.opt);
-    return clone.submit_and_wait() == 0;
+    return submit_and_wait_profiled(clone, profile) == 0;
 }
 
 bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
@@ -85,7 +102,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             ncnn::VulkanDevice* vkdev,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
-                            ncnn::VkMat& updated_sample)
+                            ncnn::VkMat& updated_sample,
+                            const PerformanceProfile* profile)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || positive_output.empty() || negative_output.empty() ||
         sample.empty() || positive_output.dims != negative_output.dims ||
@@ -113,7 +131,7 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     {
         ncnn::VkCompute unpack(vkdev);
         vkdev->convert_packing(sample, unpacked_sample, 1, unpack, opt);
-        if (unpacked_sample.empty() || unpack.submit_and_wait() != 0)
+        if (unpacked_sample.empty() || submit_and_wait_profiled(unpack, profile) != 0)
             return false;
         sample_input = &unpacked_sample;
     }
@@ -142,11 +160,7 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     ncnn::Net net;
     net.opt = opt;
     net.set_vulkan_device(vkdev);
-    if (net.load_param_mem(param) != 0)
-        return false;
-    const unsigned char* empty_model = nullptr;
-    ncnn::DataReaderFromMemory model_reader(empty_model);
-    if (net.load_model(model_reader) != 0)
+    if (!load_sampler_graph(net, param, profile))
         return false;
 
     ncnn::Extractor extractor = net.create_extractor();
@@ -156,12 +170,12 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
     if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("positive", positive_output) != 0 ||
         extractor.input("negative", negative_output) != 0 ||
         extractor.input("sample", *sample_input) != 0 || extractor.extract("updated", graph_output, compute) != 0 ||
-        compute.submit_and_wait() != 0)
+        submit_and_wait_profiled(compute, profile) != 0)
         return false;
 
     ncnn::VkCompute clone(vkdev);
     clone.record_clone(graph_output, updated_sample, net.opt);
-    return clone.submit_and_wait() == 0;
+    return submit_and_wait_profiled(clone, profile) == 0;
 }
 
 bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
@@ -170,7 +184,8 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
                                ncnn::VulkanDevice* vkdev,
                                ncnn::VkAllocator* blob_allocator,
                                ncnn::VkAllocator* staging_allocator,
-                               ncnn::VkMat& updated_sample)
+                               ncnn::VkMat& updated_sample,
+                               const PerformanceProfile* profile)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || prediction.empty() || sample.empty() ||
         prediction.elempack != 1 || !std::isfinite(normalized_delta))
@@ -194,7 +209,7 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
     {
         ncnn::VkCompute unpack(vkdev);
         vkdev->convert_packing(sample, unpacked_sample, 1, unpack, opt);
-        if (unpacked_sample.empty() || unpack.submit_and_wait() != 0)
+        if (unpacked_sample.empty() || submit_and_wait_profiled(unpack, profile) != 0)
             return false;
         sample_input = &unpacked_sample;
     }
@@ -219,11 +234,7 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
     ncnn::Net net;
     net.opt = opt;
     net.set_vulkan_device(vkdev);
-    if (net.load_param_mem(param) != 0)
-        return false;
-    const unsigned char* empty_model = nullptr;
-    ncnn::DataReaderFromMemory model_reader(empty_model);
-    if (net.load_model(model_reader) != 0)
+    if (!load_sampler_graph(net, param, profile))
         return false;
 
     ncnn::Extractor extractor = net.create_extractor();
@@ -232,12 +243,13 @@ bool apply_v_lerp_euler_vulkan(const ncnn::VkMat& prediction,
     ncnn::VkMat graph_output;
     if (!prepare_ncnn_layer_benchmark(compute, net) || extractor.input("prediction", prediction) != 0 ||
         extractor.input("sample", *sample_input) != 0 ||
-        extractor.extract("updated", graph_output, compute) != 0 || compute.submit_and_wait() != 0)
+        extractor.extract("updated", graph_output, compute) != 0 ||
+        submit_and_wait_profiled(compute, profile) != 0)
         return false;
 
     ncnn::VkCompute clone(vkdev);
     clone.record_clone(graph_output, updated_sample, net.opt);
-    return clone.submit_and_wait() == 0;
+    return submit_and_wait_profiled(clone, profile) == 0;
 }
 
 } // namespace seedvr2

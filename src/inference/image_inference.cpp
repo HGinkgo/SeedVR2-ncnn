@@ -369,8 +369,9 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
     {
         const ProfileScope scope(profile, "vae-encode-upload", frame_index);
         ncnn::VkCompute compute(context.vkdev);
+        profile.record_runtime_upload();
         compute.record_upload(sample, sample_gpu, encode_opt);
-        if (compute.submit_and_wait() != 0)
+        if (submit_and_wait_profiled(compute, &profile) != 0)
         {
             error = "frame=" + std::to_string(frame_index) + " " +
                     format_vulkan_stage_error("input-upload", context.diagnostics,
@@ -390,7 +391,7 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
             return false;
         }
         if (extractor.input("in0", sample_gpu) != 0 || extractor.extract("out0", latent_gpu, compute) != 0 ||
-            compute.submit_and_wait() != 0)
+            submit_and_wait_profiled(compute, &profile) != 0)
         {
             error = "frame=" + std::to_string(frame_index) + " " +
                     format_vulkan_stage_error("vae-encode", context.diagnostics,
@@ -402,8 +403,9 @@ bool run_encode_tile_vulkan(const ncnn::Mat& sample,
     {
         const ProfileScope scope(profile, "vae-encode-download", frame_index);
         ncnn::VkCompute compute(context.vkdev);
+        profile.record_runtime_download();
         compute.record_download(latent_gpu, latent, encode_opt);
-        if (compute.submit_and_wait() != 0 || latent.empty())
+        if (submit_and_wait_profiled(compute, &profile) != 0 || latent.empty())
         {
             error = "frame=" + std::to_string(frame_index) + " " +
                     format_vulkan_stage_error("vae-encode", context.diagnostics,
@@ -426,8 +428,9 @@ bool run_decode_tile_vulkan(const ncnn::Mat& latent,
     {
         const ProfileScope scope(profile, "vae-decode-upload", frame_index);
         ncnn::VkCompute compute(context.vkdev);
+        profile.record_runtime_upload();
         compute.record_upload(latent, latent_gpu, decode.opt);
-        if (compute.submit_and_wait() != 0)
+        if (submit_and_wait_profiled(compute, &profile) != 0)
         {
             error = "frame=" + std::to_string(frame_index) + " " +
                     format_vulkan_stage_error("handoff-latent", context.diagnostics,
@@ -438,6 +441,7 @@ bool run_decode_tile_vulkan(const ncnn::Mat& latent,
     const ProfileScope extract_scope(profile, "vae-decode-extract-download", frame_index);
     ncnn::Extractor extractor = decode.create_extractor();
     extractor.set_light_mode(vae_graph_uses_light_mode(context.vae_graph_mode));
+    profile.record_runtime_download();
     if (extractor.input("in0", latent_gpu) != 0 || extractor.extract("out0", reconstruction) != 0)
     {
         error = "frame=" + std::to_string(frame_index) + " " +
@@ -780,6 +784,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
                                   const ResolutionPlan& plan,
                                   VulkanInferenceContext& context,
                                   DitStackSession& dit,
+                                  const PerformanceProfile& profile,
                                   ncnn::VkMat& output_latent_gpu,
                                   const char*& failed_stage)
 {
@@ -797,7 +802,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         std::fprintf(stderr, "stage=dit-input-patchify step=%zu\n", step_index);
         if (!make_dit_input_patches_gpu(current_latent_gpu, condition_gpu, plan, context.vkdev,
                                         context.dit_blob_allocator, context.dit_staging_allocator,
-                                        input_patches_gpu, context.pipeline_cache.get()))
+                                        input_patches_gpu, context.pipeline_cache.get(), &profile))
         {
             failed_stage = "dit-input-patchify";
             return false;
@@ -816,7 +821,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         std::fprintf(stderr, "stage=noise-patchify step=%zu\n", step_index);
         if (!patch_latent_for_dit_output_gpu(current_latent_gpu, plan, context.vkdev,
                                              context.dit_blob_allocator, context.dit_staging_allocator,
-                                             sample_patches_gpu, context.pipeline_cache.get()))
+                                             sample_patches_gpu, context.pipeline_cache.get(), &profile))
         {
             failed_stage = "noise-patchify";
             return false;
@@ -828,7 +833,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         std::fprintf(stderr, "stage=v-lerp-euler step=%zu\n", step_index);
         if (!apply_v_lerp_euler_vulkan(prediction_gpu, sample_patches_gpu, normalized_delta, context.vkdev,
                                        context.dit_blob_allocator, context.dit_staging_allocator,
-                                       updated_patches_gpu))
+                                       updated_patches_gpu, &profile))
         {
             failed_stage = "v-lerp-euler";
             return false;
@@ -838,7 +843,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         std::fprintf(stderr, "stage=latent-unpatch step=%zu\n", step_index);
         if (!unpatch_dit_output_gpu(updated_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
                                     context.dit_staging_allocator, updated_latent_gpu,
-                                    context.pipeline_cache.get()))
+                                    context.pipeline_cache.get(), &profile))
         {
             failed_stage = "latent-unpatch";
             return false;
@@ -887,10 +892,12 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             ncnn::VkMat noise_gpu;
             {
                 ncnn::VkCompute compute(context.vkdev);
+                profile.record_runtime_upload();
+                profile.record_runtime_upload();
                 compute.record_upload(condition_latents[frame_index], condition_gpu, dit_opt);
                 compute.record_upload(noise, noise_gpu, dit_opt);
                 std::fprintf(stderr, "stage=noise-upload\n");
-                if (compute.submit_and_wait() != 0)
+                if (submit_and_wait_profiled(compute, &profile) != 0)
                 {
                     stage_error(frame_index, "noise-upload", "Vulkan command submission returned failure");
                     return false;
@@ -904,7 +911,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 std::fprintf(stderr, "stage=dit-input-patchify\n");
                 if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
                                                 context.dit_blob_allocator, context.dit_staging_allocator,
-                                                input_patches_gpu, context.pipeline_cache.get()))
+                                                input_patches_gpu, context.pipeline_cache.get(), &profile))
                 {
                     stage_error(frame_index, "dit-input-patchify", "GPU patch assembly returned failure");
                     return false;
@@ -923,7 +930,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 std::fprintf(stderr, "stage=noise-patchify\n");
                 if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev, context.dit_blob_allocator,
                                                      context.dit_staging_allocator, noise_patches_gpu,
-                                                     context.pipeline_cache.get()))
+                                                     context.pipeline_cache.get(), &profile))
                 {
                     stage_error(frame_index, "noise-patchify", "GPU patch assembly returned failure");
                     return false;
@@ -933,7 +940,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 std::fprintf(stderr, "stage=v-lerp-endpoint\n");
                 if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
                                                       context.dit_blob_allocator, context.dit_staging_allocator,
-                                                      endpoint_patches_gpu))
+                                                      endpoint_patches_gpu, &profile))
                 {
                     stage_error(frame_index, "v-lerp-endpoint", "GPU sampler endpoint returned failure");
                     return false;
@@ -942,7 +949,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 std::fprintf(stderr, "stage=latent-unpatch\n");
                 if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev, context.dit_blob_allocator,
                                             context.dit_staging_allocator, output_latent_gpu,
-                                            context.pipeline_cache.get()))
+                                            context.pipeline_cache.get(), &profile))
                 {
                     stage_error(frame_index, "latent-unpatch", "GPU patch removal returned failure");
                     return false;
@@ -951,7 +958,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             else
             {
                 const char* failed_stage = "sampling";
-                if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit,
+                if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, profile,
                                                   output_latent_gpu, failed_stage))
                 {
                     stage_error(frame_index, failed_stage, "GPU multi-step sampling returned failure");
@@ -963,8 +970,9 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             std::fprintf(stderr, "stage=handoff-latent\n");
             {
                 ncnn::VkCompute compute(context.vkdev);
+                profile.record_runtime_download();
                 compute.record_download(output_latent_gpu, output_latent, dit_opt);
-                if (compute.submit_and_wait() != 0 || output_latent.empty())
+                if (submit_and_wait_profiled(compute, &profile) != 0 || output_latent.empty())
                 {
                     stage_error(frame_index, "handoff-latent", "latent download returned failure");
                     return false;
@@ -1303,10 +1311,12 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         {
             const ProfileScope scope(profile, "dit-latent-upload", absolute_index);
             ncnn::VkCompute compute(context.vkdev);
+            profile.record_runtime_upload();
+            profile.record_runtime_upload();
             compute.record_upload(condition_latent, condition_gpu, dit_opt);
             compute.record_upload(noise, noise_gpu, dit_opt);
             std::fprintf(stderr, "stage=noise-upload\n");
-            if (compute.submit_and_wait() != 0)
+            if (submit_and_wait_profiled(compute, &profile) != 0)
             {
                 error = "frame=" + std::to_string(absolute_index) + " " +
                         format_vulkan_stage_error("noise-upload", context.diagnostics,
@@ -1324,7 +1334,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
                 const ProfileScope scope(profile, "dit-input-patchify", absolute_index);
                 if (!make_dit_input_patches_gpu(noise_gpu, condition_gpu, plan, context.vkdev,
                                                 context.dit_blob_allocator, context.dit_staging_allocator,
-                                                input_patches_gpu, context.pipeline_cache.get()))
+                                                input_patches_gpu, context.pipeline_cache.get(), &profile))
                 {
                     error = "frame=" + std::to_string(absolute_index) + " " +
                             format_vulkan_stage_error("dit-input-patchify", context.diagnostics,
@@ -1354,7 +1364,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
                 if (!patch_latent_for_dit_output_gpu(noise_gpu, plan, context.vkdev,
                                                      context.dit_blob_allocator,
                                                      context.dit_staging_allocator, noise_patches_gpu,
-                                                     context.pipeline_cache.get()))
+                                                     context.pipeline_cache.get(), &profile))
                 {
                     error = "frame=" + std::to_string(absolute_index) + " " +
                             format_vulkan_stage_error("noise-patchify", context.diagnostics,
@@ -1369,7 +1379,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
                 const ProfileScope scope(profile, "dit-sampler", absolute_index);
                 if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
                                                       context.dit_blob_allocator, context.dit_staging_allocator,
-                                                      endpoint_patches_gpu))
+                                                      endpoint_patches_gpu, &profile))
                 {
                     error = "frame=" + std::to_string(absolute_index) + " " +
                             format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
@@ -1383,7 +1393,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
                 const ProfileScope scope(profile, "dit-output-unpack", absolute_index);
                 if (!unpatch_dit_output_gpu(endpoint_patches_gpu, plan, context.vkdev,
                                             context.dit_blob_allocator, context.dit_staging_allocator,
-                                            output_latent_gpu, context.pipeline_cache.get()))
+                                            output_latent_gpu, context.pipeline_cache.get(), &profile))
                 {
                     error = "frame=" + std::to_string(absolute_index) + " " +
                             format_vulkan_stage_error("latent-unpatch", context.diagnostics,
@@ -1395,7 +1405,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         else
         {
             const char* failed_stage = "sampling";
-            if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit,
+            if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, profile,
                                               output_latent_gpu, failed_stage))
             {
                 error = "frame=" + std::to_string(absolute_index) + " " +
@@ -1410,8 +1420,9 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         {
             const ProfileScope scope(profile, "dit-latent-download", absolute_index);
             ncnn::VkCompute compute(context.vkdev);
+            profile.record_runtime_download();
             compute.record_download(output_latent_gpu, output_latent, dit_opt);
-            if (compute.submit_and_wait() != 0 || output_latent.empty())
+            if (submit_and_wait_profiled(compute, &profile) != 0 || output_latent.empty())
             {
                 error = "frame=" + std::to_string(absolute_index) + " " +
                         format_vulkan_stage_error("handoff-latent", context.diagnostics,

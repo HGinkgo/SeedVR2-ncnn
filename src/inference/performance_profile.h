@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace seedvr2
@@ -56,6 +57,14 @@ std::string format_profile_dit_load_line(const char* component, double elapsed_m
 // Aggregate ncnn model-load stages for the DiT stack, e.g.
 // `profile name=dit-ncnn-upload-submit ms=123.4`.
 std::string format_profile_dit_stage_line(const char* stage, double elapsed_ms);
+std::string format_profile_runtime_line(std::size_t graph_loads,
+                                        std::size_t transient_graph_loads,
+                                        double graph_load_ms,
+                                        double transient_graph_load_ms,
+                                        std::size_t submits,
+                                        double submit_ms,
+                                        std::size_t uploads,
+                                        std::size_t downloads);
 
 // Opt-in stage timing for the Vulkan product path.
 //
@@ -153,9 +162,50 @@ public:
     {
         if (enabled_)
         {
+            std::fprintf(stderr,
+                         "%s\n",
+                         format_profile_runtime_line(runtime_graph_loads_, runtime_transient_graph_loads_,
+                                                     runtime_graph_load_ms_, runtime_transient_graph_load_ms_,
+                                                     runtime_submits_, runtime_submit_ms_, runtime_uploads_,
+                                                     runtime_downloads_)
+                             .c_str());
             std::fprintf(stderr, "%s\n",
                          format_profile_total_line(elapsed_ms, peak_rss_mib()).c_str());
         }
+    }
+
+    void record_runtime_graph_load(bool transient, double elapsed_ms) const
+    {
+        if (!enabled_)
+            return;
+        ++runtime_graph_loads_;
+        runtime_graph_load_ms_ += elapsed_ms;
+        if (transient)
+        {
+            ++runtime_transient_graph_loads_;
+            runtime_transient_graph_load_ms_ += elapsed_ms;
+        }
+    }
+
+    void record_runtime_submit(double elapsed_ms) const
+    {
+        if (enabled_)
+        {
+            ++runtime_submits_;
+            runtime_submit_ms_ += elapsed_ms;
+        }
+    }
+
+    void record_runtime_upload() const
+    {
+        if (enabled_)
+            ++runtime_uploads_;
+    }
+
+    void record_runtime_download() const
+    {
+        if (enabled_)
+            ++runtime_downloads_;
     }
 
     // Peak resident host memory in MiB, or 0 when the platform cannot report it.
@@ -166,6 +216,14 @@ public:
 
 private:
     bool enabled_ = false;
+    mutable std::size_t runtime_graph_loads_ = 0;
+    mutable std::size_t runtime_transient_graph_loads_ = 0;
+    mutable double runtime_graph_load_ms_ = 0.0;
+    mutable double runtime_transient_graph_load_ms_ = 0.0;
+    mutable std::size_t runtime_submits_ = 0;
+    mutable double runtime_submit_ms_ = 0.0;
+    mutable std::size_t runtime_uploads_ = 0;
+    mutable std::size_t runtime_downloads_ = 0;
 };
 
 // RAII helper that reports the elapsed time of a scope on destruction.
