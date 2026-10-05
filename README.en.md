@@ -24,7 +24,7 @@ The comparison GIF shows the `64x64` input on the left and the ncnn Vulkan `256x
   <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
 </video>
 
-The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [output video](assets/showcase-video-output-256.avi) are included. The input is made by bilinearly downsampling the first 36 frames of the official `256x256` example video to `64x64`. Input SHA256: `3dd09c43e867587e329bace29b71ecde09ce444789892ab1c939495b9e1c8f0a`; output SHA256: `75c8e8be2e11b7c19f001872e46ba45b6a91cc116bf19f9e7ac58c849bfd0114`. This file showcases the ncnn Vulkan inference output and is not an independent video-quality acceptance result.
+The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [output video](assets/showcase-video-output-256.avi) are included. The input is made by bilinearly downsampling the first 36 frames of the official `256x256` example video to `64x64`. This file showcases the ncnn Vulkan inference output and is not an independent video-quality acceptance result.
 
 ## Features
 
@@ -82,8 +82,6 @@ Fixed-input regression environment: RTX 3090, driver `580.95.05`, ncnn
 The `256x256 / 36-frame` baseline is `660.7 s` video-batch time, `664.8 s`
 end-to-end time, and `1515 MiB` peak RSS. This is a performance baseline,
 not a cross-engine comparison or a video-quality acceptance result.
-
-Model manifest SHA256: `a4285a52f34b05408877ffcb97e98a6fccfebea38b636260d1b11fe93cbecee5`.
 
 ## Build
 

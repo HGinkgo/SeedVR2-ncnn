@@ -24,7 +24,7 @@
   <source src="assets/showcase-video-output-256.avi" type="video/x-msvideo">
 </video>
 
-完整[输入视频](assets/showcase-video-input-64.avi)和 ncnn Vulkan [输出视频](assets/showcase-video-output-256.avi)均已提供。输入由官方 `256x256` 示例视频前 36 帧双线性降采样到 `64x64`，输入 SHA256 为 `3dd09c43e867587e329bace29b71ecde09ce444789892ab1c939495b9e1c8f0a`，输出 SHA256 为 `75c8e8be2e11b7c19f001872e46ba45b6a91cc116bf19f9e7ac58c849bfd0114`。该视频用于展示 ncnn Vulkan 推理产物，不作为独立的画质验收结论。
+完整[输入视频](assets/showcase-video-input-64.avi)和 ncnn Vulkan [输出视频](assets/showcase-video-output-256.avi)均已提供。输入由官方 `256x256` 示例视频前 36 帧双线性降采样到 `64x64`。该视频用于展示 ncnn Vulkan 推理产物，不作为独立的画质验收结论。
 
 ## Features
 
@@ -77,8 +77,6 @@ tools/with-nvidia-vulkan-runtime.sh \
 | `256x256` | verified | verified, 36 frames |
 
 `256x256 / 36 frames` baseline：video batch `660.7 s`、end-to-end `664.8 s`、peak RSS `1515 MiB`。这是性能基线，不是跨引擎对比，也不代表视频画质验收。
-
-模型 manifest SHA256：`a4285a52f34b05408877ffcb97e98a6fccfebea38b636260d1b11fe93cbecee5`。
 
 ## Build
 
