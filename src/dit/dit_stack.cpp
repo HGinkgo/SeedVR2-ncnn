@@ -586,63 +586,6 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
     return is_plan_latent(latent, plan);
 }
 
-bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       const ResolutionPlan& plan,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu)
-{
-    if (latent_input.empty() || (latent_input.dims != 3 && latent_input.dims != 4) || latent_input.d != 1 ||
-        latent_input.c != kLatentChannels || latent_input.w != plan.latent_width || latent_input.h != plan.latent_height ||
-        latent_input.elemsize != 4u || !vkdev || !blob_allocator || !staging_allocator)
-        return false;
-
-    ncnn::Mat patches(kVideoPatchWidth, plan.video_tokens);
-    if (patches.empty())
-        return false;
-    patches.fill(0.f);
-    for (int patch_y = 0; patch_y < plan.latent_height / kPatchSize; patch_y++)
-        for (int patch_x = 0; patch_x < plan.latent_width / kPatchSize; patch_x++)
-        {
-            const int token = patch_y * (plan.latent_width / kPatchSize) + patch_x;
-            float* output = patches.row(token);
-            for (int dy = 0; dy < kPatchSize; dy++)
-                for (int dx = 0; dx < kPatchSize; dx++)
-                    for (int channel = 0; channel < kLatentChannels; channel++)
-                    {
-                        const int offset = (dy * kPatchSize + dx) * kLatentChannels + channel;
-                        output[offset] = latent_input.channel(channel).row(patch_y * kPatchSize + dy)[patch_x * kPatchSize + dx];
-                    }
-            for (int offset = kLatentChannels; offset < kVideoPatchWidth; offset++)
-                output[offset] = offset == kVideoPatchWidth - 1 ? 1.f : 0.f;
-        }
-
-    ncnn::Option opt;
-    opt.use_vulkan_compute = true;
-    opt.use_packing_layout = false;
-    opt.use_bf16_packed = true;
-    opt.use_bf16_storage = true;
-    opt.use_fp16_packed = false;
-    opt.use_fp16_storage = false;
-    opt.use_fp16_arithmetic = false;
-    opt.blob_vkallocator = blob_allocator;
-    opt.workspace_vkallocator = blob_allocator;
-    opt.staging_vkallocator = staging_allocator;
-    ncnn::VkMat patches_gpu;
-    {
-        ncnn::VkCompute compute(vkdev);
-        compute.record_upload(patches, patches_gpu, opt);
-        if (submit_and_wait_profiled(compute, nullptr) != 0)
-            return false;
-    }
-    return run_dit_stack_gpu(patches_gpu, text, timestep_value, stack_dir, plan, vkdev, blob_allocator,
-                             staging_allocator, output_matrix_gpu);
-}
-
 bool DitStackSession::run(const ncnn::VkMat& input_patches,
                           const ncnn::Mat& text,
                           float timestep_value,
@@ -670,7 +613,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     ncnn::VkMat input_patches_pack1;
     if (!unpack_gpu_to_pack1(input_patches, vkdev, input_opt, input_patches_pack1, impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: input patch unpacking failed\n");
+        std::fprintf(stderr, "DitStackSession::run: input patch unpacking failed\n");
         return false;
     }
 
@@ -679,7 +622,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         text.w != kTextInputWidth || (text.h != 58 && text.h != 64) || text.elemsize != 4u)
     {
         std::fprintf(stderr,
-                     "run_dit_stack_gpu: invalid dynamic stack input patches=%d:%dx%dx%dx%d pack=%d elem=%zu "
+                     "DitStackSession::run: invalid dynamic stack input patches=%d:%dx%dx%dx%d pack=%d elem=%zu "
                      "text=%d:%dx%d elem=%zu tokens=%d\n",
                      input_patches_pack1.dims, input_patches_pack1.w, input_patches_pack1.h, input_patches_pack1.d,
                      input_patches_pack1.c, input_patches_pack1.elempack, input_patches_pack1.elemsize, text.dims,
@@ -705,7 +648,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
             extractor.extract("out1", text_packed, compute) != 0 ||
             submit_and_wait_profiled(compute, impl_->profile) != 0)
         {
-            std::fprintf(stderr, "run_dit_stack_gpu: dit_input execution failed\n");
+            std::fprintf(stderr, "DitStackSession::run: dit_input execution failed\n");
             return false;
         }
     }
@@ -714,7 +657,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     if (!unpack_to_pack1(packing, video_packed, vkdev, video_matrix, impl_->profile) ||
         !unpack_to_pack1(packing, text_packed, vkdev, text_matrix, impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: input unpacking failed\n");
+        std::fprintf(stderr, "DitStackSession::run: input unpacking failed\n");
         return false;
     }
 
@@ -725,7 +668,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         !matrix_to_batch_gpu(text_matrix, text.h, vkdev, dit_input.opt, blob_allocator, text_gpu,
                              impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: input batch conversion failed\n");
+        std::fprintf(stderr, "DitStackSession::run: input batch conversion failed\n");
         return false;
     }
 
@@ -739,7 +682,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         upload.record_upload(timestep, timestep_gpu, dit_embedding.opt);
         if (submit_and_wait_profiled(upload, impl_->profile) != 0 || extractor.input("in0", timestep_gpu) != 0)
         {
-            std::fprintf(stderr, "run_dit_stack_gpu: timestep upload failed\n");
+            std::fprintf(stderr, "DitStackSession::run: timestep upload failed\n");
             return false;
         }
         ncnn::VkCompute compute(vkdev);
@@ -747,14 +690,14 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
             extractor.extract("out0", embedding_packed, compute) != 0 ||
             submit_and_wait_profiled(compute, impl_->profile) != 0)
         {
-            std::fprintf(stderr, "run_dit_stack_gpu: timestep embedding failed\n");
+            std::fprintf(stderr, "DitStackSession::run: timestep embedding failed\n");
             return false;
         }
     }
     ncnn::VkMat embedding_gpu;
     if (!unpack_to_pack1(packing, embedding_packed, vkdev, embedding_gpu, impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: embedding unpacking failed\n");
+        std::fprintf(stderr, "DitStackSession::run: embedding unpacking failed\n");
         return false;
     }
 
@@ -778,7 +721,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
             video_output_status != 0 || text_output_status != 0 || submit_status != 0)
         {
             std::fprintf(stderr,
-                         "run_dit_stack_gpu: block %d execution failed in=%d/%d/%d out=%d/%d submit=%d\n",
+                         "DitStackSession::run: block %d execution failed in=%d/%d/%d out=%d/%d submit=%d\n",
                          block_index, video_input_status, text_input_status, embedding_input_status,
                          video_output_status, text_output_status, submit_status);
             return false;
@@ -791,14 +734,14 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     ncnn::VkMat video_unpacked;
     if (!unpack_to_pack1(packing, video_gpu, vkdev, video_unpacked, impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: final video unpacking failed\n");
+        std::fprintf(stderr, "DitStackSession::run: final video unpacking failed\n");
         return false;
     }
     ncnn::VkMat video_matrix_final;
     if (!batch_to_matrix_gpu(video_unpacked, vkdev, dit_output.opt, blob_allocator, video_matrix_final,
                              impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: final batch conversion failed\n");
+        std::fprintf(stderr, "DitStackSession::run: final batch conversion failed\n");
         return false;
     }
 
@@ -811,31 +754,16 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
             extractor.extract("out0", output_packed, compute) != 0 ||
             submit_and_wait_profiled(compute, impl_->profile) != 0)
         {
-            std::fprintf(stderr, "run_dit_stack_gpu: output graph execution failed\n");
+            std::fprintf(stderr, "DitStackSession::run: output graph execution failed\n");
             return false;
         }
     }
     if (!unpack_to_pack1(packing, output_packed, vkdev, output_matrix_gpu, impl_->profile))
     {
-        std::fprintf(stderr, "run_dit_stack_gpu: output unpacking failed\n");
+        std::fprintf(stderr, "DitStackSession::run: output unpacking failed\n");
         return false;
     }
     return true;
-}
-
-bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       const ResolutionPlan& plan,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu)
-{
-    DitStackSession session;
-    return DitStackSession::open(stack_dir, plan, vkdev, blob_allocator, staging_allocator, session) &&
-           session.run(input_patches, text, timestep_value, plan, output_matrix_gpu);
 }
 
 } // namespace seedvr2

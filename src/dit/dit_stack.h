@@ -79,26 +79,4 @@ bool unpatch_dit_output_gpu(const ncnn::VkMat& patches,
                             ncnn::PipelineCache* pipeline_cache = nullptr,
                             const PerformanceProfile* profile = nullptr);
 
-bool run_dit_stack_gpu(const ncnn::VkMat& input_patches,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       const ResolutionPlan& plan,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu);
-
-// Latent-layout bridge for callers that still hold a CPU ncnn::Mat. Product
-// callers should assemble input patches on GPU with make_dit_input_patches_gpu.
-bool run_dit_stack_gpu(const ncnn::Mat& latent_input,
-                       const ncnn::Mat& text,
-                       float timestep_value,
-                       const std::string& stack_dir,
-                       const ResolutionPlan& plan,
-                       ncnn::VulkanDevice* vkdev,
-                       ncnn::VkAllocator* blob_allocator,
-                       ncnn::VkAllocator* staging_allocator,
-                       ncnn::VkMat& output_matrix_gpu);
-
 } // namespace seedvr2

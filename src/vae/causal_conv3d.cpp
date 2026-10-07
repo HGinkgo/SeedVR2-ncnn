@@ -7,6 +7,7 @@
 #include "gpu.h"
 #include "layer/vulkan/shader/causal_conv3d.comp.hex.h"
 #include "layer/vulkan/shader/causal_conv3d_oc4.comp.hex.h"
+#include "layer/vulkan/shader/causal_conv3d_oc8.comp.hex.h"
 #endif
 
 #include "layer/fused_activation.h"
@@ -58,6 +59,34 @@ bool SeedVR2CausalConv3D::supports_output_channel4() const
            pad_right == 1 && pad_top == 1 && pad_bottom == 1 && pad_front == 0 && pad_behind == 0 &&
            prepend_ == 2 && pad_value == 0.f && activation_type == 0;
 }
+
+#if NCNN_VULKAN
+bool SeedVR2CausalConv3D::supports_output_channel8() const
+{
+    if (!supports_output_channel4())
+        return false;
+
+    const size_t input_channels = static_cast<size_t>(weight_data_size) /
+                                  (static_cast<size_t>(num_output) * 27u);
+    if (name == "conv3d_20")
+        return num_output == 512 && input_channels == 512;
+    if (name == "conv3d_29")
+        return num_output == 256 && input_channels == 256;
+    return false;
+}
+
+bool SeedVR2CausalConv3D::supports_output_channel8(const ncnn::VkMat& bottom_blob) const
+{
+    if (!supports_output_channel8())
+        return false;
+
+    if (name == "conv3d_20")
+        return bottom_blob.w == 128 && bottom_blob.h == 128 && bottom_blob.d == 4 && bottom_blob.c == 512;
+    if (name == "conv3d_29")
+        return bottom_blob.w == 256 && bottom_blob.h == 256 && bottom_blob.d == 4 && bottom_blob.c == 256;
+    return false;
+}
+#endif
 
 int SeedVR2CausalConv3D::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_blob,
                                   const ncnn::Option& opt) const
@@ -191,6 +220,16 @@ int SeedVR2CausalConv3D::create_pipeline(const ncnn::Option& opt)
         pipeline_ = nullptr;
         return -1;
     }
+    if (supports_output_channel8() &&
+        !create_pipeline(causal_conv3d_oc8_comp_data, sizeof(causal_conv3d_oc8_comp_data),
+                         output_channel8_pipeline_, 1))
+    {
+        delete pipeline_;
+        pipeline_ = nullptr;
+        delete output_channel4_pipeline_;
+        output_channel4_pipeline_ = nullptr;
+        return -1;
+    }
     return 0;
 }
 
@@ -200,6 +239,8 @@ int SeedVR2CausalConv3D::destroy_pipeline(const ncnn::Option& /*opt*/)
     pipeline_ = 0;
     delete output_channel4_pipeline_;
     output_channel4_pipeline_ = 0;
+    delete output_channel8_pipeline_;
+    output_channel8_pipeline_ = 0;
     weight_data_gpu = ncnn::VkMat();
     bias_data_gpu = ncnn::VkMat();
     return 0;
@@ -237,7 +278,9 @@ int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& to
     if (top_blob.empty())
         return -100;
 
-    const bool use_output_channel4 = output_channel4_pipeline_ != nullptr && supports_output_channel4();
+    const bool use_output_channel8 = output_channel8_pipeline_ != nullptr && supports_output_channel8(bottom_blob);
+    const bool use_output_channel4 = !use_output_channel8 &&
+                                     output_channel4_pipeline_ != nullptr && supports_output_channel4();
     std::vector<ncnn::VkMat> bindings(4);
     bindings[0] = bottom_blob;
     bindings[1] = top_blob;
@@ -278,8 +321,11 @@ int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& to
     ncnn::VkMat dispatcher;
     dispatcher.w = output_width;
     dispatcher.h = output_height * output_depth;
-    dispatcher.c = use_output_channel4 ? (num_output + 3) / 4 : num_output;
-    cmd.record_pipeline(use_output_channel4 ? output_channel4_pipeline_ : pipeline_, bindings, constants, dispatcher);
+    dispatcher.c = use_output_channel8 ? (num_output + 7) / 8 :
+                   use_output_channel4 ? (num_output + 3) / 4 : num_output;
+    cmd.record_pipeline(use_output_channel8 ? output_channel8_pipeline_ :
+                        use_output_channel4 ? output_channel4_pipeline_ : pipeline_,
+                        bindings, constants, dispatcher);
     return 0;
 }
 #endif

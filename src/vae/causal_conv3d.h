@@ -22,6 +22,10 @@ public:
 
 private:
     bool supports_output_channel4() const;
+#if NCNN_VULKAN
+    bool supports_output_channel8() const;
+    bool supports_output_channel8(const ncnn::VkMat& bottom_blob) const;
+#endif
 
     int prepend_ = 0;
 
@@ -30,6 +34,7 @@ private:
     ncnn::VkMat bias_data_gpu;
     ncnn::Pipeline* pipeline_ = 0;
     ncnn::Pipeline* output_channel4_pipeline_ = 0;
+    ncnn::Pipeline* output_channel8_pipeline_ = 0;
 #endif
 };
 
