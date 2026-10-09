@@ -32,7 +32,9 @@ The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [
 - Linux NVIDIA Vulkan with BF16 storage and FP32 accumulation where required.
 - PNG/JPEG images and RGB24 AVI video.
 - Validated fixed targets: `128x128`, `128x256`, and `256x256`.
+- Current optimization acceptance targets RTX 3090, one GPU, fixed `256x256` BF16 Vulkan.
 - One-step Euler is the default; multi-step sampling and VAE tiling are experimental.
+- Output uses reference-guided color reconstruction, retaining generated high-frequency detail while rebuilding low-frequency color from the input.
 
 ## Quick Start
 
@@ -56,8 +58,7 @@ Image:
 Video:
 
 ```bash
-tools/with-nvidia-vulkan-runtime.sh \
-  ./seedvr2-ncnn \
+./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
@@ -68,10 +69,16 @@ tools/with-nvidia-vulkan-runtime.sh \
 
 This processes the first 36 input frames and writes an RGB24 AVI. Omit `--frames` to process the whole video. The default build supports AVI; compressed video input requires a build with `-DSEEDVR2_ENABLE_FFMPEG=ON`. The runtime does not require Python, PyTorch, or CUDA. Use `--help` for all options.
 
-## Validation
+Set `SEEDVR2_PIPELINE_CACHE_PATH` to enable persistent Vulkan pipeline caching. A matching cache helps repeated image startup; a missing or incompatible cache is rebuilt:
 
-Fixed-input regression environment: RTX 3090, driver `580.95.05`, ncnn
-`c6b351b56fbe32e0381ae00331e3df649b20d7b7`, BF16 Vulkan.
+```bash
+mkdir -p "$HOME/.cache/seedvr2-ncnn"
+SEEDVR2_PIPELINE_CACHE_PATH="$HOME/.cache/seedvr2-ncnn/pipeline.cache" \
+  ./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png --gpu-id 0
+```
+
+## Validation
 
 | Target | Image | AVI |
 | --- | --- | --- |
@@ -79,31 +86,50 @@ Fixed-input regression environment: RTX 3090, driver `580.95.05`, ncnn
 | `128x256` | verified | - |
 | `256x256` | verified | verified, 36 frames |
 
-The `256x256 / 36-frame` baseline is `660.7 s` video-batch time, `664.8 s`
-end-to-end time, and `1515 MiB` peak RSS. This is a performance baseline,
-not a cross-engine comparison or a video-quality acceptance result.
+The fixed `256x256` path retains three optimizations: Vulkan pointwise Conv3D
+for five decoder nodes, OC8 output-channel reuse for two causal Conv3D nodes,
+and DiT intermediate tensor lifetime and in-place reuse.
+
+The latest runtime comparison measures `343.65 s -> 337.07 s` for one 36-frame
+pair, with `3.55%` lower DiT stage latency and byte-identical output. Per-block
+peak live temporary memory falls by `84.6%`; whole-video peak GPU memory is
+unchanged. See [performance and validation](docs/performance.md) for the separate
+frozen baselines. These gains cannot be added or directly compared with older
+end-to-end timings.
 
 ## Build
 
-CPU:
+Use a C++17 compiler, CMake, Vulkan development files, and the pinned ncnn
+submodule:
 
 ```bash
+git submodule update --init --recursive
 cmake -S . -B build \
-  -DSEEDVR2_ENABLE_VULKAN=OFF \
+  -DSEEDVR2_ENABLE_VULKAN=ON \
+  -DNCNN_BATCH=ON \
+  -DNCNN_BF16=ON \
+  -DNCNN_BENCHMARK=OFF \
   -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
+cmake --build build --target seedvr2-ncnn --parallel
 ```
 
-Vulkan:
+The model directory must be the complete dynamic package, containing
+`manifest.sha256` with 75 entries and no symbolic links. Pass that directory
+to `--model-dir`.
+
+Inside this source workspace, use the prepared NVIDIA runtime:
 
 ```bash
-cmake -S . -B build-vulkan \
-  -DSEEDVR2_ENABLE_VULKAN=ON \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vulkan --parallel
+tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png \
+  --width 256 --height 256 --gpu-id 0
 ```
 
-Compressed video input additionally requires `-DSEEDVR2_ENABLE_FFMPEG=ON`.
+The helper selects NVIDIA user-space libraries from the ignored `runtime/`
+directory. Downloaded runtime packages use their own `./seedvr2-ncnn` launcher.
+Compressed video input additionally requires FFmpeg development files and
+`-DSEEDVR2_ENABLE_FFMPEG=ON`. The ModelScope CLI is only a download tool, not an
+inference dependency.
 
 ## Scope
 

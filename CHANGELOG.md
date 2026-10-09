@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Focuses the active product path and CI/package tooling on Linux x86_64 NVIDIA
+  Vulkan with BF16 storage and FP32 accumulation where required.
+- Replaces five fixed-256 decoder pointwise Conv3D CPU nodes with local Vulkan
+  execution and retains OC8 causal Conv3D kernels for two measured nodes.
+- Enables ncnn Extractor light mode for fixed-256 DiT tensor lifetime and
+  in-place reuse; actual single-frame and 36-frame outputs remain byte-identical
+  against the frozen pre-change runtime.
+- Adds optional persistent Vulkan pipeline caching for image startup.
+- Documents scoped performance results, distinct baselines, and validation
+  limits; provides paired 64x64 input and 256x256 output showcase assets.
+
+Older entries below describe the configuration of their historical releases.
+
 ## 0.1.2
 
 This release closes the low-resolution Vulkan product path and refreshes the

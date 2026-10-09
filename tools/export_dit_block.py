@@ -179,6 +179,7 @@ def rewrite_ncnn_param(
     windows: Sequence[int] = DIT_BLOCK_CONTRACT.window_shape,
     text_tokens: int = DIT_BLOCK_CONTRACT.text_tokens,
     shifted: bool = False,
+    pack_ordinal: int | None = None,
 ) -> None:
     """Replace the traced static AWA and MMRoPE boundaries with custom layers.
 
@@ -235,8 +236,6 @@ def rewrite_ncnn_param(
         ):
             replacements = {
                 "1": str(int(text_tokens)),
-                "12": "233",
-                "13": "0",
             }
             for parameter, value in replacements.items():
                 prefix = f"{parameter}="
@@ -253,8 +252,39 @@ def rewrite_ncnn_param(
             and "12=233" in fields
             and "13=1" in fields
         ):
-            return " ".join("13=0" if field == "13=1" else field for field in fields)
+            return " ".join(
+                field
+                for field in fields
+                if not field.startswith(("12=", "13="))
+            )
         return line
+
+    def fix_unbind_axis(line: str) -> str:
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "Slice" and fields[1].startswith("unbind_"):
+            for index, field in enumerate(fields):
+                if field == "1=0":
+                    fields[index] = "1=1"
+                    break
+        return " ".join(fields)
+
+    def count_ncnn_blobs(layer_lines: Sequence[str]) -> int:
+        known_blobs: set[str] = set()
+        blob_count = 0
+        for line in layer_lines:
+            fields = line.split()
+            bottom_count = int(fields[2])
+            top_count = int(fields[3])
+            bottoms = fields[4 : 4 + bottom_count]
+            tops = fields[4 + bottom_count : 4 + bottom_count + top_count]
+            for bottom in bottoms:
+                if bottom not in known_blobs:
+                    known_blobs.add(bottom)
+                    blob_count += 1
+            for top in tops:
+                known_blobs.add(top)
+                blob_count += 1
+        return blob_count
 
     layers = [parse_layer(line) for line in lines[2:]]
 
@@ -272,7 +302,17 @@ def rewrite_ncnn_param(
             if "=" in field and field.split("=", 1)[0].isdigit()
         }
         video_tokens = custom_params.get(0, int(size[0])) * custom_params.get(1, int(size[1])) * custom_params.get(2, int(size[2]))
-        existing_index = next((index for index, layer in enumerate(current_layers) if layer.name == "reshape_awa_video_batch"), None)
+        existing_index = next(
+            (
+                index
+                for index, layer in enumerate(current_layers)
+                if layer.layer_type == "Reshape"
+                and layer.name.startswith("reshape_awa_video_batch")
+                and layer.tops
+                and layer.tops[0].startswith("awa_video_batch")
+            ),
+            None,
+        )
         if existing_index is not None:
             fields = current_layers[existing_index].line.split()
             for index, field in enumerate(fields):
@@ -283,7 +323,7 @@ def rewrite_ncnn_param(
         else:
             consumer_index = next(
                 (index for index, layer in enumerate(current_layers)
-                 if layer.layer_type == "InnerProduct" and video_blob in layer.bottoms),
+                 if layer.layer_type in {"InnerProduct", "Gemm"} and video_blob in layer.bottoms),
                 None,
             )
             if consumer_index is None:
@@ -305,9 +345,8 @@ def rewrite_ncnn_param(
                     updated.append(" ".join(fields))
                 else:
                     updated.append(layer.line)
-            updated_nodes = [parse_layer(line) for line in updated[2:]]
-            blob_count = len({top for layer in updated_nodes for top in layer.tops})
-            updated[1] = f"{len(updated_nodes)} {blob_count}"
+            blob_count = count_ncnn_blobs(updated[2:])
+            updated[1] = f"{len(updated) - 2} {blob_count}"
         return [
             line if index < 2 else fix_text_batch_axis(line, text_blob)
             for index, line in enumerate(updated)
@@ -320,21 +359,25 @@ def rewrite_ncnn_param(
     }
     existing_custom = [layer for layer in layers if layer.layer_type in custom_layer_types]
     existing_types = {layer.layer_type for layer in existing_custom}
+    remaining_pack_indices = find_awa_pack_indices(param_path)
     if len(existing_custom) == 2 and existing_types == {
         "SeedVR2AWAPack",
         "SeedVR2AWAUnpack",
     }:
-        fixed_lines = [fix_text_batch_axis(line) for line in fix_existing_video_batch_reshape(lines)]
-        if fixed_lines != lines:
-            param_path.write_text("\n".join(fixed_lines) + "\n")
-        return
+        if not remaining_pack_indices:
+            fixed_lines = [fix_text_batch_axis(line) for line in fix_existing_video_batch_reshape(lines)]
+            if fixed_lines != lines:
+                param_path.write_text("\n".join(fixed_lines) + "\n")
+            return
     if len(existing_custom) == 4 and existing_types == custom_layer_types:
-        fixed_lines = [fix_text_batch_axis(line) for line in fix_existing_video_batch_reshape(lines)]
-        if fixed_lines != lines:
-            param_path.write_text("\n".join(fixed_lines) + "\n")
-        return
+        if not remaining_pack_indices:
+            fixed_lines = [fix_text_batch_axis(line) for line in fix_existing_video_batch_reshape(lines)]
+            if fixed_lines != lines:
+                param_path.write_text("\n".join(fixed_lines) + "\n")
+            return
     if existing_custom:
-        raise ValueError(f"incomplete existing SeedVR2 rewrite in {param_path}")
+        if len(existing_custom) % 4 != 0 or existing_types != custom_layer_types:
+            raise ValueError(f"incomplete existing SeedVR2 rewrite in {param_path}")
 
     producers: Dict[str, int] = {}
     consumers: dict[str, list[int]] = defaultdict(list)
@@ -356,12 +399,22 @@ def rewrite_ncnn_param(
         concat = layers[concat_index]
         if concat.layer_type == "Concat" and len(concat.bottoms) == 2:
             pack_candidates.append((index, concat_index))
+    all_pack_indices = [candidate[0] for candidate in pack_candidates]
+    if pack_ordinal is not None:
+        if not 0 <= pack_ordinal < len(pack_candidates):
+            raise ValueError(f"pack ordinal {pack_ordinal} outside {len(pack_candidates)} candidates")
+        pack_candidates = [pack_candidates[pack_ordinal]]
     if len(pack_candidates) != 1:
         raise ValueError(f"expected one DiT AWA pack boundary, found {len(pack_candidates)}")
     pack_index, concat_index = pack_candidates[0]
     pack_concat_index = concat_index
     pack = layers[pack_index]
     concat = layers[concat_index]
+    name_suffix = f"_{pack_ordinal}" if pack_ordinal is not None else ""
+    next_pack_index = min(
+        (index for index in all_pack_indices if index > pack_index),
+        default=len(layers),
+    )
     if len(pack.tops) != 1:
         raise ValueError("DiT AWA pack index-select must have one output")
 
@@ -369,6 +422,7 @@ def rewrite_ncnn_param(
         index
         for index, layer in enumerate(layers)
         if index > pack_index
+        and index < next_pack_index
         and layer.layer_type == "Slice"
         and layer.bottoms == (pack.tops[0],)
         and len(layer.tops) == 3
@@ -382,7 +436,7 @@ def rewrite_ncnn_param(
         rope_start_index = rope_start_candidates[0]
         rope_end_candidates: list[int] = []
         for index, layer in enumerate(layers):
-            if index <= rope_start_index or layer.layer_type != "Reshape" or len(layer.bottoms) != 1:
+            if index <= rope_start_index or index >= next_pack_index or layer.layer_type != "Reshape" or len(layer.bottoms) != 1:
                 continue
             concat_index = producers.get(layer.bottoms[0])
             if concat_index is None:
@@ -408,6 +462,7 @@ def rewrite_ncnn_param(
                 index
                 for index, layer in enumerate(layers)
                 if index > rope_start_index
+                and index < next_pack_index
                 and layer.layer_type == "Concat"
                 and len(layer.bottoms) == 3
                 and len(consumers.get(layer.tops[0], [])) == 1
@@ -466,7 +521,7 @@ def rewrite_ncnn_param(
 
     selector_groups: dict[str, list[int]] = defaultdict(list)
     for index, layer in enumerate(layers):
-        if index <= pack_index or layer.layer_type != "torch.index_select" or not layer.bottoms:
+        if index <= pack_index or index >= next_pack_index or layer.layer_type != "torch.index_select" or not layer.bottoms:
             continue
         selector_groups[resolve_split_source(layer.bottoms[0])].append(index)
 
@@ -479,6 +534,20 @@ def rewrite_ncnn_param(
         plain_paths = [path for path in paths if not path[1]]
         if len(reduced_paths) == 1 and len(plain_paths) == 1:
             unpack_candidates.append((attended_blob, plain_paths[0], reduced_paths[0]))
+    if not unpack_candidates and tuple(size) == DIT_BLOCK_CONTRACT.source_shape:
+        # Fixed-grid PNNX may leave the video/text selectors as a second
+        # pair after the first rewrite. Treat the pair with one reduced path
+        # as the unpack boundary even when an additional selector pair is
+        # present in the same block.
+        for attended_blob, selectors in selector_groups.items():
+            if len(selectors) < 2:
+                continue
+            paths = [trace_unpack_path(index) for index in selectors]
+            reduced_paths = [path for path in paths if path[1]]
+            plain_paths = [path for path in paths if not path[1]]
+            if reduced_paths and plain_paths:
+                unpack_candidates.append((attended_blob, plain_paths[0], reduced_paths[0]))
+                break
     if len(unpack_candidates) != 1:
         raise ValueError(f"expected one DiT AWA unpack boundary, found {len(unpack_candidates)}")
     attended_blob, video_path, text_path = unpack_candidates[0]
@@ -492,15 +561,29 @@ def rewrite_ncnn_param(
             shifted=shifted,
         )
     )
+    pack_input_blobs = list(concat.bottoms)
+    for input_index, input_blob in enumerate(pack_input_blobs):
+        reshape_index = producers.get(input_blob)
+        if reshape_index is None:
+            continue
+        reshape_layer = layers[reshape_index]
+        if reshape_layer.layer_type != "Reshape" or len(reshape_layer.bottoms) != 1:
+            continue
+        stack_index = producers.get(reshape_layer.bottoms[0])
+        if stack_index is None:
+            continue
+        stack_layer = layers[stack_index]
+        if stack_layer.layer_type == "Concat" and len(stack_layer.bottoms) == 3:
+            pack_input_blobs[input_index] = reshape_layer.bottoms[0]
     pack_line = (
-        f"SeedVR2AWAPack awa_pack 2 2 {concat.bottoms[0]} {concat.bottoms[1]} "
-        f"{pack.tops[0]} awa_cu_seqlens "
+        f"SeedVR2AWAPack awa_pack{name_suffix} 2 2 {pack_input_blobs[0]} {pack_input_blobs[1]} "
+        f"{pack.tops[0]} awa_cu_seqlens{name_suffix} "
         f"0={source_t} 1={source_h} 2={source_w} "
         f"3={windows_t} 4={windows_h} 5={windows_w} "
         f"6={int(text_tokens)} 7={1 if shifted else 0}"
     )
     unpack_line = (
-        f"SeedVR2AWAUnpack awa_unpack 1 2 {attended_blob} {video_path[0]} {text_path[0]} "
+        f"SeedVR2AWAUnpack awa_unpack{name_suffix} 1 2 {attended_blob} {video_path[0]} {text_path[0]} "
         f"0={source_t} 1={source_h} 2={source_w} "
         f"3={windows_t} 4={windows_h} 5={windows_w} "
         f"6={int(text_tokens)} 7={1 if shifted else 0}"
@@ -514,7 +597,7 @@ def rewrite_ncnn_param(
     if rope_start_index is not None and rope_end_index is not None:
         rope_output = layers[rope_end_index].tops[0]
         rope_line = (
-            f"SeedVR2MMRoPE mmrope 1 1 {pack.tops[0]} {rope_output} "
+            f"SeedVR2MMRoPE mmrope{name_suffix} 1 1 {pack.tops[0]} {rope_output} "
             f"0={source_t} 1={source_h} 2={source_w} "
             f"3={windows_t} 4={windows_h} 5={windows_w} "
             f"6={int(text_tokens)} 7={1 if shifted else 0} 8=126"
@@ -550,7 +633,7 @@ def rewrite_ncnn_param(
             if attention_start_index >= attention_end_index:
                 raise ValueError("DiT static window-attention boundaries are out of order")
             attention_line = (
-                f"SeedVR2WindowAttention awa_attention 1 1 {rope_output} {attended_blob} "
+                f"SeedVR2WindowAttention awa_attention{name_suffix} 1 1 {rope_output} {attended_blob} "
                 f"0={source_t} 1={source_h} 2={source_w} "
                 f"3={windows_t} 4={windows_h} 5={windows_w} "
                 f"6={int(text_tokens)} 7={1 if shifted else 0}"
@@ -560,13 +643,13 @@ def rewrite_ncnn_param(
                 for index in range(attention_start_index, attention_end_index + 1)
                 if layers[index].layer_type != "MemoryData"
             }
-        elif tuple(size) != DIT_BLOCK_CONTRACT.source_shape:
+        else:
             # On small fixed grids PNNX keeps the dense attention as a direct
             # MatMul chain. Its output is the Reshape immediately before the
             # two-way video/text Split; static index-select layers after that
             # split remain the validated unpack path.
             split_candidates = []
-            for index in range(rope_end_index + 1, len(layers)):
+            for index in range(rope_end_index + 1, next_pack_index):
                 layer = layers[index]
                 if layer.layer_type != "Split" or len(layer.tops) != 2:
                     continue
@@ -579,18 +662,41 @@ def rewrite_ncnn_param(
                     later.layer_type == "torch.index_select"
                     and later.bottoms
                     and later.bottoms[0] in layer.tops
-                    for later in layers[index + 1 :]
+                    for later in layers[index + 1 : next_pack_index]
                 ):
                     split_candidates.append((producer_index, layer.bottoms[0]))
             if len(split_candidates) != 1:
-                raise ValueError(
-                    "expected one folded DiT attention output boundary, "
-                    f"found {len(split_candidates)}"
-                )
+                # Fixed 256x256 PNNX emits the attention result as the
+                # output of the second MatMul, followed by a two-way Split
+                # and the two static unpack selectors.
+                fixed_candidates = []
+                for index in range(rope_end_index + 1, next_pack_index):
+                    layer = layers[index]
+                    if layer.layer_type != "Split" or len(layer.tops) != 2:
+                        continue
+                    if not any(
+                        later.layer_type == "torch.index_select"
+                        and later.bottoms
+                        and later.bottoms[0] in layer.tops
+                        for later in layers[index + 1 : next_pack_index]
+                    ):
+                        continue
+                    producer_index = producers.get(layer.bottoms[0])
+                    if producer_index is None:
+                        continue
+                    if layers[producer_index].layer_type not in {"MatMul", "Reshape", "Permute"}:
+                        continue
+                    fixed_candidates.append((producer_index, layer.bottoms[0]))
+                if len(fixed_candidates) != 1:
+                    raise ValueError(
+                        "expected one folded DiT attention output boundary, "
+                        f"found {len(fixed_candidates)}"
+                    )
+                split_candidates = fixed_candidates
             attention_end_index, attended_blob = split_candidates[0]
             attention_start_index = rope_end_index + 1
             attention_line = (
-                f"SeedVR2WindowAttention awa_attention 1 1 {rope_output} {attended_blob} "
+                f"SeedVR2WindowAttention awa_attention{name_suffix} 1 1 {rope_output} {attended_blob} "
                 f"0={source_t} 1={source_h} 2={source_w} "
                 f"3={windows_t} 4={windows_h} 5={windows_w} "
                 f"6={int(text_tokens)} 7={1 if shifted else 0}"
@@ -612,10 +718,10 @@ def rewrite_ncnn_param(
     for index, layer in enumerate(layers):
         if index in removed or video_path[0] not in layer.bottoms:
             continue
-        if layer.layer_type == "InnerProduct":
+        if layer.layer_type in {"InnerProduct", "Gemm"}:
             video_batch_consumer_index = index
             break
-    video_batch_blob = "awa_video_batch"
+    video_batch_blob = f"awa_video_batch{name_suffix}"
     rewritten_layers: list[str] = []
     for index, layer in enumerate(layers):
         if index == pack_index:
@@ -628,11 +734,11 @@ def rewrite_ncnn_param(
             rewritten_layers.append(unpack_line)
         if index == video_batch_consumer_index:
             rewritten_layers.append(
-                f"Reshape reshape_awa_video_batch 1 1 {video_path[0]} {video_batch_blob} "
-                f"0={int(DIT_BLOCK_CONTRACT.vid_dim)} 1={source_t * source_h * source_w} 12=233 13=0"
+                f"Reshape reshape_awa_video_batch{name_suffix} 1 1 {video_path[0]} {video_batch_blob} "
+                f"0={int(DIT_BLOCK_CONTRACT.vid_dim)} 1={source_t * source_h * source_w}"
             )
         if index not in removed:
-            line = fix_text_batch_axis(layer.line, text_path[0])
+            line = fix_unbind_axis(fix_text_batch_axis(layer.line, text_path[0]))
             if index == video_batch_consumer_index:
                 fields = line.split()
                 begin = 4
@@ -642,11 +748,83 @@ def rewrite_ncnn_param(
                 line = " ".join(fields)
             rewritten_layers.append(line)
 
-    rewritten_nodes = [parse_layer(line) for line in rewritten_layers]
-    blob_count = len({top for layer in rewritten_nodes for top in layer.tops})
+    blob_count = count_ncnn_blobs(rewritten_layers)
     param_path.write_text(
         "\n".join((lines[0], f"{len(rewritten_layers)} {blob_count}", *rewritten_layers)) + "\n"
     )
+
+
+def find_awa_pack_indices(param_path: Path) -> list[int]:
+    """Return all PNNX AWA pack selector indices in a generated graph."""
+    lines = param_path.read_text().splitlines()
+    layers = []
+    producers: dict[str, int] = {}
+    for index, line in enumerate(lines[2:]):
+        fields = line.split()
+        bottom_count = int(fields[2])
+        top_count = int(fields[3])
+        begin = 4
+        bottoms = fields[begin : begin + bottom_count]
+        tops = fields[begin + bottom_count : begin + bottom_count + top_count]
+        layers.append((fields, bottoms, tops))
+        for top in tops:
+            producers[top] = index
+    result = []
+    for index, (fields, bottoms, _) in enumerate(layers):
+        if fields[0] != "torch.index_select" or not bottoms:
+            continue
+        concat_index = producers.get(bottoms[0])
+        if concat_index is not None and layers[concat_index][0][0] == "Concat":
+            if len(layers[concat_index][1]) == 2:
+                result.append(index)
+    return result
+
+
+def rewrite_ncnn_param_at(
+    param_path: Path,
+    *,
+    pack_ordinal: int,
+    size: Sequence[int] = DIT_BLOCK_CONTRACT.source_shape,
+    windows: Sequence[int] = DIT_BLOCK_CONTRACT.window_shape,
+    text_tokens: int = DIT_BLOCK_CONTRACT.text_tokens,
+    shifted: bool = False,
+) -> None:
+    rewrite_ncnn_param(
+        param_path,
+        size=size,
+        windows=windows,
+        text_tokens=text_tokens,
+        shifted=shifted,
+        pack_ordinal=pack_ordinal,
+    )
+
+
+def rewrite_ncnn_param_all(
+    param_path: Path,
+    *,
+    size: Sequence[int] = DIT_BLOCK_CONTRACT.source_shape,
+    windows: Sequence[int] = DIT_BLOCK_CONTRACT.window_shape,
+    text_tokens: int = DIT_BLOCK_CONTRACT.text_tokens,
+) -> None:
+    """Rewrite every PNNX AWA block, processing later blocks first."""
+    candidates = find_awa_pack_indices(param_path)
+    if not candidates:
+        return
+    if len(candidates) == 1:
+        rewrite_ncnn_param(param_path, size=size, windows=windows, text_tokens=text_tokens)
+        return
+
+    # Rewrite from the last block toward the first. Each rewrite removes only
+    # its own static boundary and leaves the earlier pack indices intact.
+    for ordinal in range(len(candidates) - 1, -1, -1):
+        rewrite_ncnn_param(
+            param_path,
+            size=size,
+            windows=windows,
+            text_tokens=text_tokens,
+            shifted=bool(ordinal % 2),
+            pack_ordinal=ordinal,
+        )
 
 
 def _sha256(path: Path) -> str:

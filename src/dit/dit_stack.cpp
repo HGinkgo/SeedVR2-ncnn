@@ -705,7 +705,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     {
         ncnn::Net& block = *impl_->blocks[block_index];
         ncnn::Extractor extractor = block.create_extractor();
-        extractor.set_light_mode(false);
+        extractor.set_light_mode(plan.image_width == 256 && plan.image_height == 256);
         ncnn::VkMat next_video;
         ncnn::VkMat next_text;
         ncnn::VkCompute compute(vkdev);

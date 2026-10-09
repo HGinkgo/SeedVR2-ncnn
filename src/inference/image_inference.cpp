@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -181,6 +182,7 @@ struct VulkanInferenceContext final
     PreparedVaeGraph decode_vae_graph;
     VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
     std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
+    std::string pipeline_cache_path;
     std::unique_ptr<DitStackSession> cached_dit;
 
     void clear_cached_dit()
@@ -612,6 +614,16 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         return false;
     }
     context.pipeline_cache = std::make_unique<ncnn::PipelineCache>(context.vkdev);
+    if (const char* pipeline_cache_path = std::getenv("SEEDVR2_PIPELINE_CACHE_PATH"))
+    {
+        if (*pipeline_cache_path != '\0')
+        {
+            context.pipeline_cache_path = pipeline_cache_path;
+            const int cache_result = context.pipeline_cache->load_cache(pipeline_cache_path);
+            std::fprintf(stderr, "vulkan-pipeline-cache mode=%s path=%s\n",
+                         cache_result == 0 ? "hit" : "miss", pipeline_cache_path);
+        }
+    }
 
     context.diagnostics.gpu_id = selected_gpu;
     context.diagnostics.device_name = context.vkdev->info.device_name();
@@ -775,6 +787,12 @@ bool acquire_dit_stack(const ResolutionPlan& plan,
 
     context.cached_dit = std::move(candidate);
     dit = context.cached_dit.get();
+    if (!context.pipeline_cache_path.empty())
+    {
+        const int cache_result = context.pipeline_cache->save_cache(context.pipeline_cache_path.c_str());
+        std::fprintf(stderr, "vulkan-pipeline-cache-save result=%s path=%s\n",
+                     cache_result == 0 ? "ok" : "failed", context.pipeline_cache_path.c_str());
+    }
     profile.report_model_cache("dit", "load");
     return true;
 }

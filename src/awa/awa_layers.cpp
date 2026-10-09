@@ -133,6 +133,12 @@ bool describe_qkv_layout(const Blob& blob, int source_tokens, QkvLayout& layout)
             layout.token_stride = blob.cstep;
             layout.qkv_stride = static_cast<size_t>(layout.heads) * layout.head_dim;
         }
+        else if (blob.c == source_tokens * 3)
+        {
+            layout.heads = blob.h;
+            layout.token_stride = blob.cstep;
+            layout.qkv_stride = static_cast<size_t>(source_tokens) * blob.cstep;
+        }
 #if NCNN_BATCH
         else if (blob.c == 3 && blob.n == source_tokens)
         {

@@ -5,15 +5,13 @@ ROADMAP.md
 
 # Local build output
 build/
-build-prototype/
-build-vulkan/
-build-awa-test/
-build-vulkan-asan/
+build-*/
 out/
 runtime/
 
 # Local reference model weights
 ckpts/
+models/
 
 # Python development caches
 __pycache__/

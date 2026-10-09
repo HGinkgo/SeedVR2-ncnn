@@ -32,6 +32,7 @@
 - Linux NVIDIA Vulkan，BF16 storage，必要位置使用 FP32 accumulation。
 - PNG/JPEG 图片和 RGB24 AVI 视频。
 - 固定验证尺寸：`128x128`、`128x256`、`256x256`。
+- 当前优化与性能验收固定为 RTX 3090、单 GPU、`256x256` BF16 Vulkan。
 - 单步 Euler 为默认路径；多步采样和 VAE tiling 为实验选项。
 - 标准输出会进行参考引导的色彩重建：保留模型生成的高频细节，并从输入重建低频色彩。
 
@@ -50,14 +51,14 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
   --model-dir models/seedvr2-3b \
   --input input.png \
   --output output.png \
+  --width 256 --height 256 \
   --gpu-id 0
 ```
 
 视频：
 
 ```bash
-tools/with-nvidia-vulkan-runtime.sh \
-  ./seedvr2-ncnn \
+./seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
@@ -68,6 +69,15 @@ tools/with-nvidia-vulkan-runtime.sh \
 
 该命令处理输入视频的前 36 帧，并将结果写入 RGB24 AVI。省略 `--frames` 时处理整个视频；默认构建支持 AVI，压缩视频输入需要使用 `-DSEEDVR2_ENABLE_FFMPEG=ON` 构建。运行包不需要 Python、PyTorch 或 CUDA。使用 `--help` 查看完整参数。
 
+重复运行可通过 `SEEDVR2_PIPELINE_CACHE_PATH` 启用持久化 Vulkan pipeline cache。首次运行会生成缓存，后续匹配的 ncnn、GPU 和驱动环境会自动复用；缓存无效时会重新构建：
+
+```bash
+mkdir -p "$HOME/.cache/seedvr2-ncnn"
+SEEDVR2_PIPELINE_CACHE_PATH="$HOME/.cache/seedvr2-ncnn/pipeline.cache" \
+  ./seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png --gpu-id 0
+```
+
 ## Validation
 
 | Target | Image | AVI |
@@ -76,13 +86,36 @@ tools/with-nvidia-vulkan-runtime.sh \
 | `128x256` | verified | - |
 | `256x256` | verified | verified, 36 frames |
 
-`256x256 / 36 frames` baseline：video batch `660.7 s`、end-to-end `664.8 s`、peak RSS `1515 MiB`。这是性能基线，不是跨引擎对比，也不代表视频画质验收。
+当前固定 `256x256` 路径保留三项优化：五个 decoder pointwise Conv3D 的 Vulkan 实现、两个 causal Conv3D 的 OC8 输出通道复用，以及 DiT 中间张量生命周期与原地复用。
+
+最近一次 runtime 优化的 36 帧配对验证为 `343.65 s -> 337.07 s`，DiT 阶段耗时降低 `3.55%`，前后输出完全一致。单 block 活跃临时内存降低 `84.6%`；整条视频峰值显存不变。各项优化使用独立冻结基线，详见[性能与验证记录](docs/performance.md)，不能累加收益或直接与历史端到端时间比较。
 
 ## Build
 
 模型目录必须是 ModelScope 发布的完整动态包：根目录含有 `manifest.sha256`（75 条记录），且包内不能有符号链接。将该目录传给 `--model-dir`。
 
-固定输入回归环境：RTX 3090、driver `580.95.05`、ncnn `c6b351b56fbe32e0381ae00331e3df649b20d7b7`、BF16 Vulkan。
+构建需要 C++17 编译器、CMake 和 Vulkan 开发文件；使用仓库固定的 ncnn submodule：
+
+```bash
+git submodule update --init --recursive
+cmake -S . -B build \
+  -DSEEDVR2_ENABLE_VULKAN=ON \
+  -DNCNN_BATCH=ON \
+  -DNCNN_BF16=ON \
+  -DNCNN_BENCHMARK=OFF \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target seedvr2-ncnn --parallel
+```
+
+源码工作区内使用已准备的 NVIDIA runtime 运行：
+
+```bash
+tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png \
+  --width 256 --height 256 --gpu-id 0
+```
+
+该 helper 使用忽略目录 `runtime/` 中的 NVIDIA 用户态库；下载的运行包通过自己的 `./seedvr2-ncnn` launcher 启动。构建压缩视频输入需额外提供 FFmpeg 开发文件并启用 `-DSEEDVR2_ENABLE_FFMPEG=ON`。ModelScope CLI 仅用于下载模型，不是运行时依赖。
 
 ## Scope
 

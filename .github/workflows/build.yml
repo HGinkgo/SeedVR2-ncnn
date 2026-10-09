@@ -39,7 +39,8 @@ jobs:
         run: cmake --build build --parallel 2
 
       - name: CLI smoke test
-        run: ./build/seedvr2-ncnn --help | grep -Fq 'Usage: seedvr2-ncnn'
+        run: |
+          ./build/seedvr2-ncnn --help | grep -Fq 'Usage: seedvr2-ncnn'
 
   linux-runtime-package:
     # Build on the oldest supported glibc baseline for portable archives.
