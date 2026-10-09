@@ -2,7 +2,7 @@
 
 面向 Linux x86_64 的 SeedVR2 原生 C++ / ncnn / Vulkan 图像与视频增强 CLI。
 
-[下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/actions/workflows/build.yml) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
+[源码编译](#build) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
 ## Showcase
 
@@ -38,7 +38,7 @@
 
 ## Quick Start
 
-打开 Linux CI 中 `main` 最近一次成功的 Build，在 Artifacts 下载 `SeedVR2-ncnn-linux-x86_64`。解压下载的 ZIP，再解压其中的 `SeedVR2-ncnn-linux-x86_64.tar.gz`，进入运行包目录执行下面的命令。CI 产物保留 7 天，模型需单独下载。
+先按 [Build](#build) 从源码编译，再在仓库根目录执行以下命令。
 
 下载模型：
 
@@ -49,7 +49,7 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
 图片：
 
 ```bash
-./seedvr2-ncnn \
+build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.png \
   --output output.png \
@@ -60,7 +60,7 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
 视频：
 
 ```bash
-./seedvr2-ncnn \
+build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
@@ -69,14 +69,14 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
   --gpu-id 0
 ```
 
-该命令处理输入视频的前 36 帧，并将结果写入 RGB24 AVI。省略 `--frames` 时处理整个视频；默认构建支持 AVI，压缩视频输入需要使用 `-DSEEDVR2_ENABLE_FFMPEG=ON` 构建。运行包不需要 Python、PyTorch 或 CUDA。使用 `--help` 查看完整参数。
+该命令处理输入视频的前 36 帧，并将结果写入 RGB24 AVI。省略 `--frames` 时处理整个视频；默认构建支持 AVI，压缩视频输入需要使用 `-DSEEDVR2_ENABLE_FFMPEG=ON` 构建。推理不需要 Python、PyTorch 或 CUDA。使用 `--help` 查看完整参数。
 
 重复运行可通过 `SEEDVR2_PIPELINE_CACHE_PATH` 启用持久化 Vulkan pipeline cache。首次运行会生成缓存，后续匹配的 ncnn、GPU 和驱动环境会自动复用；缓存无效时会重新构建：
 
 ```bash
 mkdir -p "$HOME/.cache/seedvr2-ncnn"
 SEEDVR2_PIPELINE_CACHE_PATH="$HOME/.cache/seedvr2-ncnn/pipeline.cache" \
-  ./seedvr2-ncnn \
+  build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b --input input.png --output output.png --gpu-id 0
 ```
 
@@ -117,7 +117,7 @@ tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
   --width 256 --height 256 --gpu-id 0
 ```
 
-该 helper 使用忽略目录 `runtime/` 中的 NVIDIA 用户态库；下载的运行包通过自己的 `./seedvr2-ncnn` launcher 启动。构建压缩视频输入需额外提供 FFmpeg 开发文件并启用 `-DSEEDVR2_ENABLE_FFMPEG=ON`。ModelScope CLI 仅用于下载模型，不是运行时依赖。
+该 helper 使用忽略目录 `runtime/` 中的 NVIDIA 用户态库；已配置 NVIDIA Vulkan 驱动的环境可直接运行 `build/seedvr2-ncnn`。构建压缩视频输入需额外提供 FFmpeg 开发文件并启用 `-DSEEDVR2_ENABLE_FFMPEG=ON`。ModelScope CLI 仅用于下载模型，不是运行时依赖。
 
 ## Scope
 

@@ -2,7 +2,7 @@
 
 Native C++ / ncnn / Vulkan SeedVR2 image and video enhancement CLI for Linux x86_64.
 
-[中文](README.md) · [Runtime](https://github.com/HGinkgo/SeedVR2-ncnn/actions/workflows/build.yml) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
+[中文](README.md) · [Build from source](#build) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
 
 ## Showcase
 
@@ -38,7 +38,7 @@ The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [
 
 ## Quick Start
 
-Open the latest successful Build for `main` in Linux CI and download the `SeedVR2-ncnn-linux-x86_64` artifact. Extract the downloaded ZIP, then its `SeedVR2-ncnn-linux-x86_64.tar.gz`, and run the commands below from the package directory. CI artifacts are retained for 7 days; download the model separately.
+Follow [Build](#build) to compile from source, then run the commands below from the repository root.
 
 Download the model:
 
@@ -49,7 +49,7 @@ modelscope download HGinkgo/SeedVR2-ncnn --local-dir models/seedvr2-3b
 Image:
 
 ```bash
-./seedvr2-ncnn \
+build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.png \
   --output output.png \
@@ -60,7 +60,7 @@ Image:
 Video:
 
 ```bash
-./seedvr2-ncnn \
+build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b \
   --input input.avi \
   --output output.avi \
@@ -76,7 +76,7 @@ Set `SEEDVR2_PIPELINE_CACHE_PATH` to enable persistent Vulkan pipeline caching. 
 ```bash
 mkdir -p "$HOME/.cache/seedvr2-ncnn"
 SEEDVR2_PIPELINE_CACHE_PATH="$HOME/.cache/seedvr2-ncnn/pipeline.cache" \
-  ./seedvr2-ncnn \
+  build/seedvr2-ncnn \
   --model-dir models/seedvr2-3b --input input.png --output output.png --gpu-id 0
 ```
 
@@ -128,7 +128,8 @@ tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
 ```
 
 The helper selects NVIDIA user-space libraries from the ignored `runtime/`
-directory. Downloaded runtime packages use their own `./seedvr2-ncnn` launcher.
+directory. Environments with a configured NVIDIA Vulkan driver can run
+`build/seedvr2-ncnn` directly.
 Compressed video input additionally requires FFmpeg development files and
 `-DSEEDVR2_ENABLE_FFMPEG=ON`. The ModelScope CLI is only a download tool, not an
 inference dependency.

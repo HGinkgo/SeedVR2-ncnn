@@ -91,11 +91,3 @@ jobs:
           SEEDVR2_PACKAGE_TEST_FFMPEG_PREFIX: ${{ runner.temp }}/ffmpeg-prefix
           SEEDVR2_PACKAGE_TEST_FFMPEG_SOURCE: ${{ runner.temp }}/ffmpeg-8.1.2.tar.xz
         run: ./packaging/linux/validate_runtime_package.sh --release-smoke
-
-      - name: Upload Linux runtime archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: SeedVR2-ncnn-linux-x86_64
-          path: ${{ runner.temp }}/seedvr2-release/SeedVR2-ncnn-linux-x86_64.tar.gz
-          if-no-files-found: error
-          retention-days: 7
