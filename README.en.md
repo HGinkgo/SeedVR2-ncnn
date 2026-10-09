@@ -2,7 +2,7 @@
 
 Native C++ / ncnn / Vulkan SeedVR2 image and video enhancement CLI for Linux x86_64.
 
-[中文](README.md) · [Runtime](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
+[中文](README.md) · [Runtime](https://github.com/HGinkgo/SeedVR2-ncnn/actions/workflows/build.yml) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
 
 ## Showcase
 
@@ -37,6 +37,8 @@ The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [
 - Output uses reference-guided color reconstruction, retaining generated high-frequency detail while rebuilding low-frequency color from the input.
 
 ## Quick Start
+
+Open the latest successful Build for `main` in Linux CI and download the `SeedVR2-ncnn-linux-x86_64` artifact. Extract the downloaded ZIP, then its `SeedVR2-ncnn-linux-x86_64.tar.gz`, and run the commands below from the package directory. CI artifacts are retained for 7 days; download the model separately.
 
 Download the model:
 

@@ -2,7 +2,7 @@
 
 面向 Linux x86_64 的 SeedVR2 原生 C++ / ncnn / Vulkan 图像与视频增强 CLI。
 
-[下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/releases/latest) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
+[下载运行包](https://github.com/HGinkgo/SeedVR2-ncnn/actions/workflows/build.yml) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
 ## Showcase
 
@@ -37,6 +37,8 @@
 - 标准输出会进行参考引导的色彩重建：保留模型生成的高频细节，并从输入重建低频色彩。
 
 ## Quick Start
+
+打开 Linux CI 中 `main` 最近一次成功的 Build，在 Artifacts 下载 `SeedVR2-ncnn-linux-x86_64`。解压下载的 ZIP，再解压其中的 `SeedVR2-ncnn-linux-x86_64.tar.gz`，进入运行包目录执行下面的命令。CI 产物保留 7 天，模型需单独下载。
 
 下载模型：
 
