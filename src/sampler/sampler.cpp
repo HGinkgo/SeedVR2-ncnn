@@ -1,6 +1,7 @@
 #include "sampler/sampler.h"
 
 #include <cmath>
+#include <random>
 
 namespace seedvr2
 {
@@ -32,6 +33,32 @@ float sample_stddev(const std::vector<float>& values)
 }
 
 } // namespace
+
+bool fill_gaussian_noise(float* output, std::size_t count, std::uint32_t seed,
+                         std::uint64_t stream)
+{
+    if (!output || count == 0)
+        return false;
+
+    std::seed_seq sequence{seed, static_cast<std::uint32_t>(stream),
+                           static_cast<std::uint32_t>(stream >> 32)};
+    std::mt19937 generator(sequence);
+    constexpr double inverse_range = 1.0 / 4294967296.0;
+    constexpr double two_pi = 6.283185307179586476925286766559;
+    for (std::size_t index = 0; index < count; index += 2)
+    {
+        // Midpoints keep both uniforms strictly inside (0,1), including the
+        // generator's endpoints. Do the transform in double before FP32 cast.
+        const double radial_uniform = (static_cast<double>(generator()) + 0.5) * inverse_range;
+        const double angle_uniform = (static_cast<double>(generator()) + 0.5) * inverse_range;
+        const double radius = std::sqrt(-2.0 * std::log(radial_uniform));
+        const double angle = two_pi * angle_uniform;
+        output[index] = static_cast<float>(radius * std::cos(angle));
+        if (index + 1 < count)
+            output[index + 1] = static_cast<float>(radius * std::sin(angle));
+    }
+    return true;
+}
 
 bool classifier_free_guidance(const std::vector<float>& positive,
                               const std::vector<float>& negative,
@@ -79,6 +106,50 @@ std::vector<float> uniform_trailing_timesteps(float schedule_t, int steps, float
         timesteps.push_back(schedule_t * shifted);
     }
     return timesteps;
+}
+
+bool transform_timestep(float timestep,
+                        float schedule_t,
+                        int latent_frames,
+                        int latent_height,
+                        int latent_width,
+                        float& transformed)
+{
+    if (!std::isfinite(timestep) || !std::isfinite(schedule_t) || schedule_t <= 0.f ||
+        timestep < 0.f || timestep > schedule_t || latent_frames <= 0 || latent_height <= 0 ||
+        latent_width <= 0)
+        return false;
+
+    // The fixed 256x256 image contract is exactly the reference image anchor
+    // (shift=1). Preserve it bit-for-bit for the existing production path.
+    if (latent_frames == 1 && latent_height == 32 && latent_width == 32)
+    {
+        transformed = timestep;
+        return true;
+    }
+
+    constexpr float temporal_downsample = 4.f;
+    constexpr float spatial_downsample = 8.f;
+    const float frames = (static_cast<float>(latent_frames) - 1.f) * temporal_downsample + 1.f;
+    const float height = static_cast<float>(latent_height) * spatial_downsample;
+    const float width = static_cast<float>(latent_width) * spatial_downsample;
+    const float image_m = (3.2f - 1.f) / (1024.f * 1024.f - 256.f * 256.f);
+    const float image_b = 1.f - image_m * 256.f * 256.f;
+    const float video_m = (5.f - 1.f) /
+                          (1280.f * 720.f * 145.f - 256.f * 256.f * 37.f);
+    const float video_b = 1.f - video_m * 256.f * 256.f * 37.f;
+    const float image_shift = image_m * height * width + image_b;
+    const float video_shift = video_m * height * width * frames + video_b;
+    const float shift = frames > 1.f ? video_shift : image_shift;
+    if (!std::isfinite(shift) || shift <= 0.f)
+        return false;
+
+    const float normalized = timestep / schedule_t;
+    const float denominator = 1.f + (shift - 1.f) * normalized;
+    if (!std::isfinite(denominator) || denominator <= 0.f)
+        return false;
+    transformed = schedule_t * shift * normalized / denominator;
+    return std::isfinite(transformed) && transformed >= 0.f && transformed <= schedule_t;
 }
 
 bool euler_v_lerp_endpoint(const std::vector<float>& sample,

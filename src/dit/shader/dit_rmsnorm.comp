@@ -1,0 +1,54 @@
+#version 450
+layout(constant_id = 0) const int affine = 0;
+layout(constant_id = 1) const float epsilon = 0.00001;
+layout(binding = 0) readonly buffer input_blob { sfp input_data[]; };
+layout(binding = 1) writeonly buffer output_blob { sfp output_data[]; };
+layout(binding = 2) readonly buffer gamma_blob { float gamma_data[]; };
+layout(binding = 3) writeonly buffer output_float { float output_fp32[]; };
+layout(push_constant) uniform parameter
+{
+    int width;
+    int rows;
+    int channels;
+    int input_cstep;
+    int output_cstep;
+} p;
+shared float sums[128];
+void main()
+{
+    int lane = int(gl_LocalInvocationID.x);
+    int row = int(gl_GlobalInvocationID.y);
+    int channel = int(gl_GlobalInvocationID.z);
+    int source = channel * p.input_cstep + row * p.width;
+    int target = channel * p.output_cstep + row * p.width;
+    // Keep squared values and their reduction in FP32.
+    precise float sum = 0.f;
+    for (int i = lane; i < p.width; i += 128)
+    {
+        float value = float(buffer_ld1(input_data, source + i));
+        sum += value * value;
+    }
+    sums[lane] = sum;
+    barrier();
+    for (int stride = 64; stride > 0; stride /= 2)
+    {
+        if (lane < stride) sums[lane] += sums[lane + stride];
+        barrier();
+    }
+    float coefficient = inversesqrt(sums[0] / float(p.width) + epsilon);
+    for (int i = lane; i < p.width; i += 128)
+    {
+        precise float value = float(buffer_ld1(input_data, source + i)) * coefficient;
+        if (affine != 0)
+        {
+            output_fp32[target + i] = value * gamma_data[i];
+            continue;
+        }
+#if NCNN_bf16_storage || NCNN_bf16_packed
+        // Explicit round-to-nearest-even, including exact halfway cases.
+        uint bits = floatBitsToUint(value);
+        value = uintBitsToFloat((bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
+#endif
+        buffer_st1(output_data, target + i, afp(value));
+    }
+}

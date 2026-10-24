@@ -17,8 +17,8 @@ models/
 __pycache__/
 .pytest_cache/
 
-# Temporary implementation design documents
-docs/superpowers/
+# Local project notes and validation records
+docs/
 
 # Isolated feature worktrees
 .worktrees/

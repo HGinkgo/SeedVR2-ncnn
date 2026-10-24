@@ -1,6 +1,7 @@
 #version 450
 
 layout(binding = 0) buffer scores_blob { float scores_data[]; };
+layout(binding = 1) writeonly buffer normalizers_blob { float normalizers_data[]; };
 
 layout(push_constant) uniform parameter
 {
@@ -22,13 +23,35 @@ void main()
     for (int key = 1; key < p.window_length; key++)
         maximum = max(maximum, scores_data[offset + key]);
 
+#if NCNN_bf16_storage || NCNN_bf16_packed || NCNN_fp16_storage || NCNN_fp16_packed
     float normalizer = 0.f;
+#else
+    precise float normalizer = 0.f;
+    precise float correction = 0.f;
+#endif
     for (int key = 0; key < p.window_length; key++)
     {
         float value = exp(scores_data[offset + key] - maximum);
+#if NCNN_bf16_storage || NCNN_bf16_packed
+        // BF16 SDPA multiplies V by BF16 unnormalized exponentials, with
+        // the sum and final division in FP32 (PyTorch 2.4 CPU flash kernel).
+        uint bits = floatBitsToUint(value);
+        scores_data[offset + key] = uintBitsToFloat((bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
+#else
         scores_data[offset + key] = value;
+#endif
+#if NCNN_bf16_storage || NCNN_bf16_packed || NCNN_fp16_storage || NCNN_fp16_packed
         normalizer += value;
+#else
+        precise float term = value - correction;
+        precise float next = normalizer + term;
+        correction = (next - normalizer) - term;
+        normalizer = next;
+#endif
     }
+    normalizers_data[head * p.window_length + query] = normalizer;
+#if !(NCNN_bf16_storage || NCNN_bf16_packed)
     for (int key = 0; key < p.window_length; key++)
         scores_data[offset + key] /= normalizer;
+#endif
 }

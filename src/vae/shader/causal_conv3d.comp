@@ -60,7 +60,12 @@ void main()
     const int output_offset = output_channel * p.output_cstep + output_depth * output_plane +
                                output_y * p.output_w + output_x;
 
+#if NCNN_fp16_storage || NCNN_fp16_packed || NCNN_bf16_storage || NCNN_bf16_packed
     afp sum = p.bias_term == 1 ? buffer_ld1(bias_data, output_channel) : afp(0.f);
+#else
+    precise float sum = 0.f;
+    precise float correction = 0.f;
+#endif
     const int virtual_depth = p.input_d + p.prepend;
     const int input_plane = p.input_w * p.input_h;
     const int output_weight_offset = output_channel * p.input_c * kernel_size;
@@ -89,12 +94,24 @@ void main()
                     }
                     const int weight_offset = input_weight_offset +
                                               (kernel_depth * p.kernel_h + kernel_y) * p.kernel_w + kernel_x;
+#if NCNN_fp16_storage || NCNN_fp16_packed || NCNN_bf16_storage || NCNN_bf16_packed
                     sum += value * buffer_ld1(weight_data, weight_offset);
+#else
+                    precise float product = value * buffer_ld1(weight_data, weight_offset);
+                    precise float term = product - correction;
+                    precise float next = sum + term;
+                    correction = (next - sum) - term;
+                    sum = next;
+#endif
                 }
             }
         }
     }
 
+#if !NCNN_fp16_storage && !NCNN_fp16_packed && !NCNN_bf16_storage && !NCNN_bf16_packed
+    if (p.bias_term == 1)
+        sum += buffer_ld1(bias_data, output_channel);
+#endif
     sum = activation_afp(sum, p.activation_type, p.activation_param_0, p.activation_param_1);
     buffer_st1(top_blob_data, output_offset, sum);
 }

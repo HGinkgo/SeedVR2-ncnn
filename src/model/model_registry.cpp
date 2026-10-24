@@ -213,6 +213,26 @@ bool graph_exists(const std::filesystem::path& stem, std::string& error)
     return true;
 }
 
+bool validate_dit_stack(const std::filesystem::path& stack_dir, std::string& error)
+{
+    const std::vector<std::filesystem::path> graphs = {
+        stack_dir / "dit_input",
+        stack_dir / "dit_embedding",
+        stack_dir / "dit_output",
+    };
+    for (const auto& graph : graphs)
+        if (!graph_exists(graph, error))
+            return false;
+    for (int index = 0; index < 32; ++index)
+    {
+        char name[32];
+        std::snprintf(name, sizeof(name), "dit_block_%02d", index);
+        if (!graph_exists(stack_dir / name, error))
+            return false;
+    }
+    return true;
+}
+
 std::string variant_name(const ResolutionPlan& plan)
 {
     return std::to_string(plan.image_height) + "x" + std::to_string(plan.image_width);
@@ -266,9 +286,10 @@ bool validate_manifest(const std::filesystem::path& model_dir, std::string& erro
             return false;
         }
     }
-    if (expected.size() != 75)
+    if (expected.size() != 75 && expected.size() != 146)
     {
-        error = "model package manifest must contain 75 records, got " + std::to_string(expected.size());
+        error = "model package manifest must contain 75 records (positive) or 146 records (positive + CFG), got " +
+                std::to_string(expected.size());
         return false;
     }
 
@@ -413,21 +434,8 @@ bool ModelRegistry::resolve(const ResolutionPlan& plan, ModelGraphSet& graphs, s
     if (!graph_exists(vae_encode, error) || !graph_exists(vae_decode, error))
         return false;
 
-    const std::vector<std::filesystem::path> stack_graphs = {
-        dit_stack / "dit_input",
-        dit_stack / "dit_embedding",
-        dit_stack / "dit_output",
-    };
-    for (const std::filesystem::path& graph : stack_graphs)
-        if (!graph_exists(graph, error))
-            return false;
-    for (int index = 0; index < 32; index++)
-    {
-        char name[32];
-        std::snprintf(name, sizeof(name), "dit_block_%02d", index);
-        if (!graph_exists(dit_stack / name, error))
-            return false;
-    }
+    if (!validate_dit_stack(dit_stack, error))
+        return false;
 
     const std::filesystem::path conditioning = model_dir_ / "conditioning" / "pos_emb.f32";
     if (!is_regular_model_file(conditioning))
@@ -438,11 +446,10 @@ bool ModelRegistry::resolve(const ResolutionPlan& plan, ModelGraphSet& graphs, s
     std::error_code size_error;
     const std::uintmax_t bytes = std::filesystem::file_size(conditioning, size_error);
     const std::uintmax_t bytes_per_token = kConditioningWidth * sizeof(float);
-    if (size_error || (bytes != kPositiveTokens * bytes_per_token && bytes != kNegativeTokens * bytes_per_token))
+    if (size_error || bytes != kPositiveTokens * bytes_per_token)
     {
-        std::ostringstream message;
-        message << "positive conditioning artifact has unsupported size: " << conditioning.string();
-        error = message.str();
+        error = "positive conditioning artifact must contain exactly 58x5120 float32 values: " +
+                conditioning.string();
         return false;
     }
 
@@ -450,7 +457,38 @@ bool ModelRegistry::resolve(const ResolutionPlan& plan, ModelGraphSet& graphs, s
     graphs.dit_stack_dir = dit_stack;
     graphs.vae_decode_stem = vae_decode;
     graphs.conditioning_path = conditioning;
-    graphs.text_tokens = static_cast<int>(bytes / bytes_per_token);
+    graphs.text_tokens = static_cast<int>(kPositiveTokens);
+
+    const std::filesystem::path negative_stack = graph_dir / "cfg_64";
+    std::error_code cfg_error;
+    const bool cfg_artifact_present = std::filesystem::exists(negative_stack, cfg_error);
+    if (cfg_error)
+    {
+        error = "failed to inspect CFG graph directory: " + negative_stack.string();
+        return false;
+    }
+    const std::filesystem::path negative_conditioning = model_dir_ / "conditioning" / "neg_emb.f32";
+    const bool negative_conditioning_present = is_regular_model_file(negative_conditioning);
+    if (cfg_artifact_present || negative_conditioning_present)
+    {
+        if (!cfg_artifact_present || !negative_conditioning_present)
+        {
+            error = "CFG package is incomplete: require cfg_64 DiT graphs and conditioning/neg_emb.f32 together";
+            return false;
+        }
+        if (!validate_dit_stack(negative_stack, error))
+            return false;
+        const std::uintmax_t negative_bytes = std::filesystem::file_size(negative_conditioning, size_error);
+        if (size_error || negative_bytes != kNegativeTokens * bytes_per_token)
+        {
+            error = "negative conditioning artifact must contain exactly 64x5120 float32 values: " +
+                    negative_conditioning.string();
+            return false;
+        }
+        graphs.negative_dit_stack_dir = negative_stack;
+        graphs.negative_conditioning_path = negative_conditioning;
+        graphs.negative_text_tokens = static_cast<int>(kNegativeTokens);
+    }
     return true;
 }
 

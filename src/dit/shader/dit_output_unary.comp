@@ -1,0 +1,20 @@
+#version 450
+layout(constant_id = 0) const int operation = 4;
+layout(binding = 0) readonly buffer input_blob { sfp input_data[]; };
+layout(binding = 1) readonly buffer input_float { float input_fp32[]; };
+layout(binding = 2) writeonly buffer output_blob { float output_data[]; };
+layout(push_constant) uniform parameter
+{
+    int width;
+    int rows;
+    int input_float;
+} p;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.width || y >= p.rows) return;
+    int i = y * p.width + x;
+    float value = p.input_float != 0 ? input_fp32[i] : float(buffer_ld1(input_data, i));
+    output_data[i] = operation == 4 ? value * value : inversesqrt(value);
+}

@@ -4,6 +4,8 @@ Native C++ / ncnn / Vulkan SeedVR2 image and video enhancement CLI for Linux x86
 
 [中文](README.md) · [Build from source](#build) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
 
+Production remains TorchScript/ncnn BF16; Vulkan BF16 production accuracy has not passed acceptance. The fixed-256 ExportedProgram/PT2 → independent PNNX → ncnn path is validated as an opt-in candidate and has not replaced the production package.
+
 ## Showcase
 
 An official example frame is downsampled to `64x64` and restored with the fixed `256x256` path:
@@ -34,6 +36,7 @@ The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [
 - Validated fixed targets: `128x128`, `128x256`, and `256x256`.
 - Current optimization acceptance targets RTX 3090, one GPU, fixed `256x256` BF16 Vulkan.
 - One-step Euler is the default; multi-step sampling and VAE tiling are experimental.
+- Optional `--seed 666` selects reproducible standard-normal initial noise; omitting it retains the legacy fixture.
 - Output uses reference-guided color reconstruction, retaining generated high-frequency detail while rebuilding low-frequency color from the input.
 
 ## Quick Start
@@ -95,8 +98,7 @@ and DiT intermediate tensor lifetime and in-place reuse.
 The latest runtime comparison measures `343.65 s -> 337.07 s` for one 36-frame
 pair, with `3.55%` lower DiT stage latency and byte-identical output. Per-block
 peak live temporary memory falls by `84.6%`; whole-video peak GPU memory is
-unchanged. See [performance and validation](docs/performance.md) for the separate
-frozen baselines. These gains cannot be added or directly compared with older
+unchanged. These gains cannot be added or directly compared with older
 end-to-end timings.
 
 ## Build
@@ -134,6 +136,33 @@ Compressed video input additionally requires FFmpeg development files and
 `-DSEEDVR2_ENABLE_FFMPEG=ON`. The ModelScope CLI is only a download tool, not an
 inference dependency.
 
+## PT2 / PNNX experimental path
+
+The 2026-10-19 audit imports original NaDiT and compares every layer. It corrected the final
+Ada embedding slice and the last block's incorrect text Ada/MLP execution. New exports select
+the first triplet per feature from `[2560,6]`; block 31 retains text attention and skips text
+Ada/MLP. Resume and packaging reject artifacts without the new contracts.
+The pinned official source has an output-Ada dimension mismatch; this project uses an explicit
+compatibility contract. Historical consistency measurements below do not establish official sampling or image quality.
+
+The independently authored restricted frontend reads `.pt2` graphs, weights and signatures with Python, emits canonical PNNX IR, and reuses official PNNX optimization and ncnn lowering through an isolated C++ reader patch. Use [`tools/convert_pt2.py`](tools/convert_pt2.py). TorchScript remains the baseline; `third_party/ncnn` is untouched, and the published runtime does not require Python, PyTorch or CUDA.
+
+Static/bounded-token fixtures, checkpoint MLP/Ada/attention, complete fixed blocks 0/1/9, and fixed single-frame PT2 VAE encoder/decoder have CPU/Vulkan evidence. **Provenance correction:** earlier 35-graph stack measurements used TorchScript `.pt` exports. The old `model-package-pt2-full-stack-256` contains PT2 VAE plus TorchScript full-matrix DiT, despite its name. Those measurements do not establish PT2 DiT stack support.
+
+On 2026-10-19, genuine `.pt2` exports passed fixed-256 acceptance for both 58-token positive and 64-token negative stacks: all 35 graphs in each stack passed CPU/Vulkan checks, with zero maximum difference against TorchScript on identical inputs. Both serial Vulkan stacks reached a final maximum absolute error of `1.26362e-5`.
+
+The genuine PT2 VAE + DiT candidate passed four fixed-256 image CLI cases on an RTX 3090: CFG=1/1.5 with one/two steps. The production TorchScript one/two-step regressions also passed. Releasing both CFG DiT weight sets before VAE decode resolves an observed allocation failure. PNG differences are recorded separately from FP32 graph acceptance; these runs establish neither image-quality equivalence nor a performance gain.
+
+BF16 validation exposed an AWA int32 mapping upload being converted as reduced-precision weights. The fix preserves integer bytes and bounds padded RoPE dispatch by token count. With identical PT2 VAE and conditioning, the corrected TS/PT2 DiT paths match all three tensor handoff fingerprints and the final PNG SHA256 for two-step CFG=1 and 1.5. An independent PT2 process also reproduces the handoffs and PNG exactly; BF16 repeats match all 68 stages of each stack, and the two-frame CFG video path passes. These results are scoped to the recorded fixed input, models, binary and single GPU; temporal VAE and cross-frame attention remain unverified.
+
+Optional standard-normal noise via `--seed` passed five image and two video Vulkan runs. Matched TS/PT2 and an independent PT2 repeat with seed=666 match all four handoff fingerprints and PNG exactly; the second video frame also reproduces when processed separately with its absolute frame index. Omitting seed preserves the previous output. Complete original preprocessing, default BF16 accuracy and final image quality remain unverified against the original pipeline.
+
+[`tools/export_dit_stack.py`](tools/export_dit_stack.py) now accepts explicit `--format pt2` and retains each source hash and independent conversion record; its default remains `torchscript`. CFG uses separate 58-token positive and 64-token negative stacks, enabled with `--cfg-scale` (default 1). [`tools/prepare_pt2_cfg_package.py`](tools/prepare_pt2_cfg_package.py) assembles the fixed-256 experimental package. Production remains TorchScript/BF16; dynamic/multi-frame VAE, text encoding, CFG rescale and a production switch remain unaccepted.
+
+[`tools/prepare_pnnx_pt2.sh`](tools/prepare_pnnx_pt2.sh) prepares the external official checkout with the [independent patch](patches/README.md). [CPU CI](.github/workflows/pt2.yml) is configured but has not run remotely; no upstream acceptance is claimed.
+
+Run `python -m unittest tools.test_pt2_runtime_contracts tools.test_dit_output_contract -v` without a model or GPU to check output-Ada packing, invalid signatures, stale exports/packages, handoff fingerprints, seed/frame indices, CFG lifecycle ordering and AVI frame bounds.
+
 ## Scope
 
 - Current product line: Linux x86_64 NVIDIA Vulkan.
@@ -143,3 +172,5 @@ inference dependency.
 ## License
 
 ncnn uses BSD-3-Clause. SeedVR2 models, weights, and other third-party dependencies retain their respective licenses.
+New PT2 tools and patches use [BSD-3-Clause](LICENSES/BSD-3-Clause.txt). The existing
+project has no root LICENSE; this does not retroactively license all existing code.

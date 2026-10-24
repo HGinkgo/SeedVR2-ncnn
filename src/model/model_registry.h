@@ -14,7 +14,15 @@ struct ModelGraphSet final
     std::filesystem::path dit_stack_dir;
     std::filesystem::path vae_decode_stem;
     std::filesystem::path conditioning_path;
+    std::filesystem::path negative_dit_stack_dir;
+    std::filesystem::path negative_conditioning_path;
     int text_tokens = 0;
+    int negative_text_tokens = 0;
+
+    bool has_negative_conditioning() const
+    {
+        return !negative_dit_stack_dir.empty() && !negative_conditioning_path.empty() && negative_text_tokens > 0;
+    }
 };
 
 class ModelRegistry final

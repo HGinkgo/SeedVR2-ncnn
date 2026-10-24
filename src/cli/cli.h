@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,9 @@ struct CliOptions final
     int start_frame = 0;
     int frame_count = 0;
     int sample_steps = 1;
+    float cfg_scale = 1.0f;
+    bool fp32 = false;
+    std::optional<std::uint32_t> noise_seed;
     int vae_tile_size = 0;
     int gpu_id = -1;
     std::uint32_t memory_budget_mib = 0;

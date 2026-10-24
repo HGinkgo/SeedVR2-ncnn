@@ -103,7 +103,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
                             ncnn::VkMat& updated_sample,
-                            const PerformanceProfile* profile)
+                            const PerformanceProfile* profile,
+                            bool use_fp32)
 {
     if (!vkdev || !blob_allocator || !staging_allocator || positive_output.empty() || negative_output.empty() ||
         sample.empty() || positive_output.dims != negative_output.dims ||
@@ -113,11 +114,15 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
         !std::isfinite(cfg_scale) || !std::isfinite(normalized_delta))
         return false;
 
+    // The validation path must not reinterpret reduced-precision storage.
+    if (use_fp32 && (positive_output.elembits() != 32 || negative_output.elembits() != 32 || sample.elembits() != 32))
+        return false;
+
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
-    opt.use_bf16_packed = true;
-    opt.use_bf16_storage = true;
+    opt.use_bf16_packed = !use_fp32;
+    opt.use_bf16_storage = !use_fp32;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;

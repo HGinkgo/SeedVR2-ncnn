@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "io/image_io.h"
@@ -47,12 +48,16 @@ public:
                      std::uint32_t memory_budget_mib = 0,
                      const PerformanceProfile* profile = nullptr,
                      int vae_tile_size = 0,
-                     int sample_steps = 1);
+                     int sample_steps = 1,
+                     float cfg_scale = 1.0f,
+                     std::optional<std::uint32_t> noise_seed = std::nullopt,
+                     bool fp32 = false);
 
-    bool run_frame(const RgbImage& input, RgbImage& output, std::string& error) const;
+    bool run_frame(const RgbImage& input, RgbImage& output, std::string& error,
+                   std::size_t frame_index = 0) const;
 
     // `frame_offset` is the index of the first frame of this batch within the
-    // whole clip, used only to label profile lines.
+    // whole clip. It labels profile lines and selects a seeded noise stream.
     bool run_batch(const std::vector<RgbImage>& inputs,
                    std::vector<RgbImage>& outputs,
                    std::string& error,

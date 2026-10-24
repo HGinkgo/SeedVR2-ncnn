@@ -4,10 +4,12 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <climits>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 namespace seedvr2
 {
@@ -28,6 +30,19 @@ bool parse_integer(const char* text, int& value)
         return false;
 
     value = static_cast<int>(parsed);
+    return true;
+}
+
+bool parse_float(const char* text, float& value)
+{
+    if (!text || *text == '\0')
+        return false;
+    errno = 0;
+    char* end = nullptr;
+    const float parsed = std::strtof(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !std::isfinite(parsed))
+        return false;
+    value = parsed;
     return true;
 }
 
@@ -200,6 +215,43 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
             }
             options.sample_steps = parsed;
         }
+        else if (std::strcmp(argument, "--cfg-scale") == 0)
+        {
+            if (!next_value(argc, argv, index, value, error, true))
+                return false;
+            float parsed = 0.f;
+            if (!parse_float(value, parsed) || parsed < 1.f)
+            {
+                error = "--cfg-scale must be a finite number greater than or equal to 1";
+                return false;
+            }
+            options.cfg_scale = parsed;
+        }
+        else if (std::strcmp(argument, "--precision") == 0)
+        {
+            if (!next_value(argc, argv, index, value, error))
+                return false;
+            if (std::strcmp(value, "fp32") != 0 && std::strcmp(value, "bf16") != 0)
+            {
+                error = "--precision must be bf16 or fp32";
+                return false;
+            }
+            options.fp32 = std::strcmp(value, "fp32") == 0;
+        }
+        else if (std::strcmp(argument, "--seed") == 0)
+        {
+            if (!next_value(argc, argv, index, value, error, true))
+                return false;
+            std::uint32_t parsed = 0;
+            const char* end = value + std::strlen(value);
+            const auto result = std::from_chars(value, end, parsed, 10);
+            if (result.ec != std::errc() || result.ptr != end)
+            {
+                error = "--seed must be an integer in [0, 4294967295]";
+                return false;
+            }
+            options.noise_seed = parsed;
+        }
         else if (std::strcmp(argument, "--vae-tile-size") == 0)
         {
             if (!next_value(argc, argv, index, value, error))
@@ -246,6 +298,20 @@ bool parse_cli(int argc, const char* const argv[], CliOptions& options, std::str
     if (options.action == CliAction::Help || options.action == CliAction::Version ||
         options.action == CliAction::CheckModel)
         return true;
+    if (options.fp32)
+    {
+        std::string extension = options.input.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (!options.input_dir.empty() || options.inputs.size() != 1 ||
+            (extension != ".png" && extension != ".jpg" && extension != ".jpeg") ||
+            is_avi_output_path(options.output) || options.start_frame != 0 || options.frame_count != 0 ||
+            options.vae_tile_size != 0 || options.sample_steps > 4 || options.cfg_scale > 20.f)
+        {
+            error = "--precision fp32 requires one PNG/JPEG image, no VAE tiling, 1..4 steps and CFG in [1,20]";
+            return false;
+        }
+    }
     if (!options.input_dir.empty() && !options.inputs.empty())
     {
         error = "--input-dir cannot be combined with --input";

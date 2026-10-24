@@ -67,6 +67,7 @@ namespace
 
 constexpr int kLatentChannels = 16;
 constexpr float kSamplingScheduleT = 1000.f;
+constexpr std::uint32_t kSequentialCfgHeapThresholdMiB = 24u * 1024u;
 
 bool valid_rgb_image(const RgbImage& image)
 {
@@ -78,6 +79,36 @@ bool valid_rgb_image(const RgbImage& image)
 }
 
 #if NCNN_VULKAN
+
+// Hash logical FP32 values, excluding ncnn channel padding. This observes
+// existing CPU handoffs only; profiling does not add GPU transfers or change
+// inference precision/allocation policy.
+void report_tensor_fingerprint(const PerformanceProfile& profile, const char* phase,
+                               std::size_t frame_index, const ncnn::Mat& tensor)
+{
+    if (!profile.enabled() || tensor.empty() || tensor.elempack != 1 || tensor.elemsize != sizeof(float))
+        return;
+    std::uint64_t hash = UINT64_C(14695981039346656037);
+    bool finite = true;
+    const std::size_t plane_size = static_cast<std::size_t>(tensor.w) * tensor.h * tensor.d;
+    for (int channel = 0; channel < tensor.c; ++channel)
+    {
+        const float* values = tensor.channel(channel);
+        for (std::size_t index = 0; index < plane_size; ++index)
+        {
+            finite = std::isfinite(values[index]) && finite;
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, values + index, sizeof(bits));
+            for (int shift = 0; shift < 32; shift += 8)
+            {
+                hash ^= (bits >> shift) & 0xffu;
+                hash *= UINT64_C(1099511628211);
+            }
+        }
+    }
+    std::fprintf(stderr, "profile name=tensor-fingerprint phase=%s frame=%zu fnv1a64=%016llx finite=%d\n",
+                 phase, frame_index, static_cast<unsigned long long>(hash), finite ? 1 : 0);
+}
 
 class GpuInstance final
 {
@@ -113,13 +144,14 @@ private:
 
 ncnn::Option make_vulkan_option(ncnn::VkAllocator* blob_allocator,
                                 ncnn::VkAllocator* staging_allocator,
-                                ncnn::PipelineCache* pipeline_cache = nullptr)
+                                ncnn::PipelineCache* pipeline_cache = nullptr,
+                                bool fp32 = false)
 {
     ncnn::Option opt;
     opt.use_vulkan_compute = true;
     opt.use_packing_layout = false;
-    opt.use_bf16_packed = true;
-    opt.use_bf16_storage = true;
+    opt.use_bf16_packed = !fp32;
+    opt.use_bf16_storage = !fp32;
     opt.use_fp16_packed = false;
     opt.use_fp16_storage = false;
     opt.use_fp16_arithmetic = false;
@@ -150,12 +182,13 @@ bool load_vae(ncnn::Net& net,
               ncnn::VkAllocator* blob_allocator,
               ncnn::VkAllocator* staging_allocator,
               bool low_memory_cpu,
-              ncnn::PipelineCache* pipeline_cache)
+              ncnn::PipelineCache* pipeline_cache,
+              bool fp32)
 {
-    net.opt = make_vulkan_option(blob_allocator, staging_allocator, pipeline_cache);
+    net.opt = make_vulkan_option(blob_allocator, staging_allocator, pipeline_cache, fp32);
     net.opt.use_local_pool_allocator = !low_memory_cpu;
     net.set_vulkan_device(vkdev);
-    register_seedvr2_vae_layers(net);
+    register_seedvr2_vae_layers(net, fp32);
     const int param_result = graph.param_contents.empty()
                                  ? net.load_param(graph.param_path.string().c_str())
                                  : net.load_param_mem(graph.param_contents.c_str());
@@ -174,16 +207,21 @@ struct VulkanInferenceContext final
     ncnn::VkAllocator* decode_blob_allocator = nullptr;
     std::unique_ptr<TransientVkStagingAllocator> decode_staging_allocator;
     ncnn::Mat text;
+    ncnn::Mat negative_text;
     ResolutionPlan plan;
     ModelGraphSet graphs;
     int vae_tile_size = 0;
     int sample_steps = 1;
+    float cfg_scale = 1.f;
+    bool fp32 = false;
+    std::optional<std::uint32_t> noise_seed;
     PreparedVaeGraph encode_vae_graph;
     PreparedVaeGraph decode_vae_graph;
     VaeGraphMode vae_graph_mode = VaeGraphMode::Dynamic;
     std::unique_ptr<ncnn::PipelineCache> pipeline_cache;
     std::string pipeline_cache_path;
     std::unique_ptr<DitStackSession> cached_dit;
+    std::unique_ptr<DitStackSession> cached_negative_dit;
 
     void clear_cached_dit()
     {
@@ -192,6 +230,26 @@ struct VulkanInferenceContext final
             cached_dit->clear();
             cached_dit.reset();
         }
+        if (cached_negative_dit)
+        {
+            cached_negative_dit->clear();
+            cached_negative_dit.reset();
+        }
+    }
+
+    void release_dit_stage()
+    {
+        // All GPU work has completed and the output latents are on the CPU.
+        // Two resident CFG stacks leave insufficient room for VAE decode on
+        // a 24 GiB GPU. Reuse them within denoising, then release their weights.
+        // Preserve the existing single-stack cache policy for scale one.
+        if (cached_negative_dit)
+        {
+            std::fprintf(stderr, "stage=release-dit-stacks-for-decode\n");
+            clear_cached_dit();
+        }
+        dit_blob_allocator->clear();
+        dit_staging_allocator->clear();
     }
 
     void clear()
@@ -583,7 +641,9 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
                                VulkanInferenceContext& context,
                                std::string& error,
                                const PerformanceProfile& profile,
-                               int vae_tile_size)
+                               int vae_tile_size,
+                               float cfg_scale,
+                               bool fp32)
 {
     if (gpu_id < -1)
     {
@@ -594,6 +654,16 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         (vae_tile_size > 0 && (vae_tile_size < 32 || vae_tile_size % 16 != 0)))
     {
         error = "VAE tile size must be zero or at least 32 and divisible by 16";
+        return false;
+    }
+    if (!std::isfinite(cfg_scale) || cfg_scale < 1.f)
+    {
+        error = "CFG scale must be a finite number greater than or equal to 1";
+        return false;
+    }
+    if (cfg_scale > 1.f && !graphs.has_negative_conditioning())
+    {
+        error = "CFG scale greater than 1 requires a model package with cfg_64 DiT graphs and conditioning/neg_emb.f32";
         return false;
     }
 
@@ -608,7 +678,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         error = "requested Vulkan GPU is unavailable";
         return false;
     }
-    if (!context.vkdev->info.support_bf16_storage())
+    if (!fp32 && !context.vkdev->info.support_bf16_storage())
     {
         error = "selected Vulkan GPU does not support BF16 storage";
         return false;
@@ -631,8 +701,9 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     context.diagnostics.max_allocation_mib = query_max_allocation_mib(context.vkdev);
     context.diagnostics.target_width = plan.image_width;
     context.diagnostics.target_height = plan.image_height;
-    std::fprintf(stderr, "vulkan-gpu=%d name=%s precision=bf16-storage-fp32-accumulation heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
+    std::fprintf(stderr, "vulkan-gpu=%d name=%s precision=%s heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
                  context.diagnostics.gpu_id, context.diagnostics.device_name.c_str(),
+                 fp32 ? "fp32-sequential-cfg" : "bf16-storage-fp32-accumulation",
                  context.diagnostics.heap_budget_mib,
                  static_cast<unsigned long long>(context.diagnostics.max_allocation_mib),
                  context.diagnostics.target_width, context.diagnostics.target_height);
@@ -664,9 +735,18 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
         error = "stage=conditioning-load failed";
         return false;
     }
+    if (cfg_scale > 1.f &&
+        !load_conditioning_f32(graphs.negative_conditioning_path.string().c_str(), graphs.negative_text_tokens,
+                               context.negative_text))
+    {
+        error = "stage=conditioning-load-negative failed";
+        return false;
+    }
     context.plan = plan;
     context.graphs = graphs;
     context.vae_tile_size = vae_tile_size;
+    context.cfg_scale = cfg_scale;
+    context.fp32 = fp32;
     if (!prepare_vae_graph(graphs.vae_encode_stem, plan.image_width, plan.image_height, vae_tile_size,
                            context.encode_vae_graph, error) ||
         !prepare_vae_graph(graphs.vae_decode_stem, plan.image_width, plan.image_height, vae_tile_size,
@@ -704,7 +784,7 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
             const ProfileScope load_scope(profile, "load-encode");
             std::fprintf(stderr, "stage=load-encode\n");
             if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
-                          context.encode_staging_allocator, false, context.pipeline_cache.get()))
+                          context.encode_staging_allocator, false, context.pipeline_cache.get(), context.fp32))
             {
                 stage_error(0, "load-encode", "ncnn graph load returned failure");
                 return false;
@@ -749,6 +829,7 @@ bool encode_batch_vulkan(const std::vector<RgbImage>& inputs,
             }
             else if (!run_encode_tile_vulkan(sample, encode, context, latent, error, profile, frame_index))
                 return false;
+            report_tensor_fingerprint(profile, "condition-latent", frame_offset + frame_index, latent);
             condition_latents.push_back(std::move(latent));
         }
     }
@@ -764,36 +845,46 @@ bool acquire_dit_stack(const ResolutionPlan& plan,
                        VulkanInferenceContext& context,
                        DitStackSession*& dit,
                        std::string& error,
-                       const PerformanceProfile& profile)
+                       const PerformanceProfile& profile,
+                       bool negative = false)
 {
-    const ProfileScope load_scope(profile, "load-dit-stack");
-    std::fprintf(stderr, "stage=load-dit-stack\n");
-    if (context.cached_dit)
+    const char* stage = negative ? "load-dit-stack-negative" : "load-dit-stack";
+    const ProfileScope load_scope(profile, stage);
+    std::fprintf(stderr, "stage=%s\n", stage);
+    std::unique_ptr<DitStackSession>& cached = negative ? context.cached_negative_dit : context.cached_dit;
+    if (cached)
     {
-        dit = context.cached_dit.get();
-        profile.report_model_cache("dit", "reuse");
+        dit = cached.get();
+        profile.report_model_cache(negative ? "dit-negative" : "dit", "reuse");
         return true;
+    }
+    const std::filesystem::path& stack_dir = negative ? context.graphs.negative_dit_stack_dir
+                                                       : context.graphs.dit_stack_dir;
+    if (stack_dir.empty())
+    {
+        error = "CFG negative DiT stack is unavailable";
+        return false;
     }
 
     std::unique_ptr<DitStackSession> candidate(new DitStackSession);
-    if (!DitStackSession::open(context.graphs.dit_stack_dir.string(), plan, context.vkdev,
+    if (!DitStackSession::open(stack_dir.string(), plan, context.vkdev,
                                context.dit_blob_allocator, context.dit_staging_allocator, *candidate, &profile,
                                context.pipeline_cache.get()))
     {
-        error = format_vulkan_stage_error("load-dit-stack", context.diagnostics,
+        error = format_vulkan_stage_error(stage, context.diagnostics,
                                           "ncnn graph load returned failure");
         return false;
     }
 
-    context.cached_dit = std::move(candidate);
-    dit = context.cached_dit.get();
+    cached = std::move(candidate);
+    dit = cached.get();
     if (!context.pipeline_cache_path.empty())
     {
         const int cache_result = context.pipeline_cache->save_cache(context.pipeline_cache_path.c_str());
         std::fprintf(stderr, "vulkan-pipeline-cache-save result=%s path=%s\n",
                      cache_result == 0 ? "ok" : "failed", context.pipeline_cache_path.c_str());
     }
-    profile.report_model_cache("dit", "load");
+    profile.report_model_cache(negative ? "dit-negative" : "dit", "load");
     return true;
 }
 
@@ -802,6 +893,7 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
                                   const ResolutionPlan& plan,
                                   VulkanInferenceContext& context,
                                   DitStackSession& dit,
+                                  DitStackSession* negative_dit,
                                   const PerformanceProfile& profile,
                                   ncnn::VkMat& output_latent_gpu,
                                   const char*& failed_stage)
@@ -827,11 +919,30 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         }
 
         ncnn::VkMat prediction_gpu;
+        float model_timestep = 0.f;
+        if (!transform_timestep(timesteps[step_index], kSamplingScheduleT, plan.source_t,
+                                plan.latent_height, plan.latent_width, model_timestep))
+        {
+            failed_stage = "conditioning-timestep";
+            return false;
+        }
+        std::fprintf(stderr, "conditioning-timestep step=%zu raw=%.6f model=%.6f shape=%d,%d,%d\n",
+                     step_index, timesteps[step_index], model_timestep, plan.source_t,
+                     plan.latent_height, plan.latent_width);
         std::fprintf(stderr, "stage=dit-stack step=%zu\n", step_index);
-        if (!dit.run(input_patches_gpu, context.text, timesteps[step_index], plan, prediction_gpu))
+        if (!dit.run(input_patches_gpu, context.text, model_timestep, plan, prediction_gpu))
         {
             context.clear_cached_dit();
             failed_stage = "dit-stack";
+            return false;
+        }
+        ncnn::VkMat negative_prediction_gpu;
+        if (negative_dit &&
+            !negative_dit->run(input_patches_gpu, context.negative_text, model_timestep, plan,
+                               negative_prediction_gpu))
+        {
+            context.clear_cached_dit();
+            failed_stage = "dit-stack-negative";
             return false;
         }
 
@@ -848,12 +959,19 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
         const float next_timestep = step_index + 1 < timesteps.size() ? timesteps[step_index + 1] : 0.f;
         const float normalized_delta = (next_timestep - timesteps[step_index]) / kSamplingScheduleT;
         ncnn::VkMat updated_patches_gpu;
-        std::fprintf(stderr, "stage=v-lerp-euler step=%zu\n", step_index);
-        if (!apply_v_lerp_euler_vulkan(prediction_gpu, sample_patches_gpu, normalized_delta, context.vkdev,
-                                       context.dit_blob_allocator, context.dit_staging_allocator,
-                                       updated_patches_gpu, &profile))
+        std::fprintf(stderr, "stage=%s step=%zu\n", negative_dit ? "cfg-euler" : "v-lerp-euler", step_index);
+        const bool sampler_ok = negative_dit
+                                    ? apply_cfg_euler_vulkan(prediction_gpu, negative_prediction_gpu, sample_patches_gpu,
+                                                             context.cfg_scale, normalized_delta, context.vkdev,
+                                                             context.dit_blob_allocator, context.dit_staging_allocator,
+                                                             updated_patches_gpu, &profile)
+                                    : apply_v_lerp_euler_vulkan(prediction_gpu, sample_patches_gpu, normalized_delta,
+                                                                 context.vkdev, context.dit_blob_allocator,
+                                                                 context.dit_staging_allocator, updated_patches_gpu,
+                                                                 &profile);
+        if (!sampler_ok)
         {
-            failed_stage = "v-lerp-euler";
+            failed_stage = negative_dit ? "cfg-euler" : "v-lerp-euler";
             return false;
         }
 
@@ -873,6 +991,115 @@ bool run_multistep_denoise_vulkan(const ncnn::VkMat& condition_gpu,
     return true;
 }
 
+bool prepare_initial_noise(ncnn::Mat& noise, const VulkanInferenceContext& context,
+                           std::size_t frame_index, const PerformanceProfile& profile)
+{
+    if (!context.noise_seed)
+    {
+        for (std::size_t index = 0; index < noise.total(); ++index)
+            noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
+        return true;
+    }
+
+    // Fill a dense C,D,H,W sequence, then copy channels without treating ncnn
+    // channel-alignment padding as random samples.
+    const std::size_t channel_size = static_cast<std::size_t>(noise.w) * noise.h * noise.d;
+    std::vector<float> values(channel_size * noise.c);
+    if (!fill_gaussian_noise(values.data(), values.size(), *context.noise_seed, frame_index))
+        return false;
+    noise.fill(0.f);
+    for (int channel = 0; channel < noise.c; ++channel)
+        std::memcpy(noise.channel(channel).data, values.data() + channel * channel_size,
+                    channel_size * sizeof(float));
+    std::fprintf(stderr, "stage=noise-create distribution=normal seed=%u frame=%zu algorithm=mt19937-box-muller-v1\n",
+                 *context.noise_seed, frame_index);
+    report_tensor_fingerprint(profile, "initial-noise", frame_index, noise);
+    return true;
+}
+
+// Keep one CFG branch resident at a time. Besides making FP32 fit on a 24 GiB
+// GPU, this lets BF16 CFG run when available Vulkan heap is reduced. Branch
+// outputs and sampler state remain live while model weights
+// are released and the allocator reuses their storage for the next branch.
+bool denoise_sequential_cfg_vulkan(const ncnn::Mat& condition, const ncnn::Mat& noise,
+                                   const ResolutionPlan& plan, VulkanInferenceContext& context,
+                                   ncnn::Mat& output, std::string& error,
+                                   const PerformanceProfile& profile, bool use_fp32)
+{
+    const ncnn::Option opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator,
+                                                context.pipeline_cache.get(), use_fp32);
+    const auto fail = [&](const char* stage) {
+        error = format_vulkan_stage_error(stage, context.diagnostics,
+                                          use_fp32 ? "FP32 execution returned failure"
+                                                   : "BF16 sequential CFG execution returned failure");
+        return false;
+    };
+    ncnn::VkMat current, cond;
+    {
+        ncnn::VkCompute compute(context.vkdev);
+        compute.record_upload(noise, current, opt);
+        compute.record_upload(condition, cond, opt);
+        profile.record_runtime_upload();
+        profile.record_runtime_upload();
+        if (submit_and_wait_profiled(compute, &profile) != 0)
+            return fail(use_fp32 ? "fp32-noise-upload" : "bf16-noise-upload");
+    }
+    const std::vector<float> timesteps = uniform_trailing_timesteps(kSamplingScheduleT, context.sample_steps);
+    if (timesteps.empty())
+        return fail("sampling-schedule");
+    for (std::size_t step = 0; step < timesteps.size(); ++step)
+    {
+        ncnn::VkMat input, prediction[2], patches, updated, next;
+        if (!make_dit_input_patches_gpu(current, cond, plan, context.vkdev, context.dit_blob_allocator,
+                                        context.dit_staging_allocator, input, context.pipeline_cache.get(), &profile, use_fp32))
+            return fail(use_fp32 ? "fp32-input-patchify" : "bf16-input-patchify");
+        float model_timestep = 0.f;
+        if (!transform_timestep(timesteps[step], kSamplingScheduleT, plan.source_t,
+                                plan.latent_height, plan.latent_width, model_timestep))
+            return fail("conditioning-timestep");
+        std::fprintf(stderr, "conditioning-timestep step=%zu raw=%.6f model=%.6f shape=%d,%d,%d\n",
+                     step, timesteps[step], model_timestep, plan.source_t, plan.latent_height, plan.latent_width);
+        const int branches = context.cfg_scale > 1.f ? 2 : 1;
+        for (int branch = 0; branch < branches; ++branch)
+        {
+            const char* name = branch ? "dit-negative" : "dit";
+            const auto& directory = branch ? context.graphs.negative_dit_stack_dir : context.graphs.dit_stack_dir;
+            std::fprintf(stderr, "stage=load-dit-branch step=%zu branch=%d precision=%s\n",
+                         step, branch, use_fp32 ? "fp32" : "bf16");
+            DitStackSession session;
+            if (!DitStackSession::open(directory.string(), plan, context.vkdev, context.dit_blob_allocator,
+                                       context.dit_staging_allocator, session, &profile, context.pipeline_cache.get(), use_fp32))
+                return fail(branch ? "load-dit-stack-negative" : "load-dit-stack");
+            profile.report_model_cache(name, "load");
+            if (!session.run(input, branch ? context.negative_text : context.text,
+                              model_timestep, plan, prediction[branch]))
+                return fail(branch ? "dit-stack-negative" : "dit-stack");
+            session.clear();
+            std::fprintf(stderr, "stage=release-dit-branch step=%zu branch=%d\n", step, branch);
+        }
+        if (!patch_latent_for_dit_output_gpu(current, plan, context.vkdev, context.dit_blob_allocator,
+                                             context.dit_staging_allocator, patches, context.pipeline_cache.get(), &profile, use_fp32))
+            return fail(use_fp32 ? "fp32-noise-patchify" : "bf16-noise-patchify");
+        const float next_time = step + 1 < timesteps.size() ? timesteps[step + 1] : 0.f;
+        // At CFG=1 both arguments refer to the positive result, so the same
+        // FP32 sampler computes the positive-only Euler update exactly.
+        if (!apply_cfg_euler_vulkan(prediction[0], branches == 2 ? prediction[1] : prediction[0], patches,
+                                    context.cfg_scale, (next_time - timesteps[step]) / kSamplingScheduleT,
+                                    context.vkdev, context.dit_blob_allocator, context.dit_staging_allocator,
+                                    updated, &profile, use_fp32) ||
+            !unpatch_dit_output_gpu(updated, plan, context.vkdev, context.dit_blob_allocator,
+                                    context.dit_staging_allocator, next, context.pipeline_cache.get(), &profile, use_fp32))
+            return fail(use_fp32 ? "fp32-cfg-euler-unpatch" : "bf16-cfg-euler-unpatch");
+        current = std::move(next);
+    }
+    ncnn::VkCompute compute(context.vkdev);
+    compute.record_download(current, output, opt);
+    profile.record_runtime_download();
+    return submit_and_wait_profiled(compute, &profile) == 0 && !output.empty()
+               ? true
+               : fail(use_fp32 ? "handoff-latent" : "bf16-handoff-latent");
+}
+
 bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                           const ResolutionPlan& plan,
                           VulkanInferenceContext& context,
@@ -882,12 +1109,61 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                           std::size_t frame_offset)
 {
     output_latents.clear();
+    if (context.fp32)
+    {
+        ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
+        for (std::size_t frame = 0; frame < condition_latents.size(); ++frame)
+        {
+            ncnn::Mat latent;
+            if (noise.empty() || !prepare_initial_noise(noise, context, frame_offset + frame, profile) ||
+                !denoise_sequential_cfg_vulkan(condition_latents[frame], noise, plan, context, latent,
+                                               error, profile, true))
+            {
+                if (error.empty()) error = "stage=noise-create failed";
+                return false;
+            }
+            report_tensor_fingerprint(profile, "denoised-latent", frame_offset + frame, latent);
+            output_latents.push_back(std::move(latent));
+        }
+        context.release_dit_stage();
+        profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
+                                 context.diagnostics.max_allocation_mib);
+        return true;
+    }
+    // Keep margin for allocations that appear after context initialization;
+    // the available heap can shrink while another Vulkan client starts work.
+    const bool sequential_bf16_cfg = context.cfg_scale > 1.f &&
+        (context.diagnostics.heap_budget_mib == 0 ||
+         context.diagnostics.heap_budget_mib < kSequentialCfgHeapThresholdMiB);
+    if (sequential_bf16_cfg)
+    {
+        std::fprintf(stderr, "stage=cfg-loading policy=sequential heap-budget-mib=%u threshold-mib=%u\n",
+                     context.diagnostics.heap_budget_mib, kSequentialCfgHeapThresholdMiB);
+        ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
+        for (std::size_t frame = 0; frame < condition_latents.size(); ++frame)
+        {
+            ncnn::Mat latent;
+            if (noise.empty() || !prepare_initial_noise(noise, context, frame_offset + frame, profile) ||
+                !denoise_sequential_cfg_vulkan(condition_latents[frame], noise, plan, context, latent,
+                                               error, profile, false))
+            {
+                if (error.empty()) error = "stage=noise-create failed";
+                return false;
+            }
+            report_tensor_fingerprint(profile, "denoised-latent", frame_offset + frame, latent);
+            output_latents.push_back(std::move(latent));
+        }
+        context.release_dit_stage();
+        profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
+                                 context.diagnostics.max_allocation_mib);
+        return true;
+    }
     const auto stage_error = [&](std::size_t frame_index, const char* stage, const char* detail) {
         error = "frame=" + std::to_string(frame_index) + " " +
                 format_vulkan_stage_error(stage, context.diagnostics, detail);
     };
     const ncnn::Option dit_opt = make_vulkan_option(context.dit_blob_allocator, context.dit_staging_allocator,
-                                                    context.pipeline_cache.get());
+                                                    context.pipeline_cache.get(), context.fp32);
 
     ncnn::Mat noise(plan.latent_width, plan.latent_height, 1, kLatentChannels);
     if (noise.empty())
@@ -895,15 +1171,20 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
         error = "stage=noise-create failed";
         return false;
     }
-    for (std::size_t index = 0; index < noise.total(); index++)
-        noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
-
     DitStackSession* dit = nullptr;
     if (!acquire_dit_stack(plan, context, dit, error, profile))
+        return false;
+    DitStackSession* negative_dit = nullptr;
+    if (context.cfg_scale > 1.f && !acquire_dit_stack(plan, context, negative_dit, error, profile, true))
         return false;
 
     for (std::size_t frame_index = 0; frame_index < condition_latents.size(); frame_index++)
     {
+        if (!prepare_initial_noise(noise, context, frame_offset + frame_index, profile))
+        {
+            stage_error(frame_index, "noise-create", "Gaussian noise generation failed");
+            return false;
+        }
         {
             const ProfileScope frame_scope(profile, "dit-stack", frame_offset + frame_index);
             ncnn::VkMat condition_gpu;
@@ -936,11 +1217,31 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                 }
 
                 ncnn::VkMat prediction_gpu;
+                float model_timestep = 0.f;
+                if (!transform_timestep(kSamplingScheduleT, kSamplingScheduleT, plan.source_t,
+                                        plan.latent_height, plan.latent_width, model_timestep))
+                {
+                    stage_error(frame_index, "conditioning-timestep", "resolution transform rejected timestep");
+                    return false;
+                }
+                std::fprintf(stderr, "conditioning-timestep raw=%.6f model=%.6f shape=%d,%d,%d\n",
+                             kSamplingScheduleT, model_timestep, plan.source_t,
+                             plan.latent_height, plan.latent_width);
                 std::fprintf(stderr, "stage=dit-stack\n");
-                if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
+                if (!dit->run(input_patches_gpu, context.text, model_timestep, plan, prediction_gpu))
                 {
                     context.clear_cached_dit();
                     stage_error(frame_index, "dit-stack", "GPU DiT execution returned failure");
+                    return false;
+                }
+
+                ncnn::VkMat negative_prediction_gpu;
+                if (negative_dit &&
+                    !negative_dit->run(input_patches_gpu, context.negative_text, model_timestep, plan,
+                                       negative_prediction_gpu))
+                {
+                    context.clear_cached_dit();
+                    stage_error(frame_index, "dit-stack-negative", "GPU negative DiT execution returned failure");
                     return false;
                 }
 
@@ -956,9 +1257,14 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
 
                 ncnn::VkMat endpoint_patches_gpu;
                 std::fprintf(stderr, "stage=v-lerp-endpoint\n");
-                if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                                      context.dit_blob_allocator, context.dit_staging_allocator,
-                                                      endpoint_patches_gpu, &profile))
+                const bool endpoint_ok = negative_dit
+                    ? apply_cfg_euler_vulkan(prediction_gpu, negative_prediction_gpu, noise_patches_gpu,
+                                             context.cfg_scale, -1.f, context.vkdev, context.dit_blob_allocator,
+                                             context.dit_staging_allocator, endpoint_patches_gpu, &profile)
+                    : apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                                       context.dit_blob_allocator, context.dit_staging_allocator,
+                                                       endpoint_patches_gpu, &profile);
+                if (!endpoint_ok)
                 {
                     stage_error(frame_index, "v-lerp-endpoint", "GPU sampler endpoint returned failure");
                     return false;
@@ -976,7 +1282,7 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
             else
             {
                 const char* failed_stage = "sampling";
-                if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, profile,
+                if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, negative_dit, profile,
                                                   output_latent_gpu, failed_stage))
                 {
                     stage_error(frame_index, failed_stage, "GPU multi-step sampling returned failure");
@@ -996,12 +1302,12 @@ bool denoise_batch_vulkan(const std::vector<ncnn::Mat>& condition_latents,
                     return false;
                 }
             }
+            report_tensor_fingerprint(profile, "denoised-latent", frame_offset + frame_index, output_latent);
             output_latents.push_back(std::move(output_latent));
         }
     }
 
-    context.dit_blob_allocator->clear();
-    context.dit_staging_allocator->clear();
+    context.release_dit_stage();
     profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
                              context.diagnostics.max_allocation_mib);
     return true;
@@ -1026,7 +1332,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
             const ProfileScope load_scope(profile, "load-decode");
             std::fprintf(stderr, "stage=load-decode\n");
             if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
-                          context.decode_staging_allocator.get(), true, context.pipeline_cache.get()))
+                          context.decode_staging_allocator.get(), true, context.pipeline_cache.get(), context.fp32))
             {
                 stage_error(0, "load-decode", "ncnn graph load returned failure");
                 return false;
@@ -1071,6 +1377,7 @@ bool decode_batch_vulkan(const std::vector<ncnn::Mat>& output_latents,
             else if (!run_decode_tile_vulkan(output_latents[frame_index], decode, context, reconstruction, error,
                                              profile, frame_index))
                 return false;
+            report_tensor_fingerprint(profile, "reconstruction", frame_offset + frame_index, reconstruction);
             if (!reconstruction_to_rgb(reconstruction, plan, outputs.emplace_back()))
             {
                 outputs.pop_back();
@@ -1132,7 +1439,7 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
         const ProfileScope load_scope(profile, "load-encode");
         std::fprintf(stderr, "stage=load-encode\n");
         if (!load_vae(encode, context.encode_vae_graph, context.vkdev, context.encode_blob_allocator,
-                      context.encode_staging_allocator, false, context.pipeline_cache.get()))
+                      context.encode_staging_allocator, false, context.pipeline_cache.get(), context.fp32))
         {
             error = format_vulkan_stage_error("load-encode", context.diagnostics,
                                               "ncnn graph load returned failure");
@@ -1225,6 +1532,8 @@ bool encode_video_vulkan(const ImageInferenceSession::VideoFrameReader& reader,
             profile.report("video-read", read_ms);
             return false;
         }
+        if (context.noise_seed)
+            report_tensor_fingerprint(profile, "condition-latent", absolute_index, latent);
         LatentFrame stored;
         {
             const ProfileScope scope(profile, "encode-latent-materialize", absolute_index);
@@ -1290,11 +1599,11 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         error = "stage=noise-create failed";
         return false;
     }
-    for (std::size_t index = 0; index < noise.total(); index++)
-        noise[index] = 0.01f * static_cast<float>((index * 17u) % 101u) - 0.5f;
-
     DitStackSession* dit = nullptr;
     if (!acquire_dit_stack(plan, context, dit, error, profile))
+        return false;
+    DitStackSession* negative_dit = nullptr;
+    if (context.cfg_scale > 1.f && !acquire_dit_stack(plan, context, negative_dit, error, profile, true))
         return false;
 
     for (;;)
@@ -1314,6 +1623,11 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             break;
         }
         const ProfileScope frame_scope(profile, "dit-stack", absolute_index);
+        if (!prepare_initial_noise(noise, context, absolute_index, profile))
+        {
+            error = "frame=" + std::to_string(absolute_index) + " stage=noise-create Gaussian noise generation failed";
+            return false;
+        }
         ncnn::Mat condition_latent;
         {
             const ProfileScope scope(profile, "dit-latent-materialize", absolute_index);
@@ -1362,10 +1676,21 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             }
 
             ncnn::VkMat prediction_gpu;
+            float model_timestep = 0.f;
+            if (!transform_timestep(kSamplingScheduleT, kSamplingScheduleT, plan.source_t,
+                                    plan.latent_height, plan.latent_width, model_timestep))
+            {
+                error = "frame=" + std::to_string(absolute_index) +
+                        " stage=conditioning-timestep resolution transform rejected timestep";
+                return false;
+            }
+            std::fprintf(stderr, "conditioning-timestep frame=%zu raw=%.6f model=%.6f shape=%d,%d,%d\n",
+                         absolute_index, kSamplingScheduleT, model_timestep, plan.source_t,
+                         plan.latent_height, plan.latent_width);
             std::fprintf(stderr, "stage=dit-stack\n");
             {
                 const ProfileScope scope(profile, "dit-stack-call", absolute_index);
-                if (!dit->run(input_patches_gpu, context.text, kSamplingScheduleT, plan, prediction_gpu))
+                if (!dit->run(input_patches_gpu, context.text, model_timestep, plan, prediction_gpu))
                 {
                     context.clear_cached_dit();
                     error = "frame=" + std::to_string(absolute_index) + " " +
@@ -1373,6 +1698,18 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
                                                       "GPU DiT execution returned failure");
                     return false;
                 }
+            }
+
+            ncnn::VkMat negative_prediction_gpu;
+            if (negative_dit &&
+                !negative_dit->run(input_patches_gpu, context.negative_text, model_timestep, plan,
+                                   negative_prediction_gpu))
+            {
+                context.clear_cached_dit();
+                error = "frame=" + std::to_string(absolute_index) + " " +
+                        format_vulkan_stage_error("dit-stack-negative", context.diagnostics,
+                                                  "GPU negative DiT execution returned failure");
+                return false;
             }
 
             ncnn::VkMat noise_patches_gpu;
@@ -1395,9 +1732,14 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             std::fprintf(stderr, "stage=v-lerp-endpoint\n");
             {
                 const ProfileScope scope(profile, "dit-sampler", absolute_index);
-                if (!apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
-                                                      context.dit_blob_allocator, context.dit_staging_allocator,
-                                                      endpoint_patches_gpu, &profile))
+                const bool endpoint_ok = negative_dit
+                    ? apply_cfg_euler_vulkan(prediction_gpu, negative_prediction_gpu, noise_patches_gpu,
+                                             context.cfg_scale, -1.f, context.vkdev, context.dit_blob_allocator,
+                                             context.dit_staging_allocator, endpoint_patches_gpu, &profile)
+                    : apply_cfg_v_lerp_endpoint_vulkan(prediction_gpu, noise_patches_gpu, context.vkdev,
+                                                       context.dit_blob_allocator, context.dit_staging_allocator,
+                                                       endpoint_patches_gpu, &profile);
+                if (!endpoint_ok)
                 {
                     error = "frame=" + std::to_string(absolute_index) + " " +
                             format_vulkan_stage_error("v-lerp-endpoint", context.diagnostics,
@@ -1423,7 +1765,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         else
         {
             const char* failed_stage = "sampling";
-            if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, profile,
+            if (!run_multistep_denoise_vulkan(condition_gpu, noise_gpu, plan, context, *dit, negative_dit, profile,
                                               output_latent_gpu, failed_stage))
             {
                 error = "frame=" + std::to_string(absolute_index) + " " +
@@ -1449,6 +1791,8 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
             }
         }
         LatentFrame output_stored;
+        if (context.noise_seed)
+            report_tensor_fingerprint(profile, "denoised-latent", absolute_index, output_latent);
         {
             const ProfileScope scope(profile, "dit-latent-materialize-output", absolute_index);
             if (!ncnn_mat_to_latent_frame(output_latent, output_stored))
@@ -1477,8 +1821,7 @@ bool denoise_video_vulkan(LatentSpool& condition_spool,
         if (!output_spool.rewind(error))
             return false;
     }
-    context.dit_blob_allocator->clear();
-    context.dit_staging_allocator->clear();
+    context.release_dit_stage();
     profile.report_residency("dit-released", context.diagnostics.heap_budget_mib,
                              context.diagnostics.max_allocation_mib);
     return true;
@@ -1501,7 +1844,7 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         const ProfileScope load_scope(profile, "load-decode");
         std::fprintf(stderr, "stage=load-decode\n");
         if (!load_vae(decode, context.decode_vae_graph, context.vkdev, context.decode_blob_allocator,
-                      context.decode_staging_allocator.get(), true, context.pipeline_cache.get()))
+                      context.decode_staging_allocator.get(), true, context.pipeline_cache.get(), context.fp32))
         {
             error = format_vulkan_stage_error("load-decode", context.diagnostics,
                                               "ncnn graph load returned failure");
@@ -1572,6 +1915,8 @@ bool decode_video_vulkan(LatentSpool& output_spool,
         else if (!run_decode_tile_vulkan(output_latent, decode, context, reconstruction, error, profile,
                                          absolute_index))
             return false;
+        if (context.noise_seed)
+            report_tensor_fingerprint(profile, "reconstruction", absolute_index, reconstruction);
         RgbImage output;
         {
             const ProfileScope scope(profile, "decode-reconstruction-to-rgb", absolute_index);
@@ -1760,7 +2105,10 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
                                  std::uint32_t memory_budget_mib,
                                  const PerformanceProfile* profile,
                                  int vae_tile_size,
-                                 int sample_steps)
+                                 int sample_steps,
+                                 float cfg_scale,
+                                 std::optional<std::uint32_t> noise_seed,
+                                 bool fp32)
 {
     error.clear();
 #if NCNN_VULKAN
@@ -1774,14 +2122,26 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
         error = "sampling steps must be a positive integer";
         return false;
     }
+    if (!std::isfinite(cfg_scale) || cfg_scale < 1.f)
+    {
+        error = "CFG scale must be a finite number greater than or equal to 1";
+        return false;
+    }
+    if (fp32 && (plan.image_width != 256 || plan.image_height != 256 || plan.source_t != 1 ||
+                 vae_tile_size != 0 || sample_steps > 4 || cfg_scale > 20.f || graphs.dit_stack_dir.empty()))
+    {
+        error = "FP32 requires a fixed 256x256 single-frame DiT stack, no VAE tiling, 1..4 steps and CFG in [1,20]";
+        return false;
+    }
     static const PerformanceProfile kDisabledProfile;
     std::unique_ptr<Impl> candidate(new Impl);
     candidate->profile = profile ? profile : &kDisabledProfile;
     const auto open_start = PerformanceProfile::Clock::now();
     if (!initialize_vulkan_context(graphs, plan, gpu_id, memory_budget_mib, candidate->context, error,
-                                  *candidate->profile, vae_tile_size))
+                                  *candidate->profile, vae_tile_size, cfg_scale, fp32))
         return false;
     candidate->context.sample_steps = sample_steps;
+    candidate->context.noise_seed = noise_seed;
     candidate->profile->report_session_open(candidate->profile->elapsed_ms(open_start));
     session.impl_ = std::move(candidate);
     return true;
@@ -1793,19 +2153,23 @@ bool ImageInferenceSession::open(const ModelGraphSet& graphs,
     (void)profile;
     (void)vae_tile_size;
     (void)sample_steps;
+    (void)cfg_scale;
+    (void)noise_seed;
+    (void)fp32;
     error = "image inference requires a Vulkan-enabled build";
     return false;
 #endif
 }
 
-bool ImageInferenceSession::run_frame(const RgbImage& input, RgbImage& output, std::string& error) const
+bool ImageInferenceSession::run_frame(const RgbImage& input, RgbImage& output, std::string& error,
+                                       std::size_t frame_index) const
 {
     output = RgbImage();
     error.clear();
     std::vector<RgbImage> inputs;
     inputs.push_back(input);
     std::vector<RgbImage> outputs;
-    if (!run_batch(inputs, outputs, error))
+    if (!run_batch(inputs, outputs, error, frame_index))
         return false;
     output = std::move(outputs.front());
     return true;
@@ -1828,6 +2192,11 @@ bool ImageInferenceSession::run_batch(const std::vector<RgbImage>& inputs,
     if (!impl_)
     {
         error = "inference session is not open";
+        return false;
+    }
+    if (impl_->context.fp32 && inputs.size() != 1)
+    {
+        error = "FP32 currently accepts one image per run";
         return false;
     }
     for (const RgbImage& input : inputs)
@@ -1872,6 +2241,11 @@ bool ImageInferenceSession::run_video(const VideoFrameReader& reader,
     if (!impl_)
     {
         error = "inference session is not open";
+        return false;
+    }
+    if (impl_->context.fp32)
+    {
+        error = "FP32 temporal/video inference is not supported";
         return false;
     }
     const auto run_start = PerformanceProfile::Clock::now();

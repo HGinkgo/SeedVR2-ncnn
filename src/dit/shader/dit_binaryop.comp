@@ -1,0 +1,44 @@
+#version 450
+layout(constant_id = 0) const int operation = 0;
+layout(binding = 0) readonly buffer a_reduced { sfp a_data[]; };
+layout(binding = 1) readonly buffer a_float { float a_fp32[]; };
+layout(binding = 2) readonly buffer b_reduced { sfp b_data[]; };
+layout(binding = 3) readonly buffer b_float { float b_fp32[]; };
+layout(binding = 4) writeonly buffer out_reduced { sfp out_data[]; };
+layout(binding = 5) writeonly buffer out_float { float out_fp32[]; };
+layout(push_constant) uniform parameter
+{
+    int width;
+    int rows;
+    int a_width;
+    int a_rows;
+    int b_width;
+    int b_rows;
+    int a_float;
+    int b_float;
+    int out_float;
+    int with_scalar;
+    float scalar;
+} p;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= p.width || y >= p.rows) return;
+    int i = y * p.width + x;
+    int ai = min(y, p.a_rows - 1) * p.a_width + min(x, p.a_width - 1);
+    int bi = min(y, p.b_rows - 1) * p.b_width + min(x, p.b_width - 1);
+    float a = p.a_float != 0 ? a_fp32[ai] : float(buffer_ld1(a_data, ai));
+    float b = p.with_scalar != 0 ? p.scalar :
+              (p.b_float != 0 ? b_fp32[bi] : float(buffer_ld1(b_data, bi)));
+    precise float value = operation == 0 ? a + b : a * b;
+    if (p.out_float != 0) out_fp32[i] = value;
+    else
+    {
+#if NCNN_bf16_storage || NCNN_bf16_packed
+        uint bits = floatBitsToUint(value);
+        value = uintBitsToFloat((bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
+#endif
+        buffer_st1(out_data, i, afp(value));
+    }
+}

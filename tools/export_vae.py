@@ -95,14 +95,41 @@ def rewrite_ncnn_param(param_path: Path) -> None:
     index = 2
     while index < len(lines):
         split = fields(lines[index])
+        # A one-frame PT2 export represents the decoder's implicit temporal
+        # axis as a fixed Reshape.  ncnn collapses a size-one depth axis in a
+        # Mat, so the decoder must make that axis explicit before the first
+        # SeedVR2CausalConv3D.  Convert only the leading [32, 32, 1, 16]
+        # boundary; later Reshape layers are real spatial/channel transforms.
+        if (
+            len(split) >= 10
+            and split[0] == "Reshape"
+            and split[2:4] == ["1", "1"]
+            and split[6:] == ["0=32", "1=32", "11=1", "2=16"]
+            and index <= 8
+        ):
+            rewritten.append(
+                f"ExpandDims unsqueeze_232 1 1 {split[4]} {split[5]} -23303=1,1"
+            )
+            index += 1
+            continue
         if (
             len(split) >= 9
             and split[0] == "Crop"
-            and "-23310=1,-233" in split
             and "-23311=1,1" in split
-            and "-23309=1,2" in split
+            and (
+                ("-23310=1,-233" in split and "-23309=1,2" in split)
+                or ("-23310=1,2" in split and "-23309=1,2" in split)
+            )
         ):
-            rewritten.append(" ".join("-23309=1,1" if token == "-23309=1,2" else token for token in split))
+            if "-23310=1,2" in split:
+                split = [
+                    "-23310=1,-233" if token == "-23310=1,2" else
+                    "-23309=1,1" if token == "-23309=1,2" else token
+                    for token in split
+                ]
+            else:
+                split = ["-23309=1,1" if token == "-23309=1,2" else token for token in split]
+            rewritten.append(" ".join(split))
             replacements += 1
             index += 1
             continue
@@ -137,8 +164,9 @@ def rewrite_ncnn_param(param_path: Path) -> None:
         is_causal_tile = (
             len(split) == 7
             and split[:4] == ["Split", split[1], "1", "2"]
-            and len(tile) == 6
-            and tile[:4] == ["torch.tile", tile[1], "1", "1"]
+            and len(tile) >= 6
+            and tile[0] in ("torch.tile", "Tile")
+            and tile[1:4] == [tile[1], "1", "1"]
             and len(concat) >= 8
             and concat[:4] == ["Concat", concat[1], "2", "1"]
             and tile[4] == split[6]
@@ -149,8 +177,9 @@ def rewrite_ncnn_param(param_path: Path) -> None:
         is_standalone_causal_tile = (
             len(split) == 7
             and split[:4] == ["Split", split[1], "1", "2"]
-            and len(tile) == 6
-            and tile[:4] == ["torch.tile", tile[1], "1", "1"]
+            and len(tile) >= 6
+            and tile[0] in ("torch.tile", "Tile")
+            and tile[1:4] == [tile[1], "1", "1"]
             and tile[4] == split[6]
         )
         if is_depth_to_space:

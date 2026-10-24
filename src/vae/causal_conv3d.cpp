@@ -38,7 +38,7 @@ Padding resolve_padding(int size, int kernel_extent, int stride, int before, int
 
 } // namespace
 
-SeedVR2CausalConv3D::SeedVR2CausalConv3D()
+SeedVR2CausalConv3D::SeedVR2CausalConv3D(bool plain_fp32) : plain_fp32_(plain_fp32)
 {
     support_vulkan = true;
     support_packing = false;
@@ -49,7 +49,7 @@ int SeedVR2CausalConv3D::load_param(const ncnn::ParamDict& pd)
 {
     const int result = ncnn::Convolution3D::load_param(pd);
     prepend_ = pd.get(31, 0);
-    return result == 0 && prepend_ > 0 ? 0 : -1;
+    return result == 0 && (plain_fp32_ ? prepend_ == 0 : prepend_ > 0) ? 0 : -1;
 }
 
 bool SeedVR2CausalConv3D::supports_output_channel4() const
@@ -92,7 +92,7 @@ int SeedVR2CausalConv3D::forward(const ncnn::Mat& bottom_blob, ncnn::Mat& top_bl
                                   const ncnn::Option& opt) const
 {
     if (bottom_blob.dims != 4 || bottom_blob.elempack != 1 || bottom_blob.elemsize != 4u ||
-        bottom_blob.empty() || prepend_ <= 0)
+        bottom_blob.empty() || (plain_fp32_ ? prepend_ != 0 : prepend_ <= 0))
         return -1;
 
     const int input_width = bottom_blob.w;
@@ -185,6 +185,9 @@ int SeedVR2CausalConv3D::upload_model(ncnn::VkTransfer& cmd, const ncnn::Option&
 
 int SeedVR2CausalConv3D::create_pipeline(const ncnn::Option& opt)
 {
+    if (plain_fp32_ && (opt.use_bf16_storage || opt.use_bf16_packed ||
+                       opt.use_fp16_storage || opt.use_fp16_packed || opt.use_fp16_arithmetic))
+        return -1;
     if (!opt.use_vulkan_compute || !vkdev)
         return 0;
 
@@ -249,8 +252,12 @@ int SeedVR2CausalConv3D::destroy_pipeline(const ncnn::Option& /*opt*/)
 int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blob,
                                   ncnn::VkCompute& cmd, const ncnn::Option& opt) const
 {
+    const bool fp32_storage = !opt.use_bf16_storage && !opt.use_bf16_packed &&
+                              !opt.use_fp16_storage && !opt.use_fp16_packed;
+    const size_t expected_elemsize = fp32_storage ? 4u : 2u;
     if (bottom_blob.dims != 4 || bottom_blob.n != 1 || bottom_blob.elempack != 1 ||
-        bottom_blob.empty() || bottom_blob.elemsize != 2u || prepend_ <= 0 || pipeline_ == 0 ||
+        bottom_blob.empty() || bottom_blob.elemsize != expected_elemsize ||
+        (plain_fp32_ ? prepend_ != 0 || !fp32_storage : prepend_ <= 0) || pipeline_ == 0 ||
         weight_data_gpu.empty() || (bias_term && bias_data_gpu.empty()))
         return -1;
 
@@ -278,8 +285,10 @@ int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& to
     if (top_blob.empty())
         return -100;
 
-    const bool use_output_channel8 = output_channel8_pipeline_ != nullptr && supports_output_channel8(bottom_blob);
-    const bool use_output_channel4 = !use_output_channel8 &&
+    // FP32 validation uses the compensated generic shader, including fused
+    // causal nodes. The existing low-precision optimized paths are unchanged.
+    const bool use_output_channel8 = !fp32_storage && output_channel8_pipeline_ != nullptr && supports_output_channel8(bottom_blob);
+    const bool use_output_channel4 = !fp32_storage && !use_output_channel8 &&
                                      output_channel4_pipeline_ != nullptr && supports_output_channel4();
     std::vector<ncnn::VkMat> bindings(4);
     bindings[0] = bottom_blob;
@@ -331,3 +340,8 @@ int SeedVR2CausalConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& to
 #endif
 
 DEFINE_LAYER_CREATOR(SeedVR2CausalConv3D)
+
+ncnn::Layer* SeedVR2FP32Conv3D_layer_creator(void*)
+{
+    return new SeedVR2CausalConv3D(true);
+}

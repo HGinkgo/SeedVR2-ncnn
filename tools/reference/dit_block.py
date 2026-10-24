@@ -39,6 +39,7 @@ class DitBlockContract:
 
 
 DIT_BLOCK_CONTRACT = DitBlockContract()
+DIT_LAST_BLOCK_CONTRACT = "video-only-ada-and-mlp-v1"
 
 
 def _language_freqs(length: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -153,28 +154,16 @@ class FixedWindowAttention(nn.Module):
         return self.unpack(attended)
 
 
-class FixedRMSNorm(nn.Module):
-    """Export-friendly RMSNorm matching diffusers' implementation."""
+class FixedRMSNorm(nn.RMSNorm):
+    """Fixed-shape RMSNorm using PyTorch's exportable native operator."""
 
     def __init__(self, dim: int, eps: float, elementwise_affine: bool) -> None:
-        super().__init__()
-        self.eps = float(eps)
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(int(dim)))
-        else:
-            self.register_parameter("weight", None)
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden.dtype
-        variance = hidden.float().pow(2).mean(dim=-1, keepdim=True)
-        output = hidden * torch.rsqrt(variance + self.eps)
-        if self.weight is not None:
-            if self.weight.dtype in (torch.float16, torch.bfloat16):
-                output = output.to(dtype=self.weight.dtype)
-            output = output * self.weight
-        else:
-            output = output.to(dtype=input_dtype)
-        return output
+        # Keeping this as a direct RMSNorm subclass preserves the historical
+        # ``weight`` state-dict key while allowing PT2/PNNX to lower the
+        # reduction as one native RMSNorm layer.  The previous hand-written
+        # formula was numerically valid on CPU but exposed a 3-D Vulkan
+        # reduction path that produced incorrect video Q/K normalization.
+        super().__init__(int(dim), eps=float(eps), elementwise_affine=elementwise_affine)
 
 
 class FixedAdaBranch(nn.Module):
@@ -203,10 +192,11 @@ class FixedAdaBranch(nn.Module):
 
 
 class FixedAdaPair(nn.Module):
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, *, vid_only: bool = False) -> None:
         super().__init__()
         self.vid = FixedAdaBranch(dim)
-        self.txt = FixedAdaBranch(dim)
+        if not vid_only:
+            self.txt = FixedAdaBranch(dim)
 
 
 class FixedSwiGLU(nn.Module):
@@ -223,10 +213,11 @@ class FixedSwiGLU(nn.Module):
 
 
 class FixedMLPPair(nn.Module):
-    def __init__(self, dim: int, expand_ratio: int) -> None:
+    def __init__(self, dim: int, expand_ratio: int, *, vid_only: bool = False) -> None:
         super().__init__()
         self.vid = FixedSwiGLU(dim, expand_ratio)
-        self.txt = FixedSwiGLU(dim, expand_ratio)
+        if not vid_only:
+            self.txt = FixedSwiGLU(dim, expand_ratio)
 
 
 def _apply_fixed_rotary(hidden: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
@@ -324,8 +315,10 @@ class FixedDitBlock(nn.Module):
         expand_ratio: int = 4,
         norm_eps: float = 1.0e-5,
         shifted: bool = False,
+        is_last_layer: bool = False,
     ) -> None:
         super().__init__()
+        self.is_last_layer = bool(is_last_layer)
         if int(emb_dim) != 6 * int(vid_dim) or int(vid_dim) != int(txt_dim):
             raise ValueError("the fixed adapter requires emb_dim=6*vid_dim=6*txt_dim")
         self.attn_norm = nn.Module()
@@ -345,8 +338,8 @@ class FixedDitBlock(nn.Module):
         self.mlp_norm = nn.Module()
         self.mlp_norm.vid = FixedRMSNorm(vid_dim, norm_eps, False)
         self.mlp_norm.txt = FixedRMSNorm(txt_dim, norm_eps, False)
-        self.mlp = FixedMLPPair(vid_dim, expand_ratio)
-        self.ada = FixedAdaPair(vid_dim)
+        self.mlp = FixedMLPPair(vid_dim, expand_ratio, vid_only=self.is_last_layer)
+        self.ada = FixedAdaPair(vid_dim, vid_only=self.is_last_layer)
 
     def forward(
         self, vid: torch.Tensor, txt: torch.Tensor, emb: torch.Tensor
@@ -354,14 +347,24 @@ class FixedDitBlock(nn.Module):
         vid_attn = self.attn_norm.vid(vid)
         txt_attn = self.attn_norm.txt(txt)
         vid_attn = self.ada.vid(vid_attn, emb, "attn", "in")
-        txt_attn = self.ada.txt(txt_attn, emb, "attn", "in")
+        if not self.is_last_layer:
+            txt_attn = self.ada.txt(txt_attn, emb, "attn", "in")
         vid_attn, txt_attn = self.attn(vid_attn, txt_attn)
         vid_attn = self.ada.vid(vid_attn, emb, "attn", "out")
-        txt_attn = self.ada.txt(txt_attn, emb, "attn", "out")
+        if not self.is_last_layer:
+            txt_attn = self.ada.txt(txt_attn, emb, "attn", "out")
         vid_attn = vid_attn + vid
         txt_attn = txt_attn + txt
 
         vid_mlp = self.mlp_norm.vid(vid_attn)
+        if self.is_last_layer:
+            # Original MMModule(vid_only=True) leaves text unchanged in Ada,
+            # MLP norm and MLP. Its final residual therefore doubles txt_attn.
+            # Text still participates in attention, without Ada modulation.
+            vid_mlp = self.ada.vid(vid_mlp, emb, "mlp", "in")
+            vid_mlp = self.mlp.vid(vid_mlp)
+            vid_mlp = self.ada.vid(vid_mlp, emb, "mlp", "out")
+            return vid_mlp + vid_attn, txt_attn + txt_attn
         txt_mlp = self.mlp_norm.txt(txt_attn)
         vid_mlp = self.ada.vid(vid_mlp, emb, "mlp", "in")
         txt_mlp = self.ada.txt(txt_mlp, emb, "mlp", "in")
@@ -392,19 +395,48 @@ def load_official_block_weights(
     if not isinstance(state, dict):
         raise ValueError(f"unexpected SeedVR2 checkpoint structure: {checkpoint}")
 
-    prefix = f"blocks.{int(block_index)}."
+    block_index = int(block_index)
+    if block_index < 0:
+        raise ValueError(f"block_index must be non-negative, got {block_index}")
+    prefix = f"blocks.{block_index}."
     parameters = dict(block.named_parameters())
-    missing = [name for name in parameters if prefix + name not in state]
+
+    def source_name(name: str) -> str | None:
+        """Resolve split adapter names against either checkpoint layout."""
+
+        exact = prefix + name
+        if exact in state:
+            return exact
+        if ".vid." in name:
+            candidate = prefix + name.replace(".vid.", ".all.")
+        elif ".txt." in name:
+            candidate = prefix + name.replace(".txt.", ".all.")
+        else:
+            return None
+        return candidate if candidate in state else None
+
+    resolved = {name: source_name(name) for name in parameters}
+    missing = [name for name, resolved_name in resolved.items() if resolved_name is None]
     if missing:
         joined = ", ".join(missing[:5])
-        raise ValueError(f"checkpoint is missing {len(missing)} block tensors: {joined}")
+        unified_layout = any(
+            key.startswith((prefix + "mlp.all.", prefix + "ada.all.", prefix + "attn.proj_qkv.all."))
+            for key in state
+        )
+        layout_hint = (
+            f"; block {block_index} exposes unified '*.all' tensors; the missing split names have no compatible unified counterpart"
+            if unified_layout else ""
+        )
+        raise ValueError(f"checkpoint is missing {len(missing)} block tensors{layout_hint}: {joined}")
 
     with torch.no_grad():
         for name, parameter in parameters.items():
-            source = state[prefix + name]
+            checkpoint_name = resolved[name]
+            assert checkpoint_name is not None
+            source = state[checkpoint_name]
             if not isinstance(source, torch.Tensor) or tuple(source.shape) != tuple(parameter.shape):
                 raise ValueError(
-                    f"checkpoint tensor mismatch for {prefix + name}: "
+                    f"checkpoint tensor mismatch for {checkpoint_name} (adapter {prefix + name}): "
                     f"expected {tuple(parameter.shape)}, got {getattr(source, 'shape', None)}"
                 )
             parameter.copy_(source.to(device=parameter.device, dtype=parameter.dtype))
@@ -418,6 +450,7 @@ def load_fixed_dit_block(
     source_shape: Sequence[int] = DIT_BLOCK_CONTRACT.source_shape,
     window_shape: Sequence[int] = DIT_BLOCK_CONTRACT.window_shape,
     text_tokens: int = DIT_BLOCK_CONTRACT.text_tokens,
+    is_last_layer: bool | None = None,
 ) -> FixedDitBlock:
     """Construct and populate the fixed-shape adapter for an official block."""
 
@@ -425,6 +458,7 @@ def load_fixed_dit_block(
         source_shape=source_shape,
         window_shape=window_shape,
         text_tokens=text_tokens,
+        is_last_layer=block_index == 31 if is_last_layer is None else is_last_layer,
     ).eval()
     load_official_block_weights(block, checkpoint, block_index=block_index)
     return block

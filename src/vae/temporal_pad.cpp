@@ -112,8 +112,10 @@ int SeedVR2TemporalPad::forward(const ncnn::VkMat& bottom_blob,
 
 DEFINE_LAYER_CREATOR(SeedVR2TemporalPad)
 
-void register_seedvr2_vae_layers(ncnn::Net& net)
+void register_seedvr2_vae_layers(ncnn::Net& net, bool fp32_convolution)
 {
+    if (fp32_convolution)
+        net.register_custom_layer("Convolution3D", SeedVR2FP32Conv3D_layer_creator);
     net.register_custom_layer("SeedVR2TemporalPad", SeedVR2TemporalPad_layer_creator);
     net.register_custom_layer("SeedVR2CausalConv3D", SeedVR2CausalConv3D_layer_creator);
     net.register_custom_layer("SeedVR2PointwiseConv3D", SeedVR2PointwiseConv3D_layer_creator);

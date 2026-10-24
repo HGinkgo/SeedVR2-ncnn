@@ -16,6 +16,8 @@
 #include "layer/vulkan/shader/awa_attention_softmax.comp.hex.h"
 #include "layer/vulkan/shader/awa_attention_value.comp.hex.h"
 #include "layer/vulkan/shader/mmrope.comp.hex.h"
+#include "layer/vulkan/shader/cast_bf16_f32.comp.hex.h"
+#include "layer/vulkan/shader/cast_f32_bf16.comp.hex.h"
 #endif
 
 namespace
@@ -179,6 +181,23 @@ bool describe_qkv_layout(const ncnn::VkMat& blob, int source_tokens, QkvLayout& 
            describe_qkv_layout<ncnn::VkMat>(blob, source_tokens, layout);
 }
 
+bool awa_bf16_io(const ncnn::Option& opt)
+{
+    return opt.use_bf16_storage || opt.use_bf16_packed;
+}
+
+ncnn::Option awa_fp32_option(const ncnn::Option& opt)
+{
+    ncnn::Option result = opt;
+    result.use_bf16_storage = false;
+    result.use_bf16_packed = false;
+    result.use_fp16_storage = false;
+    result.use_fp16_packed = false;
+    result.use_fp16_arithmetic = false;
+    result.use_packing_layout = false;
+    return result;
+}
+
 int create_awa_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data, size_t shader_size,
                         const ncnn::Option& opt, int mode, ncnn::Pipeline*& pipeline)
 {
@@ -194,6 +213,8 @@ int create_awa_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data
     }
 
     ncnn::Pipeline* candidate = new ncnn::Pipeline(vkdev);
+    // Keep the fixed 4x4x4 workgroup explicit for this validated block path;
+    // the dispatch mapping is part of the current custom-kernel contract.
     candidate->set_optimal_local_size_xyz(4, 4, 4);
     if (candidate->create(spirv.data(), spirv.size() * sizeof(uint32_t), specializations) != 0)
     {
@@ -202,6 +223,89 @@ int create_awa_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data
     }
     pipeline = candidate;
     return 0;
+}
+
+int create_awa_cast_pipeline(const ncnn::VulkanDevice* vkdev, const char* shader_data, size_t shader_size,
+                             const ncnn::Option& opt, ncnn::Pipeline*& pipeline)
+{
+    std::vector<uint32_t> spirv;
+    if (ncnn::compile_spirv_module(shader_data, static_cast<int>(shader_size), opt, spirv) != 0)
+        return -1;
+
+    ncnn::Pipeline* candidate = new ncnn::Pipeline(vkdev);
+    candidate->set_optimal_local_size_xyz(128, 1, 1);
+    const std::vector<ncnn::vk_specialization_type> specializations;
+    if (candidate->create(spirv.data(), spirv.size() * sizeof(uint32_t), specializations) != 0)
+    {
+        delete candidate;
+        return -1;
+    }
+    pipeline = candidate;
+    return 0;
+}
+
+size_t vkmat_scalar_count(const ncnn::VkMat& mat)
+{
+    if (mat.elempack != 1)
+        return 0;
+    if (mat.dims == 4)
+        return mat.nstep * static_cast<size_t>(mat.n);
+    if (mat.dims == 3)
+        return mat.cstep * static_cast<size_t>(mat.c);
+    if (mat.dims == 2)
+        return mat.cstep;
+    if (mat.dims == 1)
+        return static_cast<size_t>(mat.w);
+    return 0;
+}
+
+bool create_vkmat_like_scalar(const ncnn::VkMat& source, size_t elemsize, ncnn::VkAllocator* allocator,
+                              ncnn::VkMat& destination)
+{
+    if (source.elempack != 1)
+        return false;
+    switch (source.dims)
+    {
+    case 1:
+        destination.create(source.w, elemsize, 1, allocator);
+        break;
+    case 2:
+        destination.create(source.w, source.h, elemsize, 1, allocator);
+        break;
+    case 3:
+        destination.create(source.w, source.h, source.c, elemsize, 1, allocator);
+        break;
+    case 4:
+        destination.create(source.w, source.h, source.d, source.c, elemsize, 1, source.n, allocator);
+        break;
+    default:
+        return false;
+    }
+    return !destination.empty();
+}
+
+bool record_awa_cast(ncnn::VkCompute& cmd, ncnn::Pipeline* pipeline, const ncnn::VkMat& source,
+                     ncnn::VkMat& destination, ncnn::VkAllocator* allocator, bool to_float)
+{
+    if (!pipeline || source.elempack != 1)
+        return false;
+    const size_t count = vkmat_scalar_count(source);
+    if (count == 0 || count > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return false;
+    if (!create_vkmat_like_scalar(source, to_float ? 4u : 2u, allocator, destination))
+        return false;
+
+    std::vector<ncnn::VkMat> bindings(2);
+    bindings[0] = source;
+    bindings[1] = destination;
+    std::vector<ncnn::vk_constant_type> constants(1);
+    constants[0].i = static_cast<int>(count);
+    ncnn::VkMat dispatcher;
+    dispatcher.w = static_cast<int>(count);
+    dispatcher.h = 1;
+    dispatcher.c = 1;
+    cmd.record_pipeline(pipeline, bindings, constants, dispatcher);
+    return true;
 }
 #endif
 
@@ -279,7 +383,7 @@ int SeedVR2AWAPack::load_param(const ncnn::ParamDict& pd)
         cursor += text_tokens_;
     }
 #if NCNN_VULKAN
-    mapping_cpu_.create(static_cast<int>((sequence_index_.size() + cu_seqlens_.size()) * sizeof(int)), static_cast<size_t>(1u));
+    mapping_cpu_.create(static_cast<int>(sequence_index_.size() + cu_seqlens_.size()), sizeof(int));
     if (mapping_cpu_.empty())
         return -100;
     std::memcpy(mapping_cpu_.data, sequence_index_.data(), sequence_index_.size() * sizeof(int));
@@ -335,7 +439,12 @@ int SeedVR2AWAPack::upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& opt)
 {
     if (mapping_cpu_.empty())
         return -1;
-    cmd.record_upload(mapping_cpu_, mapping_gpu_, opt);
+    // VkTransfer casts every 32-bit Mat when reduced-precision storage is
+    // enabled. These are int32 indices, so preserve their bytes explicitly.
+    ncnn::Option index_opt = opt;
+    index_opt.use_bf16_packed = index_opt.use_bf16_storage = false;
+    index_opt.use_fp16_packed = index_opt.use_fp16_storage = false;
+    cmd.record_upload(mapping_cpu_, mapping_gpu_, index_opt);
     return mapping_gpu_.empty() ? -100 : 0;
 }
 
@@ -343,13 +452,25 @@ int SeedVR2AWAPack::create_pipeline(const ncnn::Option& opt)
 {
     if (!opt.use_vulkan_compute || !vkdev)
         return 0;
-    return create_awa_pipeline(vkdev, awa_pack_comp_data, sizeof(awa_pack_comp_data), opt, -1, pipeline_);
+    if (create_awa_pipeline(vkdev, awa_pack_comp_data, sizeof(awa_pack_comp_data), awa_fp32_option(opt), -1,
+                            pipeline_) != 0)
+        return -1;
+    if (awa_bf16_io(opt) && create_awa_cast_pipeline(vkdev, cast_bf16_f32_comp_data,
+                                                     sizeof(cast_bf16_f32_comp_data), opt,
+                                                     bf16_to_fp32_pipeline_) != 0)
+    {
+        destroy_pipeline(opt);
+        return -1;
+    }
+    return 0;
 }
 
 int SeedVR2AWAPack::destroy_pipeline(const ncnn::Option& /*opt*/)
 {
     delete pipeline_;
+    delete bf16_to_fp32_pipeline_;
     pipeline_ = 0;
+    bf16_to_fp32_pipeline_ = 0;
     mapping_gpu_ = ncnn::VkMat();
     return 0;
 }
@@ -372,22 +493,36 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         !describe_qkv_layout(text, text_tokens_, text_layout) ||
         video_layout.heads != text_layout.heads || video_layout.head_dim != text_layout.head_dim)
     {
-        std::fprintf(stderr, "SeedVR2AWAPack: invalid input video=%d:%dx%dx%dx%d pack=%d text=%d:%dx%dx%dx%d pack=%d\n",
-                     video.dims, video.w, video.h, video.d, video.c, video.elempack, text.dims, text.w, text.h,
-                     text.d, text.c, text.elempack);
+        std::fprintf(stderr,
+                     "SeedVR2AWAPack: invalid input video=%d:%dx%dx%dx%d n=%d pack=%d text=%d:%dx%dx%dx%d n=%d pack=%d\n",
+                     video.dims, video.w, video.h, video.d, video.c, video.n, video.elempack, text.dims, text.w,
+                     text.h, text.d, text.c, text.n, text.elempack);
         return -1;
+    }
+    const bool low16 = awa_bf16_io(opt) && video.elemsize == 2u && text.elemsize == 2u;
+    ncnn::VkMat video_fp32;
+    ncnn::VkMat text_fp32;
+    const ncnn::VkMat* video_source = &video;
+    const ncnn::VkMat* text_source = &text;
+    if (low16)
+    {
+        if (!record_awa_cast(cmd, bf16_to_fp32_pipeline_, video, video_fp32, opt.workspace_vkallocator, true) ||
+            !record_awa_cast(cmd, bf16_to_fp32_pipeline_, text, text_fp32, opt.workspace_vkallocator, true))
+            return -100;
+        video_source = &video_fp32;
+        text_source = &text_fp32;
     }
 
     top_blobs.resize(2);
     top_blobs[0].create(video_layout.head_dim, 3 * video_layout.heads, static_cast<int>(sequence_index_.size()),
-                        video.elemsize, 1, opt.blob_vkallocator);
-    top_blobs[1].create(static_cast<int>(cu_seqlens_.size()), video.elemsize, 1, opt.blob_vkallocator);
+                        4u, 1, opt.blob_vkallocator);
+    top_blobs[1].create(static_cast<int>(cu_seqlens_.size()), 4u, 1, opt.blob_vkallocator);
     if (top_blobs[0].empty() || top_blobs[1].empty())
         return -100;
 
     std::vector<ncnn::VkMat> bindings(5);
-    bindings[0] = video;
-    bindings[1] = text;
+    bindings[0] = *video_source;
+    bindings[1] = *text_source;
     bindings[2] = top_blobs[0];
     bindings[3] = top_blobs[1];
     bindings[4] = mapping_gpu_;
@@ -457,7 +592,7 @@ int SeedVR2AWAUnpack::load_param(const ncnn::ParamDict& pd)
     window_count_ = static_cast<int>(windows.size());
     sequence_tokens_ = cursor;
 #if NCNN_VULKAN
-    mapping_cpu_.create(static_cast<int>((video_positions_.size() + text_positions_.size()) * sizeof(int)), static_cast<size_t>(1u));
+    mapping_cpu_.create(static_cast<int>(video_positions_.size() + text_positions_.size()), sizeof(int));
     if (mapping_cpu_.empty())
         return -100;
     std::memcpy(mapping_cpu_.data, video_positions_.data(), video_positions_.size() * sizeof(int));
@@ -525,7 +660,10 @@ int SeedVR2AWAUnpack::upload_model(ncnn::VkTransfer& cmd, const ncnn::Option& op
 {
     if (mapping_cpu_.empty())
         return -1;
-    cmd.record_upload(mapping_cpu_, mapping_gpu_, opt);
+    ncnn::Option index_opt = opt;
+    index_opt.use_bf16_packed = index_opt.use_bf16_storage = false;
+    index_opt.use_fp16_packed = index_opt.use_fp16_storage = false;
+    cmd.record_upload(mapping_cpu_, mapping_gpu_, index_opt);
     return mapping_gpu_.empty() ? -100 : 0;
 }
 
@@ -533,12 +671,23 @@ int SeedVR2AWAUnpack::create_pipeline(const ncnn::Option& opt)
 {
     if (!opt.use_vulkan_compute || !vkdev)
         return 0;
-    if (create_awa_pipeline(vkdev, awa_unpack_comp_data, sizeof(awa_unpack_comp_data), opt, 0, pipeline_video_) != 0)
+    const ncnn::Option fp32_opt = awa_fp32_option(opt);
+    if (create_awa_pipeline(vkdev, awa_unpack_comp_data, sizeof(awa_unpack_comp_data), fp32_opt, 0,
+                            pipeline_video_) != 0)
         return -1;
-    if (create_awa_pipeline(vkdev, awa_unpack_comp_data, sizeof(awa_unpack_comp_data), opt, 1, pipeline_text_) != 0)
+    if (create_awa_pipeline(vkdev, awa_unpack_comp_data, sizeof(awa_unpack_comp_data), fp32_opt, 1,
+                            pipeline_text_) != 0)
     {
-        delete pipeline_video_;
-        pipeline_video_ = 0;
+        destroy_pipeline(opt);
+        return -1;
+    }
+    if (awa_bf16_io(opt) &&
+        (create_awa_cast_pipeline(vkdev, cast_bf16_f32_comp_data, sizeof(cast_bf16_f32_comp_data), opt,
+                                  bf16_to_fp32_pipeline_) != 0 ||
+         create_awa_cast_pipeline(vkdev, cast_f32_bf16_comp_data, sizeof(cast_f32_bf16_comp_data), opt,
+                                  fp32_to_bf16_pipeline_) != 0))
+    {
+        destroy_pipeline(opt);
         return -1;
     }
     return 0;
@@ -548,8 +697,12 @@ int SeedVR2AWAUnpack::destroy_pipeline(const ncnn::Option& /*opt*/)
 {
     delete pipeline_video_;
     delete pipeline_text_;
+    delete bf16_to_fp32_pipeline_;
+    delete fp32_to_bf16_pipeline_;
     pipeline_video_ = 0;
     pipeline_text_ = 0;
+    bf16_to_fp32_pipeline_ = 0;
+    fp32_to_bf16_pipeline_ = 0;
     mapping_gpu_ = ncnn::VkMat();
     return 0;
 }
@@ -578,14 +731,25 @@ int SeedVR2AWAUnpack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
     if (heads <= 0)
         return -1;
     const int head_dim = packed.w;
-    top_blobs.resize(2);
+    const bool low16 = awa_bf16_io(opt) && packed.elemsize == 2u;
+    ncnn::VkMat packed_fp32;
+    const ncnn::VkMat* packed_source = &packed;
+    if (low16)
+    {
+        if (!record_awa_cast(cmd, bf16_to_fp32_pipeline_, packed, packed_fp32, opt.workspace_vkallocator, true))
+            return -100;
+        packed_source = &packed_fp32;
+    }
+
+    ncnn::VkMat video_fp32;
+    ncnn::VkMat text_fp32;
 #if NCNN_BATCH
-    top_blobs[0].create(head_dim, heads, source_w_, source_h_, packed.elemsize, 1, source_t_, opt.blob_vkallocator);
+    video_fp32.create(head_dim, heads, source_w_, source_h_, 4u, 1, source_t_, opt.workspace_vkallocator);
 #else
-    top_blobs[0].create(head_dim, heads, source_tokens_, packed.elemsize, 1, opt.blob_vkallocator);
+    video_fp32.create(head_dim, heads, source_tokens_, 4u, 1, opt.workspace_vkallocator);
 #endif
-    top_blobs[1].create(head_dim, heads, text_tokens_, packed.elemsize, 1, opt.blob_vkallocator);
-    if (top_blobs[0].empty() || top_blobs[1].empty())
+    text_fp32.create(head_dim, heads, text_tokens_, 4u, 1, opt.workspace_vkallocator);
+    if (video_fp32.empty() || text_fp32.empty())
         return -100;
 
     std::vector<ncnn::vk_constant_type> constants(12);
@@ -603,32 +767,45 @@ int SeedVR2AWAUnpack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
     for (int t = 0; t < source_t_; t++)
     {
 #if NCNN_BATCH
-        ncnn::VkMat video = top_blobs[0].batch(t);
+        ncnn::VkMat video = video_fp32.batch(t);
 #else
-        ncnn::VkMat video = top_blobs[0];
+        ncnn::VkMat video = video_fp32;
 #endif
         constants[1].i = static_cast<int>(video.cstep);
         constants[10].i = t;
         std::vector<ncnn::VkMat> bindings(4);
-        bindings[0] = packed;
+        bindings[0] = *packed_source;
         bindings[1] = video;
-        bindings[2] = top_blobs[1];
+        bindings[2] = text_fp32;
         bindings[3] = mapping_gpu_;
         cmd.record_pipeline(pipeline_video_, bindings, constants, video);
     }
 
-    constants[1].i = static_cast<int>(top_blobs[1].cstep);
+    constants[1].i = static_cast<int>(text_fp32.cstep);
     constants[10].i = 0;
     std::vector<ncnn::VkMat> text_bindings(4);
-    text_bindings[0] = packed;
+    text_bindings[0] = *packed_source;
 #if NCNN_BATCH
-    text_bindings[1] = top_blobs[0].batch(0);
+    text_bindings[1] = video_fp32.batch(0);
 #else
-    text_bindings[1] = top_blobs[0];
+    text_bindings[1] = video_fp32;
 #endif
-    text_bindings[2] = top_blobs[1];
+    text_bindings[2] = text_fp32;
     text_bindings[3] = mapping_gpu_;
-    cmd.record_pipeline(pipeline_text_, text_bindings, constants, top_blobs[1]);
+    cmd.record_pipeline(pipeline_text_, text_bindings, constants, text_fp32);
+
+    top_blobs.resize(2);
+    if (awa_bf16_io(opt))
+    {
+        if (!record_awa_cast(cmd, fp32_to_bf16_pipeline_, video_fp32, top_blobs[0], opt.blob_vkallocator, false) ||
+            !record_awa_cast(cmd, fp32_to_bf16_pipeline_, text_fp32, top_blobs[1], opt.blob_vkallocator, false))
+            return -100;
+    }
+    else
+    {
+        top_blobs[0] = video_fp32;
+        top_blobs[1] = text_fp32;
+    }
     return 0;
 }
 #endif
@@ -757,7 +934,8 @@ int SeedVR2MMRoPE::create_pipeline(const ncnn::Option& opt)
 {
     if (!opt.use_vulkan_compute || !vkdev)
         return 0;
-    return create_awa_pipeline(vkdev, mmrope_comp_data, sizeof(mmrope_comp_data), opt, -1, pipeline_);
+    return create_awa_pipeline(vkdev, mmrope_comp_data, sizeof(mmrope_comp_data), awa_fp32_option(opt), -1,
+                               pipeline_);
 }
 
 int SeedVR2MMRoPE::destroy_pipeline(const ncnn::Option& /*opt*/)
@@ -788,20 +966,23 @@ int SeedVR2MMRoPE::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         return -1;
     }
     top_blobs.resize(1);
-    top_blobs[0].create(input.w, input.h, input.c, input.elemsize, 1, opt.blob_vkallocator);
+    top_blobs[0].create(input.w, input.h, input.c, 4u, 1, opt.blob_vkallocator);
     if (top_blobs[0].empty())
         return -100;
 
-    std::vector<ncnn::VkMat> bindings(3);
+    std::vector<ncnn::VkMat> bindings(4);
     bindings[0] = input;
     bindings[1] = top_blobs[0];
     bindings[2] = rotations_gpu_;
-    std::vector<ncnn::vk_constant_type> constants(5);
+    bindings[3] = input;
+    std::vector<ncnn::vk_constant_type> constants(7);
     constants[0].i = static_cast<int>(input.cstep);
     constants[1].i = static_cast<int>(top_blobs[0].cstep);
     constants[2].i = input.h / 3;
     constants[3].i = input.w;
     constants[4].i = rope_dim_;
+    constants[5].i = sequence_tokens_;
+    constants[6].i = 1;
     cmd.record_pipeline(pipeline_, bindings, constants, top_blobs[0]);
     return 0;
 }
@@ -906,9 +1087,13 @@ int SeedVR2WindowAttention::create_pipeline(const ncnn::Option& opt)
 {
     if (!opt.use_vulkan_compute || !vkdev)
         return 0;
-    if (create_awa_pipeline(vkdev, awa_attention_score_comp_data, sizeof(awa_attention_score_comp_data), opt, -1, score_pipeline_) != 0 ||
-        create_awa_pipeline(vkdev, awa_attention_softmax_comp_data, sizeof(awa_attention_softmax_comp_data), opt, -1, softmax_pipeline_) != 0 ||
-        create_awa_pipeline(vkdev, awa_attention_value_comp_data, sizeof(awa_attention_value_comp_data), opt, -1, value_pipeline_) != 0)
+    const ncnn::Option fp32_opt = awa_fp32_option(opt);
+    if (create_awa_pipeline(vkdev, awa_attention_score_comp_data, sizeof(awa_attention_score_comp_data), fp32_opt,
+                            -1, score_pipeline_) != 0 ||
+        create_awa_pipeline(vkdev, awa_attention_softmax_comp_data, sizeof(awa_attention_softmax_comp_data),
+                            fp32_opt, -1, softmax_pipeline_) != 0 ||
+        create_awa_pipeline(vkdev, awa_attention_value_comp_data, sizeof(awa_attention_value_comp_data), fp32_opt,
+                            -1, value_pipeline_) != 0)
     {
         destroy_pipeline(opt);
         return -1;
@@ -951,7 +1136,7 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::VkMat>& bottom_blobs
     const int heads = input.h / 3;
     const int head_dim = input.w;
     top_blobs.resize(1);
-    top_blobs[0].create(head_dim, heads, sequence_tokens_, input.elemsize, 1, opt.blob_vkallocator);
+    top_blobs[0].create(head_dim, heads, sequence_tokens_, 4u, 1, opt.blob_vkallocator);
     if (top_blobs[0].empty())
         return -100;
 
@@ -962,6 +1147,9 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::VkMat>& bottom_blobs
         ncnn::VkMat scores;
         scores.create(window_length, window_length, heads, 4u, 1, opt.workspace_vkallocator);
         if (scores.empty())
+            return -100;
+        ncnn::VkMat normalizers(window_length, heads, 4u, 1, opt.workspace_vkallocator);
+        if (normalizers.empty())
             return -100;
 
         std::vector<ncnn::VkMat> score_bindings(2);
@@ -977,18 +1165,20 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::VkMat>& bottom_blobs
         score_constants[6].f = 1.f / std::sqrt(static_cast<float>(head_dim));
         cmd.record_pipeline(score_pipeline_, score_bindings, score_constants, scores);
 
-        std::vector<ncnn::VkMat> softmax_bindings(1);
+        std::vector<ncnn::VkMat> softmax_bindings(2);
         softmax_bindings[0] = scores;
+        softmax_bindings[1] = normalizers;
         std::vector<ncnn::vk_constant_type> softmax_constants(3);
         softmax_constants[0].i = static_cast<int>(scores.cstep);
         softmax_constants[1].i = heads;
         softmax_constants[2].i = window_length;
         cmd.record_pipeline(softmax_pipeline_, softmax_bindings, softmax_constants, scores);
 
-        std::vector<ncnn::VkMat> value_bindings(3);
+        std::vector<ncnn::VkMat> value_bindings(4);
         value_bindings[0] = input;
         value_bindings[1] = scores;
         value_bindings[2] = top_blobs[0];
+        value_bindings[3] = normalizers;
         std::vector<ncnn::vk_constant_type> value_constants(7);
         value_constants[0].i = static_cast<int>(input.cstep);
         value_constants[1].i = static_cast<int>(scores.cstep);

@@ -53,7 +53,7 @@ void main()
     {
         int packed_index = mapping_data[p.text_offset + window * p.text_tokens + gz];
         int packed_offset = packed_index * p.packed_cstep + gy * p.head_dim + gx;
-        value += afp(packed_data[packed_offset]);
+        value += buffer_ld1(packed_data, packed_offset);
     }
     buffer_st1(text_data, output_offset, value / float(p.window_count));
 }

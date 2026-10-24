@@ -81,6 +81,11 @@ class DitStackContract:
 
 DIT_STACK_CONTRACT = DitStackContract()
 
+# The pinned reference's one-layer output Ada cannot consume its 6*D
+# embedding. Preserve the two-layer, per-feature packing used by the body.
+# This is an explicit compatibility contract, not an upstream acceptance claim.
+DIT_OUTPUT_MODULATION = "per-feature-six-first-triplet-v1"
+
 
 def make_dit_stack_contract(
     text_tokens: int,
@@ -166,6 +171,7 @@ def iter_loaded_blocks(
             window_shape=contract.window_shape,
             text_tokens=contract.text_tokens,
             shifted=contract.block_shifted(block_index),
+            is_last_layer=block_index == contract.block_count - 1,
         ).float().eval()
         load_dit_block_weights(block, state, block_index=block_index)
         yield block_index, block
@@ -175,9 +181,16 @@ def timestep_embedding(timestep: torch.Tensor, embedding_dim: int = 256) -> torc
     """Match diffusers.get_timestep_embedding(..., flip_sin_to_cos=False)."""
 
     if timestep.ndim == 0:
-        timestep = timestep[None]
+        timestep = timestep.reshape(1)
     if timestep.ndim != 1:
         raise ValueError(f"expected a scalar or rank-1 timestep, got {tuple(timestep.shape)}")
+    # Keep the traced input rank explicit for ncnn.  A direct ``[None]`` on a
+    # rank-1 input makes PNNX materialize the timestep as a rank-3 tensor
+    # before the first Linear.  ncnn's Vulkan InnerProduct flatten path then
+    # selects its sum8 kernel and corrupts this particular 3-D activation.
+    # Reshaping to the same one-dimensional shape preserves the PyTorch
+    # contract while keeping the exported Linear input rank-2.
+    timestep = timestep.reshape(-1)
     half_dim = embedding_dim // 2
     exponent = -math.log(10000.0) * torch.arange(
         half_dim, device=timestep.device, dtype=torch.float32
@@ -194,6 +207,11 @@ class FixedDitEmbedding(nn.Module):
         self.proj_in = nn.Linear(256, contract.hidden_dim)
         self.proj_hid = nn.Linear(contract.hidden_dim, contract.hidden_dim)
         self.proj_out = nn.Linear(contract.hidden_dim, contract.embedding_dim)
+        # These frequencies are independent of the runtime timestep. Lift
+        # them as a buffer so PT2 serializes their exact values as weights,
+        # rather than requiring a runtime arange/device-creation operator.
+        exponent = -math.log(10000.0) * torch.arange(128, dtype=torch.float32)
+        self.register_buffer("frequencies", torch.exp(exponent / 128).reshape(1, 128))
         _copy_tensor(state, "emb_in.proj_in.weight", self.proj_in.weight)
         _copy_tensor(state, "emb_in.proj_in.bias", self.proj_in.bias)
         _copy_tensor(state, "emb_in.proj_hid.weight", self.proj_hid.weight)
@@ -203,7 +221,9 @@ class FixedDitEmbedding(nn.Module):
         self.eval()
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
-        emb = timestep_embedding(timestep, 256).to(dtype=self.proj_in.weight.dtype)
+        values = timestep.reshape(-1, 1).float() * self.frequencies
+        emb = torch.cat((torch.sin(values), torch.cos(values)), dim=-1)
+        emb = emb.to(dtype=self.proj_in.weight.dtype)
         emb = torch.nn.functional.silu(self.proj_in(emb))
         emb = torch.nn.functional.silu(self.proj_hid(emb))
         return self.proj_out(emb)
@@ -228,6 +248,8 @@ class FixedDitOutput(nn.Module):
     def __init__(self, state: dict[str, torch.Tensor], *, contract: DitStackContract = DIT_STACK_CONTRACT) -> None:
         super().__init__()
         self.contract = contract
+        if contract.embedding_dim != contract.hidden_dim * 6:
+            raise ValueError("output Ada requires embedding_dim == 6 * hidden_dim")
         self.norm = nn.Parameter(torch.empty(contract.hidden_dim), requires_grad=False)
         self.shift = nn.Parameter(torch.empty(contract.hidden_dim), requires_grad=False)
         self.scale = nn.Parameter(torch.empty(contract.hidden_dim), requires_grad=False)
@@ -240,17 +262,16 @@ class FixedDitOutput(nn.Module):
         self.eval()
 
     def forward(self, video: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
+        if video.ndim != 2 or video.shape[1] != self.contract.hidden_dim:
+            raise ValueError("output Ada requires a rank-2 video matrix with hidden_dim features")
+        if tuple(embedding.shape) != self.contract.embedding_shape:
+            raise ValueError("output Ada requires one packed 6 * hidden_dim embedding")
         variance = video.float().pow(2).mean(dim=-1, keepdim=True)
         video = video * torch.rsqrt(variance + 1.0e-5)
         video = video * self.norm
-        # The pinned upstream source constructs this final AdaSingle with one
-        # layer but keeps the shared 6*dim timestep projection.  Its checkpoint
-        # has only out_shift/out_scale, so the one-layer view uses the first
-        # 3*dim modulation group; the eventual full-model golden must confirm
-        # this upstream boundary.
-        modulation = embedding[:, : self.contract.hidden_dim * 3].reshape(
-            embedding.shape[0], self.contract.hidden_dim, 1, 3
-        )[0, :, 0]
+        # Retain six adjacent values per feature before selecting the first
+        # triplet. Slicing the first 3*D values mixes different features.
+        modulation = embedding.reshape(self.contract.hidden_dim, 6)[:, :3]
         shift_a, scale_a, _ = modulation.unbind(dim=-1)
         video = video * (scale_a + self.scale) + (shift_a + self.shift)
         return self.proj(video)

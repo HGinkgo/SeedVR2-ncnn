@@ -1,0 +1,32 @@
+#version 450
+layout(binding = 0) readonly buffer q_blob { float q_data[]; };
+layout(binding = 1) readonly buffer k_blob { float k_data[]; };
+layout(binding = 2) readonly buffer v_blob { sfp v_data[]; };
+layout(binding = 3) readonly buffer v_float { float v_fp32[]; };
+layout(binding = 4) writeonly buffer out_blob { float out_data[]; };
+layout(push_constant) uniform parameter
+{
+    int width;
+    int heads;
+    int tokens;
+    int q_cstep;
+    int k_cstep;
+    int v_cstep;
+    int out_cstep;
+    int v_float;
+} p;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int token = int(gl_GlobalInvocationID.z);
+    if (x >= p.width || y >= 3 * p.heads || token >= p.tokens) return;
+    int head = y % p.heads;
+    int i = head * p.width + x;
+    float value;
+    if (y < p.heads) value = q_data[token * p.q_cstep + i];
+    else if (y < 2 * p.heads) value = k_data[token * p.k_cstep + i];
+    else value = p.v_float != 0 ? v_fp32[token * p.v_cstep + i]
+                               : float(buffer_ld1(v_data, token * p.v_cstep + i));
+    out_data[token * p.out_cstep + y * p.width + x] = value;
+}

@@ -1,0 +1,101 @@
+name: PT2 conversion contracts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/pt2.yml'
+      - 'CMakeLists.txt'
+      - 'tools/*pt2*'
+      - 'tools/pt2_*'
+      - 'tools/reference/**'
+      - 'tools/export_awa_attention.py'
+      - 'tools/export_dit_stack.py'
+      - 'tools/validate_dit_stack.py'
+      - 'tools/audit_dit_output.py'
+      - 'tools/compare_reference_dit.py'
+      - 'tools/compare_reference_sampling.py'
+      - 'tools/compare_reference_vae.py'
+      - 'tools/compare_reference_image.py'
+      - 'tools/validate_fp32_cli.py'
+      - 'tools/vae_ncnn_smoke.cpp'
+      - 'tools/reference_sampling_smoke.cpp'
+      - 'tools/test_reference_sampling_contracts.py'
+      - 'tools/test_dit_output_contract.py'
+      - 'tools/validate_seeded_sampling.py'
+      - 'tools/conditioning_smoke.cpp'
+      - 'tools/sampler_smoke.cpp'
+      - 'src/awa/**'
+      - 'src/cli/**'
+      - 'src/dit/**'
+      - 'src/model/**'
+      - 'src/main.cpp'
+      - 'src/sampler/**'
+      - 'src/vae/**'
+      - 'src/inference/**'
+      - 'patches/**'
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source and runtime submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select conversion Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install conversion-only dependencies
+        run: |
+          python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy pillow
+
+      - name: Reject incomplete or stale runtime evidence without GPU inference
+        run: python -m unittest tools.test_pt2_runtime_contracts tools.test_dit_output_contract tools.test_reference_sampling_contracts
+
+      - name: Build official PNNX with the independent PT2 frontend patch
+        run: >-
+          tools/prepare_pnnx_pt2.sh
+          --source "$RUNNER_TEMP/ncnn-pnnx-pt2"
+          --python "$(command -v python)" --jobs 2
+
+      - name: Check existing TorchScript operator regressions
+        run: >-
+          ctest --test-dir "$RUNNER_TEMP/ncnn-pnnx-pt2/build-seedvr2-pt2"
+          -R '^test_(nn_Linear|nn_SiLU|F_scaled_dot_product_attention|pnnx_fuse_input_unpack)$'
+          --output-on-failure -j 2
+
+      - name: Build optional CPU validation runners
+        run: |
+          cmake -S . -B build-pt2-cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSEEDVR2_ENABLE_VULKAN=OFF -DSEEDVR2_BUILD_PT2_SMOKE=ON -DSEEDVR2_BUILD_TESTS=ON \
+            -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=OFF -DNCNN_AVX=OFF -DNCNN_OPENMP=OFF
+          cmake --build build-pt2-cpu --target seedvr2-ncnn seedvr2-pt2-smoke seedvr2-pt2-awa-smoke seedvr2-vae-smoke seedvr2-sampler-smoke seedvr2-conditioning-smoke --parallel 2
+          ctest --test-dir build-pt2-cpu -R '^seedvr2-(sampler|conditioning)-smoke$' --output-on-failure
+
+      - name: Validate both frontends and native CPU outputs
+        run: |
+          mkdir -p runtime/pt2
+          PYTHONPATH=. python -u tools/test_pt2_independent.py \
+            --pnnx "$RUNNER_TEMP/ncnn-pnnx-pt2/build-seedvr2-pt2/src/pnnx" \
+            --ncnn-runner build-pt2-cpu/seedvr2-pt2-smoke \
+            --result-json runtime/pt2/cpu-result.json > runtime/pt2/cpu.log 2>&1
+
+      - name: Retain measured CPU result and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pt2-cpu-evidence
+          path: |
+            runtime/pt2/*.json
+            runtime/pt2/*.log
+            ${{ runner.temp }}/ncnn-pnnx-pt2/build-seedvr2-pt2/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore

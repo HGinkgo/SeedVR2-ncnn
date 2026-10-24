@@ -37,4 +37,5 @@ private:
 #endif
 };
 
-void register_seedvr2_vae_layers(ncnn::Net& net);
+// Ordinary Conv3D Vulkan replacement is restricted to explicit FP32 audits.
+void register_seedvr2_vae_layers(ncnn::Net& net, bool fp32_convolution = false);

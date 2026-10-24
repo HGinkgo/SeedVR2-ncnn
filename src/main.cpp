@@ -40,6 +40,9 @@ void print_usage()
     std::puts("  --start-frame  First video frame to process (default: 0)");
     std::puts("  --frames     Maximum number of video frames to process");
     std::puts("  --steps      Sampling steps (default: 1)");
+    std::puts("  --cfg-scale  Classifier-free guidance scale (default: 1; requires CFG model package when > 1)");
+    std::puts("  --seed       Use reproducible standard-normal noise (0..4294967295; default: legacy fixture)");
+    std::puts("  --precision  bf16 (default) or experimental fp32 (one 256x256 image, sequential CFG)");
     std::puts("  --vae-tile-size  Experimental GPU VAE tile edge in pixels (default: full frame)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
     std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");
@@ -184,7 +187,7 @@ int main(int argc, char** argv)
         seedvr2::ImageInferenceSession session;
         if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
                                                   options.memory_budget_mib, &profile, options.vae_tile_size,
-                                                  options.sample_steps))
+                                                  options.sample_steps, options.cfg_scale, options.noise_seed, options.fp32))
         {
             std::fprintf(stderr, "error: stage=video-inference-init: %s\n", error.c_str());
             return 1;
@@ -218,7 +221,7 @@ int main(int argc, char** argv)
             },
             [&](const seedvr2::RgbImage& frame, std::string& write_error) {
                 return writer.write_frame(frame, write_error);
-            }, processed_frames, error);
+            }, processed_frames, error, static_cast<std::size_t>(options.start_frame));
         if (!video_ok)
         {
             std::fprintf(stderr, "error: %s\n", error.c_str());
@@ -289,7 +292,7 @@ int main(int argc, char** argv)
                 }
                 if (!seedvr2::ImageInferenceSession::open(graphs, plan, options.gpu_id, session, error,
                                                           options.memory_budget_mib, &profile, options.vae_tile_size,
-                                                          options.sample_steps))
+                                                          options.sample_steps, options.cfg_scale, options.noise_seed, options.fp32))
                 {
                     std::fprintf(stderr, "error: stage=image-inference-init: %s\n", error.c_str());
                     return 1;
@@ -298,7 +301,7 @@ int main(int argc, char** argv)
                 session_open = true;
             }
             seedvr2::RgbImage output_image;
-            if (!session.run_frame(input_image, output_image, error))
+            if (!session.run_frame(input_image, output_image, error, input_index))
             {
                 std::fprintf(stderr, "error: %s\n", error.c_str());
                 return 1;
@@ -357,7 +360,7 @@ int main(int argc, char** argv)
     seedvr2::ImageInferenceSession session;
     if (!seedvr2::ImageInferenceSession::open(graphs, resolution_plan, options.gpu_id, session, error,
                                               options.memory_budget_mib, &profile, options.vae_tile_size,
-                                              options.sample_steps))
+                                              options.sample_steps, options.cfg_scale, options.noise_seed, options.fp32))
     {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;

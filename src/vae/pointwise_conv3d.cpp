@@ -93,8 +93,11 @@ int SeedVR2PointwiseConv3D::create_pipeline(const ncnn::Option& opt)
         return 0;
 
     ncnn::Option shader_opt = opt;
-    shader_opt.use_bf16_storage = false;
-    shader_opt.use_bf16_packed = true;
+    if (opt.use_bf16_storage || opt.use_bf16_packed)
+    {
+        shader_opt.use_bf16_storage = false;
+        shader_opt.use_bf16_packed = true;
+    }
 
     std::vector<uint32_t> spirv;
     if (ncnn::compile_spirv_module(pointwise_conv3d_comp_data, sizeof(pointwise_conv3d_comp_data), shader_opt, spirv) != 0)
@@ -123,8 +126,11 @@ int SeedVR2PointwiseConv3D::destroy_pipeline(const ncnn::Option& /*opt*/)
 int SeedVR2PointwiseConv3D::forward(const ncnn::VkMat& bottom_blob, ncnn::VkMat& top_blob,
                                      ncnn::VkCompute& cmd, const ncnn::Option& opt) const
 {
+    const bool fp32_storage = !opt.use_bf16_storage && !opt.use_bf16_packed &&
+                              !opt.use_fp16_storage && !opt.use_fp16_packed;
+    const size_t expected_elemsize = fp32_storage ? 4u : 2u;
     if (bottom_blob.dims != 4 || bottom_blob.n != 1 || bottom_blob.elempack != 1 ||
-        bottom_blob.elemsize != 2u || bottom_blob.empty() || pipeline_ == nullptr ||
+        bottom_blob.elemsize != expected_elemsize || bottom_blob.empty() || pipeline_ == nullptr ||
         weight_data_gpu.empty() || (bias_term && bias_data_gpu.empty()))
         return -1;
 

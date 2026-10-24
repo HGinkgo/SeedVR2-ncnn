@@ -613,7 +613,11 @@ def rewrite_ncnn_param(
             index
             for index, layer in enumerate(layers)
             if index > rope_end_index
-            and layer.layer_type == "Split"
+            # PNNX represents a fixed multi-way split as either Split or
+            # Slice, depending on whether the source graph used chunk or
+            # tensor_split.  Both have the same boundary contract here:
+            # one packed QKV input and one output per attention window.
+            and layer.layer_type in {"Split", "Slice"}
             and layer.bottoms == (rope_output,)
             and len(layer.tops) >= 3
         ]

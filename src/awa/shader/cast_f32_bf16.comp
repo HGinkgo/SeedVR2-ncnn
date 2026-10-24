@@ -1,0 +1,18 @@
+#version 450
+
+// Flat FP32 buffer -> BF16 storage/packed buffer.
+layout(binding = 0) readonly buffer input_blob { float input_data[]; };
+layout(binding = 1) writeonly buffer output_blob { sfp output_data[]; };
+
+layout(push_constant) uniform parameter
+{
+    int total;
+} p;
+
+void main()
+{
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= p.total)
+        return;
+    buffer_st1(output_data, index, input_data[index]);
+}

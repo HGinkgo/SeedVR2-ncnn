@@ -191,23 +191,54 @@ bool migrate_fixed_256_pointwise_conv3d_lines(std::string& param, std::size_t& r
     static constexpr std::string_view source_type = "Convolution3D";
     static constexpr std::string_view replacement_type = "SeedVR2PointwiseConv3D";
     replaced = 0;
+
+    // The original TorchScript export used stable names for these five
+    // pointwise projections.  The PT2/PNNX export gives them different names,
+    // so identify the same operation by its complete 1x1x1 kernel shape.
+    std::vector<std::size_t> pointwise_starts;
+    std::size_t line_start = 0;
+    while (line_start < param.size())
+    {
+        const std::size_t newline = param.find('\n', line_start);
+        const std::size_t line_end = newline == std::string::npos ? param.size() : newline;
+        const std::string_view line(param.data() + line_start, line_end - line_start);
+        if (line.find("Convolution3D ") == 0)
+        {
+            const bool kernel_depth = line.find(" 1=1") != std::string_view::npos;
+            const bool kernel_height = line.find(" 11=1") != std::string_view::npos;
+            const bool kernel_width = line.find(" 21=1") != std::string_view::npos;
+            if (kernel_depth && kernel_height && kernel_width)
+                pointwise_starts.push_back(line_start);
+        }
+        if (newline == std::string::npos)
+            break;
+        line_start = newline + 1;
+    }
+
+    std::vector<std::size_t> legacy_starts;
     for (const std::string_view target_name : target_names)
     {
         const std::string needle = std::string(source_type) + " " + std::string(target_name) + " ";
-        std::size_t search_start = 0;
-        while (true)
-        {
-            const std::size_t match = param.find(needle, search_start);
-            if (match == std::string::npos)
-                break;
-            if (match == 0 || param[match - 1] == '\n')
-            {
-                param.replace(match, source_type.size(), replacement_type);
-                replaced++;
-                break;
-            }
-            search_start = match + needle.size();
-        }
+        const std::size_t match = param.find(needle);
+        if (match != std::string::npos && (match == 0 || param[match - 1] == '\n'))
+            legacy_starts.push_back(match);
+    }
+
+    std::vector<std::size_t> starts;
+    if (legacy_starts.size() == std::size(target_names))
+        starts = std::move(legacy_starts);
+    else if (pointwise_starts.size() == std::size(target_names))
+        starts = std::move(pointwise_starts);
+    else
+        return false;
+
+    // Replace from the end so offsets remain valid while changing the type
+    // token at the beginning of each parameter line.
+    std::sort(starts.rbegin(), starts.rend());
+    for (const std::size_t start : starts)
+    {
+        param.replace(start, source_type.size(), replacement_type);
+        replaced++;
     }
     return replaced == std::size(target_names);
 }

@@ -3,6 +3,7 @@
 layout(binding = 0) readonly buffer input_blob { sfp input_data[]; };
 layout(binding = 1) writeonly buffer output_blob { sfp output_data[]; };
 layout(binding = 2) readonly buffer rotations_blob { float rotations_data[]; };
+layout(binding = 3) readonly buffer input_float { float input_fp32[]; };
 
 layout(push_constant) uniform parameter
 {
@@ -11,6 +12,8 @@ layout(push_constant) uniform parameter
     int heads;
     int head_dim;
     int rope_dim;
+    int sequence_tokens;
+    int input_float;
 } p;
 
 void main()
@@ -19,24 +22,25 @@ void main()
     int gy = int(gl_GlobalInvocationID.y);
     int gz = int(gl_GlobalInvocationID.z);
 
-    if (gx >= p.head_dim || gy >= 3 * p.heads)
+    if (gx >= p.head_dim || gy >= 3 * p.heads || gz >= p.sequence_tokens)
         return;
 
     int input_offset = gz * p.input_cstep + gy * p.head_dim + gx;
     int output_offset = gz * p.output_cstep + gy * p.head_dim + gx;
-    if (gy >= 2 * p.heads || gx >= p.rope_dim)
+    precise float value = p.input_float != 0 ? input_fp32[input_offset] : float(buffer_ld1(input_data, input_offset));
+    if (gy < 2 * p.heads && gx < p.rope_dim)
     {
-        buffer_cp1(output_data, output_offset, input_data, input_offset);
-        return;
+        int paired_feature = gx % 2 == 0 ? gx + 1 : gx - 1;
+        int paired_offset = gz * p.input_cstep + gy * p.head_dim + paired_feature;
+        int rotation_offset = gz * (2 * p.rope_dim) + gx;
+        float paired = p.input_float != 0 ? input_fp32[paired_offset] : float(buffer_ld1(input_data, paired_offset));
+        float cosine = rotations_data[rotation_offset];
+        float sine = rotations_data[rotation_offset + p.rope_dim];
+        value = gx % 2 == 0 ? value * cosine - paired * sine : value * cosine + paired * sine;
     }
-
-    int paired_feature = gx % 2 == 0 ? gx + 1 : gx - 1;
-    int paired_offset = gz * p.input_cstep + gy * p.head_dim + paired_feature;
-    int rotation_offset = gz * (2 * p.rope_dim) + gx;
-    afp value = afp(input_data[input_offset]);
-    afp paired = afp(input_data[paired_offset]);
-    float cosine = rotations_data[rotation_offset];
-    float sine = rotations_data[rotation_offset + p.rope_dim];
-    afp rotated = gx % 2 == 0 ? value * cosine - paired * sine : value * cosine + paired * sine;
-    buffer_st1(output_data, output_offset, rotated);
+#if NCNN_bf16_storage || NCNN_bf16_packed
+    uint bits = floatBitsToUint(value);
+    value = uintBitsToFloat((bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
+#endif
+    buffer_st1(output_data, output_offset, afp(value));
 }

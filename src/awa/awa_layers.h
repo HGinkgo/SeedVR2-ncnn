@@ -84,6 +84,7 @@ private:
     ncnn::Mat mapping_cpu_;
     ncnn::VkMat mapping_gpu_;
     ncnn::Pipeline* pipeline_ = 0;
+    ncnn::Pipeline* bf16_to_fp32_pipeline_ = 0;
 #endif
 };
 
@@ -130,6 +131,8 @@ private:
     ncnn::VkMat mapping_gpu_;
     ncnn::Pipeline* pipeline_video_ = 0;
     ncnn::Pipeline* pipeline_text_ = 0;
+    ncnn::Pipeline* bf16_to_fp32_pipeline_ = 0;
+    ncnn::Pipeline* fp32_to_bf16_pipeline_ = 0;
 #endif
 };
 

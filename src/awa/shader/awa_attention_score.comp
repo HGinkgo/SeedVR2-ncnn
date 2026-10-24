@@ -22,10 +22,27 @@ void main()
     if (key >= p.window_length || query >= p.window_length || head >= p.heads)
         return;
 
+    // FP32 validation must also handle cancellation in real-model Q/K.
+    // Keep reduced-storage arithmetic unchanged for the product path.
+#if NCNN_bf16_storage || NCNN_bf16_packed || NCNN_fp16_storage || NCNN_fp16_packed
     float dot = 0.f;
+#else
+    precise float dot = 0.f;
+    precise float correction = 0.f;
+#endif
     int query_offset = (p.window_start + query) * p.input_cstep + head * p.head_dim;
     int key_offset = (p.window_start + key) * p.input_cstep + (p.heads + head) * p.head_dim;
     for (int feature = 0; feature < p.head_dim; feature++)
-        dot += float(afp(input_data[query_offset + feature])) * float(afp(input_data[key_offset + feature]));
+    {
+#if NCNN_bf16_storage || NCNN_bf16_packed || NCNN_fp16_storage || NCNN_fp16_packed
+        dot += float(buffer_ld1(input_data, query_offset + feature)) * float(buffer_ld1(input_data, key_offset + feature));
+#else
+        precise float product = float(input_data[query_offset + feature]) * float(input_data[key_offset + feature]);
+        precise float term = product - correction;
+        precise float next = dot + term;
+        correction = (next - dot) - term;
+        dot = next;
+#endif
+    }
     scores_data[head * p.score_cstep + query * p.window_length + key] = dot * p.scale;
 }

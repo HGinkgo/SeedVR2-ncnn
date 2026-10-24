@@ -8,6 +8,7 @@ namespace seedvr2
 class PerformanceProfile;
 
 // DiT predictions must be pack1. The sample may be pack1 or pack4; the result is pack1.
+// use_fp32 is an explicit validation option; the product default retains BF16 storage.
 bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             const ncnn::VkMat& negative_output,
                             const ncnn::VkMat& sample,
@@ -17,7 +18,8 @@ bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             ncnn::VkAllocator* blob_allocator,
                             ncnn::VkAllocator* staging_allocator,
                             ncnn::VkMat& updated_sample,
-                            const PerformanceProfile* profile = nullptr);
+                            const PerformanceProfile* profile = nullptr,
+                            bool use_fp32 = false);
 
 // Official one-step path: CFG scale one uses only the positive prediction and
 // resolves v_lerp at t=T as x0 = sample - prediction.
