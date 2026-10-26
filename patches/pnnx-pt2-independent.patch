@@ -1,0 +1,1788 @@
+diff --git a/tools/pnnx/python/pt2_to_pnnx.py b/tools/pnnx/python/pt2_to_pnnx.py
+new file mode 100644
+index 0000000..35ef251
+--- /dev/null
++++ b/tools/pnnx/python/pt2_to_pnnx.py
+@@ -0,0 +1,904 @@
++# SPDX-License-Identifier: BSD-3-Clause
++# Copyright (c) 2026 SeedVR2-ncnn contributors
++
++"""Restricted ExportedProgram frontend; emits canonical PNNX IR, without tracing.
++
++Requires PyTorch only at conversion time. Supported: FP32 flat user inputs,
++rank-1..8 static intermediate tensors, rank-1..5 lifted parameters,
++aten.linear.default, aten.rms_norm.default, aten.silu.default,
++aten.alias.default, aten.slice.Tensor, aten.reshape.default,
++aten.select.int, aten.permute.default, aten.matmul.default,
++aten.scaled_dot_product_attention.default, and elementwise aten.mul.Tensor,
++aten.add.Tensor, or aten.div.Tensor with ordinary trailing-dimension
++broadcasting. User inputs are flat positional tensors with fixed rank; internal
++attention tensors are fixed-shape rank-3/4/5 values. A
++direct bounded symbolic token axis is preserved as -1. Native callers must
++enforce the exported constraints recorded in the sidecar JSON.
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import re
++import sys
++import zipfile
++from pathlib import Path
++
++import torch
++
++
++class Unsupported(ValueError):
++    pass
++
++
++def require(condition, message):
++    if not condition:
++        raise Unsupported(message)
++
++
++def read_program(path):
++    program = torch.export.load(path)
++    args, kwargs = program.call_spec.in_spec.children()
++    require(args.type is tuple and kwargs.type is dict and kwargs.num_children == 0
++            and all(child.is_leaf() for child in args.children()),
++            'PT2 input structure: flat positional tensors required')
++    outputs = program.call_spec.out_spec
++    require(outputs.is_leaf() or (outputs.type in (tuple, list)
++            and all(child.is_leaf() for child in outputs.children())),
++            'PT2 output structure: tensor or flat tensor tuple/list required')
++    for spec in program.graph_signature.output_specs:
++        require(spec.kind.name == 'USER_OUTPUT', 'PT2 mutation/state outputs are unsupported')
++        require(isinstance(spec.arg, torch.export.graph_signature.TensorArgument),
++                'PT2 non-tensor outputs are unsupported')
++    return program
++
++
++def lower(path: Path, param: Path, weights: Path, input_shapes=None):
++    program = read_program(path)
++    lines, blobs, lifted, tensors, used_weights = [], {}, {}, {}, set()
++    emitted_attributes = set()
++    aliases = {}
++    tuple_values = {}
++    signature, symbol_values = [], {}
++    constraints = {}
++    for symbol, bounds in program.range_constraints.items():
++        require(bool(symbol.is_Symbol), f'PT2 derived dynamic constraint unsupported: {symbol}')
++        # PyTorch 2.11 represents an unbounded upper limit as IntInfinity;
++        # its inherited SymPy is_finite property can incorrectly report True.
++        require(bounds.lower.is_Integer is True and bounds.upper.is_Integer is True,
++                f'PT2 dynamic range must be finite: {symbol} {bounds}')
++        try:
++            low, high = int(bounds.lower), int(bounds.upper)
++        except (TypeError, ValueError, OverflowError) as exc:
++            raise Unsupported(f'PT2 dynamic range must be finite: {symbol} {bounds}') from exc
++        require(1 <= low <= high <= 2147483647, f'PT2 dynamic range unsupported: {symbol} {bounds}')
++        constraints[str(symbol)] = [low, high]
++
++    # ExportedProgram can retain pure stochastic helper branches even when a
++    # wrapper selects a deterministic posterior mode.  Lower only the graph
++    # reachable from user outputs; dead branches cannot affect the native
++    # result and should not widen the supported operator surface.
++    live = set()
++    def mark_live(value):
++        if isinstance(value, torch.fx.Node) and value not in live:
++            live.add(value)
++            for argument in value.args:
++                mark_live(argument)
++            for argument in value.kwargs.values():
++                mark_live(argument)
++        elif isinstance(value, (tuple, list)):
++            for item in value:
++                mark_live(item)
++        elif isinstance(value, dict):
++            for item in value.values():
++                mark_live(item)
++    output_nodes = [node for node in program.graph.nodes if node.op == 'output']
++    require(len(output_nodes) == 1, 'PT2 graph must have exactly one output node')
++    mark_live(output_nodes[0])
++    # Preserve the exported user-input signature even when a model carries an
++    # unused input (for example an optional embedding branch).  Dead internal
++    # helpers are pruned, while callers still receive the declared inputs.
++    live.update(node for node in program.graph.nodes if node.op == 'placeholder')
++
++    def shape(node):
++        value = node.meta.get('val')
++        require(isinstance(value, torch.Tensor) and value.dtype in (torch.float32, torch.int32, torch.int64)
++                and 1 <= value.ndim <= 8,
++                f'PT2 node {node.name}: only rank-1..8 float32 or integer tensors are supported')
++        if value.ndim >= 3:
++            require(all(isinstance(size, int) for size in value.shape),
++                    f'PT2 node {node.name}: rank-3..5 tensors must have static dimensions')
++        result = []
++        for axis, size in enumerate(value.shape):
++            if isinstance(size, int):
++                require(0 <= size <= 2147483647, f'PT2 invalid dimension at {node.name}[{axis}]')
++                result.append(size)
++            else:
++                expr = size.node.expr
++                require(axis == 0 and bool(expr.is_Symbol) and str(expr) in constraints,
++                        f'PT2 unsupported symbolic dimension at {node.name}[{axis}]: {expr}')
++                result.append(str(expr))
++        return result
++
++    def shape_token(name, dims):
++        return f'#{name}=(' + ','.join(str(d) if isinstance(d, int) else '-1' for d in dims) + ')f32'
++
++    def emit(kind, name, inputs, output, dims, params=()):
++        require(re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name), f'PT2 invalid node name: {name}')
++        operands = inputs + ([output] if output else [])
++        fields = [kind, name, str(len(inputs)), str(int(output is not None)), *operands, *params]
++        if output:
++            blobs[output] = dims
++            fields.append(shape_token(output, dims))
++        lines.append(' '.join(fields))
++
++    def emit_attribute(node):
++        """Materialize a lifted vector/matrix as a canonical PNNX attribute."""
++        require(node.name in lifted, f'PT2 constant {getattr(node, "name", None)} is not lifted')
++        target, value = lifted[node.name]
++        require(1 <= value.ndim <= 5,
++                f'PT2 constant {target}: only rank-1..5 parameters are supported')
++        if node.name not in emitted_attributes:
++            attribute_name = 'constant_' + node.name
++            dims = [int(size) for size in value.shape]
++            tensors[attribute_name + '.data'] = value
++            dtype = 'f32' if value.dtype == torch.float32 else ('i32' if value.dtype == torch.int32 else 'i64')
++            emit('pnnx.Attribute', attribute_name, [], node.name, dims,
++                 ['@data=(' + ','.join(str(size) for size in dims) + ')' + dtype])
++            emitted_attributes.add(node.name)
++        used_weights.add(node.name)
++        return node.name, blobs[node.name]
++
++    def operand(node):
++        require(isinstance(node, torch.fx.Node), 'PT2 elementwise operands must be tensors')
++        name = resolve(node.name)
++        if name in blobs:
++            return name, blobs[name]
++        return emit_attribute(node)
++
++    def resolve(name):
++        while name in aliases:
++            name = aliases[name]
++        return name
++
++    def broadcastable(first, second, output, node_name):
++        require(1 <= len(first) <= 8 and 1 <= len(second) <= 8 and 1 <= len(output) <= 8,
++                f'PT2 elementwise {node_name}: tensor rank must be between 1 and 8')
++        require(len(output) == max(len(first), len(second)),
++                f'PT2 elementwise {node_name}: output rank is not a broadcast rank')
++        result = []
++        for axis in range(1, len(output) + 1):
++            left = first[-axis] if axis <= len(first) else 1
++            right = second[-axis] if axis <= len(second) else 1
++            if left == right:
++                result.append(left)
++            elif left == 1:
++                result.append(right)
++            elif right == 1:
++                result.append(left)
++            else:
++                raise Unsupported(
++                    f'PT2 elementwise {node_name}: incompatible dimensions {left} and {right}')
++        require(list(reversed(result)) == output,
++                f'PT2 elementwise {node_name}: output shape is not the broadcast result')
++
++    specs = {s.arg.name: s for s in program.graph_signature.input_specs}
++    examples = program.example_inputs[0]
++    require(input_shapes is None or len(input_shapes) == len(examples), 'PT2 input shape count mismatch')
++    input_index = 0
++    for node in program.graph.nodes:
++        if node.op != 'output' and node not in live:
++            continue
++        if node.op == 'placeholder':
++            spec = specs[node.name]
++            if spec.kind.name in ('PARAMETER', 'BUFFER', 'CONSTANT_TENSOR'):
++                mapping = program.constants if spec.kind.name == 'CONSTANT_TENSOR' else program.state_dict
++                tensor = mapping[spec.target]
++                require(isinstance(tensor, torch.Tensor) and tensor.layout == torch.strided,
++                        f'PT2 weight {spec.target}: only dense strided tensors supported')
++                if tensor.dtype != torch.float32:
++                    require(spec.kind.name == 'BUFFER' and tensor.dtype in (torch.int32, torch.int64),
++                            f'PT2 weight {spec.target}: only dense float32 supported (integer buffers are index constants)')
++                lifted[node.name] = (spec.target, tensor.detach().cpu().contiguous())
++            else:
++                require(spec.kind.name == 'USER_INPUT' and isinstance(spec.arg,
++                        torch.export.graph_signature.TensorArgument), 'PT2 user input must be a tensor')
++                dims = shape(node)
++                concrete = list(input_shapes[input_index] if input_shapes is not None else examples[input_index].shape)
++                require(len(concrete) == len(dims) and 1 <= len(dims) <= 5,
++                        f'PT2 input {node.name}: user inputs must be rank 1..5')
++                for axis, (expected, actual) in enumerate(zip(dims, concrete)):
++                    require(isinstance(actual, int) and actual > 0, 'PT2 input dimensions must be positive integers')
++                    if isinstance(expected, int):
++                        require(actual == expected, f'PT2 input {node.name}[{axis}]: expected {expected}, got {actual}')
++                    else:
++                        low, high = constraints[expected]
++                        require(low <= actual <= high, f'PT2 input {node.name}[{axis}]={actual} violates {expected} range [{low},{high}]')
++                        require(expected not in symbol_values or symbol_values[expected] == actual,
++                                f'PT2 shared symbol {expected}: conflicting input dimension {actual}')
++                        symbol_values[expected] = actual
++                signature.append({'name': node.name, 'shape': dims, 'example_shape': concrete})
++                emit('pnnx.Input', 'input_' + str(input_index), [], node.name, dims,
++                     [f'sample_tokens={concrete[0]}'])
++                input_index += 1
++        elif node.op == 'call_function':
++            target = str(node.target)
++            if target == 'aten._assert_tensor_metadata.default':
++                require(node.args and isinstance(node.args[0], torch.fx.Node),
++                        f'PT2 metadata assertion {node.name}: expected tensor input')
++                require(set(node.kwargs) <= {'dtype', 'device', 'layout'},
++                        f'PT2 metadata assertion {node.name}: unsupported checks {sorted(node.kwargs)}')
++                device = node.kwargs.get('device', torch.device('cpu'))
++                require(node.kwargs.get('dtype', torch.float32) == torch.float32
++                        and node.kwargs.get('layout', torch.strided) == torch.strided
++                        and str(device).split(':', 1)[0] in ('cpu', 'cuda'),
++                        f'PT2 metadata assertion {node.name}: only dense float32 CPU/CUDA checks are supported')
++                # Export inserts these guards for shape/stride/device checks. They
++                # have no tensor result and are safe only when the exported graph
++                # already carries a statically validated tensor value.
++                continue
++            if target in ('<built-in function getitem>', 'operator.getitem', 'builtins.getitem'):
++                require(len(node.args) == 2 and isinstance(node.args[0], torch.fx.Node)
++                        and isinstance(node.args[1], int),
++                        f'PT2 getitem {node.name}: fixed tuple index required')
++                source = tuple_values.get(node.args[0].name)
++                require(source is not None, f'PT2 getitem {node.name}: source is not a lowered tuple')
++                base, axis, count, *kind = source
++                index = node.args[1]
++                require(0 <= index < count and base in blobs,
++                        f'PT2 getitem {node.name}: tuple index out of range')
++                base_dims = blobs[base]
++                if kind == ['chunk']:
++                    require(base_dims[axis] % count == 0,
++                            f'PT2 chunk {node.name}: only evenly sized chunks are supported')
++                    chunk_size = base_dims[axis] // count
++                    dims = list(base_dims)
++                    dims[axis] = chunk_size
++                    emit('Tensor.slice', node.name, [base], node.name, dims,
++                         [f'dim={axis}', f'start={index * chunk_size}',
++                          f'end={(index + 1) * chunk_size}', 'step=1'])
++                else:
++                    dims = base_dims[:axis] + base_dims[axis + 1:]
++                    emit('Tensor.select', node.name, [base], node.name, dims,
++                         [f'dim={axis}', f'index={index}'])
++                continue
++            require(not node.kwargs or target == 'aten.to.dtype_layout',
++                    (f'PT2 SDPA {node.name}: mask/dropout/causal/scale/GQA arguments unsupported'
++                     if target == 'aten.scaled_dot_product_attention.default' else
++                     f'PT2 node {node.name}: keyword operator arguments unsupported'))
++            require(target in ('aten.linear.default', 'aten.rms_norm.default',
++                               'aten.silu.default', 'aten.alias.default', 'aten.slice.Tensor',
++                               'aten.reshape.default', 'aten.select.int',
++                               'aten.permute.default', 'aten.matmul.default',
++                               'aten.scaled_dot_product_attention.default',
++                               'aten.mul.Tensor', 'aten.add.Tensor', 'aten.sub.Tensor', 'aten.div.Tensor', 'aten.to.dtype',
++                               'aten.to.dtype_layout', 'aten.dropout.default', 'aten.tile.default',
++                               'aten.conv3d.default', 'aten.group_norm.default', 'aten.view.default',
++                               'aten.squeeze.dim',
++                               'aten.pow.Tensor_Scalar', 'aten.mean.dim', 'aten.rsqrt.default',
++                               'aten.transpose.int', 'aten.unsqueeze.default', 'aten.repeat.default', 'aten.unbind.int', 'aten.chunk.default', 'aten.stack.default', 'aten.cat.default', 'aten.index_select.default', 'aten.neg.default', 'aten.reshape_as.default', 'aten.cos.default', 'aten.sin.default', 'aten.softmax.int', 'aten.pad.default', 'aten.clamp.default', 'aten.exp.default'),
++                    f'PT2 unsupported operator at {node.name}: {target}')
++            require(node.args and (isinstance(node.args[0], torch.fx.Node)
++                    or (target in ('aten.stack.default', 'aten.cat.default') and isinstance(node.args[0], (tuple, list)))),
++                    f'PT2 node {node.name}: expected tensor input')
++            if target in ('aten.stack.default', 'aten.cat.default'):
++                first = None
++            else:
++                first = resolve(node.args[0].name)
++            if first not in blobs and isinstance(node.args[0], torch.fx.Node):
++                source_node = node.args[0]
++                if source_node.name in lifted:
++                    emit_attribute(source_node)
++                    first = source_node.name
++            if target == 'aten.unbind.int':
++                require(first in blobs and len(node.args) == 2 and isinstance(node.args[1], int),
++                        f'PT2 unbind {node.name}: fixed axis required')
++                axis = node.args[1] % len(blobs[first])
++                count = blobs[first][axis]
++                require(count > 0, f'PT2 unbind {node.name}: invalid axis')
++                tuple_values[node.name] = (first, axis, count)
++                continue
++            if target == 'aten.chunk.default':
++                require(first in blobs and len(node.args) == 3 and isinstance(node.args[1], int)
++                        and isinstance(node.args[2], int) and node.args[1] > 0,
++                        f'PT2 chunk {node.name}: fixed positive chunk count and axis are required')
++                axis = node.args[2] % len(blobs[first])
++                count = node.args[1]
++                require(blobs[first][axis] % count == 0,
++                        f'PT2 chunk {node.name}: only evenly sized chunks are supported')
++                values = node.meta.get('val')
++                require(isinstance(values, tuple) and len(values) == count
++                        and all(isinstance(value, torch.Tensor) for value in values),
++                        f'PT2 chunk {node.name}: tensor tuple metadata is required')
++                chunk_dims = list(blobs[first])
++                chunk_dims[axis] //= count
++                require(all(list(value.shape) == chunk_dims for value in values),
++                        f'PT2 chunk {node.name}: output shape mismatch')
++                tuple_values[node.name] = (first, axis, count, 'chunk')
++                continue
++            dims = shape(node)
++            if target == 'aten.pad.default':
++                require(first in blobs and len(node.args) in (2, 3, 4),
++                        f'PT2 pad {node.name}: invalid signature')
++                padding = node.args[1]
++                mode = node.args[2] if len(node.args) >= 3 else 'constant'
++                value = node.args[3] if len(node.args) >= 4 else 0.0
++                require(isinstance(padding, (tuple, list)) and len(padding) > 0
++                        and len(padding) % 2 == 0 and len(padding) <= 2 * len(blobs[first])
++                        and all(isinstance(item, int) and item >= 0 for item in padding),
++                        f'PT2 pad {node.name}: fixed non-negative padding is required')
++                require(mode == 'constant' and isinstance(value, (int, float)),
++                        f'PT2 pad {node.name}: only constant numeric padding is supported')
++                pad_axes = len(padding) // 2
++                expected = list(blobs[first])
++                for offset in range(pad_axes):
++                    axis = len(expected) - 1 - offset
++                    expected[axis] += padding[2 * offset] + padding[2 * offset + 1]
++                require(dims == expected, f'PT2 pad {node.name}: output shape mismatch')
++                emit('F.pad', node.name, [first], node.name, dims,
++                     ['pad=(' + ','.join(str(item) for item in padding) + ')',
++                      'mode=constant', f'value={float(value):.9g}'])
++            elif target == 'aten.clamp.default':
++                require(first in blobs and len(node.args) == 3
++                        and all(isinstance(value, (int, float)) for value in node.args[1:]),
++                        f'PT2 clamp {node.name}: fixed numeric min and max are required')
++                require(dims == blobs[first] and float(node.args[1]) <= float(node.args[2]),
++                        f'PT2 clamp {node.name}: shape or bounds are invalid')
++                emit('torch.clamp', node.name, [first], node.name, dims,
++                     [f'min={float(node.args[1]):.9g}', f'max={float(node.args[2]):.9g}'])
++            elif target == 'aten.exp.default':
++                require(first in blobs and len(node.args) == 1 and dims == blobs[first],
++                        f'PT2 exp {node.name}: shape/signature mismatch')
++                emit('pnnx.Expression', node.name, [first], node.name, dims, ['expr=exp(@0)'])
++            elif target == 'aten.to.dtype_layout':
++                require(first in blobs and len(node.args) == 1 and dims == blobs[first],
++                        f'PT2 dtype/layout cast {node.name}: shape/signature mismatch')
++                require(node.kwargs.get('dtype', torch.float32) == torch.float32
++                        and node.kwargs.get('layout', torch.strided) == torch.strided,
++                        f'PT2 dtype/layout cast {node.name}: only dense FP32 casts are supported')
++                aliases[node.name] = first
++            elif target == 'aten.dropout.default':
++                require(first in blobs and len(node.args) == 3 and dims == blobs[first]
++                        and isinstance(node.args[1], (int, float)) and float(node.args[1]) == 0.0
++                        and node.args[2] is False,
++                        f'PT2 dropout {node.name}: only inference dropout(p=0) is supported')
++                aliases[node.name] = first
++            elif target == 'aten.alias.default':
++                require(len(node.args) == 1 and first in blobs and dims == blobs[first],
++                        f'PT2 alias {node.name}: shape/signature mismatch')
++                aliases[node.name] = first
++            elif target == 'aten.to.dtype':
++                require(first in blobs and len(node.args) >= 2,
++                        f'PT2 cast {node.name}: invalid signature')
++                dtype = node.args[1]
++                require(dtype == torch.float32 and dims == blobs[first],
++                        f'PT2 cast {node.name}: only FP32-preserving casts are supported')
++                aliases[node.name] = first
++            elif target == 'aten.view.default':
++                require(first in blobs and len(node.args) == 2,
++                        f'PT2 view {node.name}: invalid signature')
++                requested = node.args[1]
++                require(isinstance(requested, (tuple, list)) and 1 <= len(requested) <= 8
++                        and all(isinstance(value, int) and value != 0 for value in requested),
++                        f'PT2 view {node.name}: only fixed positive shapes are supported')
++                requested = list(requested)
++                require(sum(item == -1 for item in requested) <= 1,
++                        f'PT2 view {node.name}: at most one inferred dimension is supported')
++                if -1 in requested:
++                    total = 1
++                    for item in blobs[first]:
++                        require(isinstance(item, int), f'PT2 view {node.name}: symbolic input size is unsupported')
++                        total *= item
++                    known = 1
++                    for item in requested:
++                        if item != -1:
++                            known *= item
++                    require(known > 0 and total % known == 0,
++                            f'PT2 view {node.name}: inferred dimension is not integral')
++                    requested[requested.index(-1)] = total // known
++                require(dims == requested and 1 <= len(dims) <= 8,
++                        f'PT2 view {node.name}: output shape mismatch')
++                in_size = 1
++                for item in blobs[first]:
++                    require(isinstance(item, int), f'PT2 view {node.name}: symbolic input size is unsupported')
++                    in_size *= item
++                out_size = 1
++                for item in dims:
++                    out_size *= item
++                require(in_size == out_size, f'PT2 view {node.name}: element count mismatch')
++                emit('Tensor.reshape', node.name, [first], node.name, dims,
++                     ['shape=(' + ','.join(str(value) for value in dims) + ')'])
++            elif target == 'aten.squeeze.dim':
++                require(first in blobs and len(node.args) == 2 and isinstance(node.args[1], int),
++                        f'PT2 squeeze {node.name}: fixed axis required')
++                axis = node.args[1] % len(blobs[first])
++                require(blobs[first][axis] == 1 and dims == blobs[first][:axis] + blobs[first][axis + 1:],
++                        f'PT2 squeeze {node.name}: only singleton axes can be removed')
++                emit('Tensor.reshape', node.name, [first], node.name, dims,
++                     ['shape=(' + ','.join(str(value) for value in dims) + ')'])
++            elif target == 'aten.tile.default':
++                require(first in blobs and len(node.args) == 2,
++                        f'PT2 tile {node.name}: invalid signature')
++                repeats = node.args[1]
++                require(isinstance(repeats, (tuple, list)) and len(repeats) == len(blobs[first])
++                        and all(isinstance(value, int) and value > 0 for value in repeats),
++                        f'PT2 tile {node.name}: fixed positive repeats required')
++                expected = [size * repeat for size, repeat in zip(blobs[first], repeats)]
++                require(dims == expected, f'PT2 tile {node.name}: output shape mismatch')
++                emit('Tensor.repeat', node.name, [first], node.name, dims,
++                     ['sizes=(' + ','.join(str(value) for value in repeats) + ')'])
++            elif target == 'aten.conv3d.default':
++                require(first in blobs and len(blobs[first]) == 5,
++                        f'PT2 Conv3d {node.name}: expected rank-5 activation input')
++                require(3 <= len(node.args) <= 8,
++                        f'PT2 Conv3d {node.name}: unsupported argument count')
++                weight_node = node.args[1]
++                require(isinstance(weight_node, torch.fx.Node) and weight_node.name in lifted,
++                        f'PT2 Conv3d {node.name}: weight must be a lifted constant')
++                _, weight = lifted[weight_node.name]
++                require(weight.ndim == 5, f'PT2 Conv3d {node.name}: invalid weight rank')
++
++                def triplet(value, label, default):
++                    if value is None:
++                        return list(default)
++                    require(isinstance(value, (tuple, list)) and len(value) == 3
++                            and all(isinstance(item, int) and item > 0 for item in value),
++                            f'PT2 Conv3d {node.name}: fixed {label} required')
++                    return list(value)
++
++                stride = triplet(node.args[3] if len(node.args) >= 4 else None, 'stride', (1, 1, 1))
++                padding = node.args[4] if len(node.args) >= 5 else (0, 0, 0)
++                require(isinstance(padding, (tuple, list)) and len(padding) == 3
++                        and all(isinstance(item, int) and item >= 0 for item in padding),
++                        f'PT2 Conv3d {node.name}: fixed padding required')
++                padding = list(padding)
++                dilation = triplet(node.args[5] if len(node.args) >= 6 else None, 'dilation', (1, 1, 1))
++                groups = node.args[6] if len(node.args) >= 7 else 1
++                require(isinstance(groups, int) and groups > 0 and weight.shape[1] * groups == blobs[first][1],
++                        f'PT2 Conv3d {node.name}: invalid groups/input channels')
++                bias_node = node.args[2]
++                has_bias = bias_node is not None
++                params = [f'in_channels={int(weight.shape[1] * groups)}',
++                          f'out_channels={int(weight.shape[0])}',
++                          'kernel_size=(' + ','.join(str(int(item)) for item in weight.shape[2:]) + ')',
++                          'stride=(' + ','.join(str(item) for item in stride) + ')',
++                          'padding_mode=zeros',
++                          'padding=(' + ','.join(str(item) for item in padding) + ')',
++                          'dilation=(' + ','.join(str(item) for item in dilation) + ')',
++                          f'groups={groups}', 'bias=' + str(has_bias),
++                          '@weight=(' + ','.join(str(int(item)) for item in weight.shape) + ')f32']
++                tensors[node.name + '.weight'] = weight
++                used_weights.add(weight_node.name)
++                if has_bias:
++                    require(isinstance(bias_node, torch.fx.Node) and bias_node.name in lifted,
++                            f'PT2 Conv3d {node.name}: bias must be a lifted constant')
++                    _, bias = lifted[bias_node.name]
++                    require(bias.ndim == 1 and bias.shape[0] == weight.shape[0],
++                            f'PT2 Conv3d {node.name}: invalid bias shape')
++                    tensors[node.name + '.bias'] = bias
++                    used_weights.add(bias_node.name)
++                    params.append(f'@bias=({int(bias.shape[0])})f32')
++                expected_d = list(blobs[first])
++                expected_d[1] = int(weight.shape[0])
++                for axis in range(3):
++                    input_size = blobs[first][axis + 2]
++                    kernel = weight.shape[axis + 2]
++                    expected_d[axis + 2] = (input_size + 2 * padding[axis]
++                                             - dilation[axis] * (kernel - 1) - 1) // stride[axis] + 1
++                require(dims == expected_d, f'PT2 Conv3d {node.name}: output shape mismatch {dims} != {expected_d}; input={blobs[first]} weight={list(weight.shape)} stride={stride} padding={padding} dilation={dilation}')
++                emit('nn.Conv3d', node.name, [first], node.name, dims, params)
++            elif target == 'aten.group_norm.default':
++                require(first in blobs and len(node.args) == 6,
++                        f'PT2 GroupNorm {node.name}: invalid signature')
++                groups, weight_node, bias_node, eps, cudnn = node.args[1:]
++                require(isinstance(groups, int) and groups > 0 and isinstance(eps, (float, int)) and float(eps) > 0
++                        and cudnn is False and isinstance(weight_node, torch.fx.Node)
++                        and isinstance(bias_node, torch.fx.Node)
++                        and weight_node.name in lifted and bias_node.name in lifted,
++                        f'PT2 GroupNorm {node.name}: only affine fixed inference GroupNorm is supported')
++                _, weight = lifted[weight_node.name]
++                _, bias = lifted[bias_node.name]
++                require(weight.ndim == bias.ndim == 1 and list(weight.shape) == list(bias.shape)
++                        and len(blobs[first]) >= 2 and blobs[first][1] == weight.shape[0]
++                        and dims == blobs[first],
++                        f'PT2 GroupNorm {node.name}: channel/shape mismatch')
++                tensors[node.name + '.weight'] = weight
++                tensors[node.name + '.bias'] = bias
++                used_weights.update((weight_node.name, bias_node.name))
++                emit('nn.GroupNorm', node.name, [first], node.name, dims,
++                     [f'num_groups={groups}', f'num_channels={int(weight.shape[0])}',
++                      f'eps={float(eps):.9g}', 'affine=True',
++                      f'@weight=({int(weight.shape[0])})f32',
++                      f'@bias=({int(bias.shape[0])})f32'])
++            elif target == 'aten.pow.Tensor_Scalar':
++                require(first in blobs and len(node.args) == 2 and node.args[1] == 2,
++                        f'PT2 pow {node.name}: only square with scalar exponent 2 is supported')
++                require(dims == blobs[first], f'PT2 pow {node.name}: shape mismatch')
++                emit('pnnx.Expression', node.name, [first], node.name, dims, ['expr=pow(@0,2)'])
++            elif target == 'aten.mean.dim':
++                require(first in blobs and len(node.args) >= 2,
++                        f'PT2 mean {node.name}: invalid signature')
++                axes = node.args[1]
++                keepdim = node.args[2] if len(node.args) >= 3 else False
++                require(isinstance(axes, (tuple, list)) and len(axes) == 1
++                        and isinstance(axes[0], int) and isinstance(keepdim, bool),
++                        f'PT2 mean {node.name}: only one fixed axis is supported')
++                axis = axes[0]
++                if axis < 0:
++                    axis += len(blobs[first])
++                expected_dims = blobs[first][:axis] + ([1] if keepdim else []) + blobs[first][axis + 1:]
++                require(0 <= axis < len(blobs[first]) and dims == expected_dims,
++                        f'PT2 mean {node.name}: output shape mismatch')
++                emit('torch.mean', node.name, [first], node.name, dims,
++                     [f'dim=({axis})', f'keepdim={keepdim}'])
++            elif target == 'aten.rsqrt.default':
++                require(first in blobs and len(node.args) == 1 and dims == blobs[first],
++                        f'PT2 rsqrt {node.name}: shape/signature mismatch')
++                emit('pnnx.Expression', node.name, [first], node.name, dims, ['expr=rsqrt(@0)'])
++            elif target == 'aten.neg.default':
++                require(first in blobs and len(node.args) == 1 and dims == blobs[first],
++                        f'PT2 neg {node.name}: shape/signature mismatch')
++                emit('pnnx.Expression', node.name, [first], node.name, dims, ['expr=neg(@0)'])
++            elif target in ('aten.cos.default', 'aten.sin.default'):
++                require(first in blobs and len(node.args) == 1 and dims == blobs[first],
++                        f'PT2 trig {node.name}: shape/signature mismatch')
++                emit('pnnx.Expression', node.name, [first], node.name, dims,
++                     [f'expr={"cos" if target == "aten.cos.default" else "sin"}(@0)'])
++            elif target == 'aten.softmax.int':
++                require(first in blobs and len(node.args) == 2 and isinstance(node.args[1], int),
++                        f'PT2 softmax {node.name}: fixed axis required')
++                axis = node.args[1] % len(blobs[first])
++                require(dims == blobs[first], f'PT2 softmax {node.name}: shape mismatch')
++                emit('F.softmax', node.name, [first], node.name, dims, [f'dim={axis}'])
++            elif target == 'aten.transpose.int':
++                require(first in blobs and len(node.args) == 3,
++                        f'PT2 transpose {node.name}: invalid signature')
++                dim0, dim1 = node.args[1:]
++                rank = len(blobs[first])
++                require(isinstance(dim0, int) and isinstance(dim1, int),
++                        f'PT2 transpose {node.name}: fixed axes required')
++                dim0 %= rank
++                dim1 %= rank
++                permutation = list(range(rank))
++                permutation[dim0], permutation[dim1] = permutation[dim1], permutation[dim0]
++                require(dims == [blobs[first][axis] for axis in permutation],
++                        f'PT2 transpose {node.name}: output shape mismatch')
++                emit('Tensor.permute', node.name, [first], node.name, dims,
++                     ['dims=(' + ','.join(str(axis) for axis in permutation) + ')'])
++            elif target == 'aten.unsqueeze.default':
++                require(first in blobs and len(node.args) == 2 and isinstance(node.args[1], int),
++                        f'PT2 unsqueeze {node.name}: fixed axis required')
++                axis = node.args[1]
++                rank = len(blobs[first])
++                axis = axis if axis >= 0 else axis + rank + 1
++                require(0 <= axis <= rank and dims == blobs[first][:axis] + [1] + blobs[first][axis:],
++                        f'PT2 unsqueeze {node.name}: output shape mismatch')
++                emit('Tensor.reshape', node.name, [first], node.name, dims,
++                     ['shape=(' + ','.join(str(value) for value in dims) + ')'])
++            elif target == 'aten.repeat.default':
++                require(first in blobs and len(node.args) == 2,
++                        f'PT2 repeat {node.name}: invalid signature')
++                repeats = node.args[1]
++                require(isinstance(repeats, (tuple, list)) and len(repeats) == len(blobs[first])
++                        and all(isinstance(value, int) and value > 0 for value in repeats),
++                        f'PT2 repeat {node.name}: fixed positive repeats required')
++                expected = [size * repeat for size, repeat in zip(blobs[first], repeats)]
++                require(dims == expected, f'PT2 repeat {node.name}: output shape mismatch')
++                emit('Tensor.repeat', node.name, [first], node.name, dims,
++                     ['sizes=(' + ','.join(str(value) for value in repeats) + ')'])
++            elif target == 'aten.stack.default':
++                require(len(node.args) == 2 and isinstance(node.args[0], (tuple, list))
++                        and isinstance(node.args[1], int),
++                        f'PT2 stack {node.name}: fixed tensor list and axis required')
++                values = node.args[0]
++                require(values and all(isinstance(value, torch.fx.Node) for value in values),
++                        f'PT2 stack {node.name}: tensor list required')
++                names_dims = [operand(value) for value in values]
++                axis = node.args[1]
++                base_dims = names_dims[0][1]
++                axis = axis if axis >= 0 else axis + len(base_dims) + 1
++                require(0 <= axis <= len(base_dims)
++                        and all(item[1] == base_dims for item in names_dims)
++                        and dims == base_dims[:axis] + [len(values)] + base_dims[axis:],
++                        f'PT2 stack {node.name}: incompatible shapes or axis')
++                emit('torch.stack', node.name, [item[0] for item in names_dims], node.name, dims,
++                     [f'dim={axis}'])
++            elif target == 'aten.cat.default':
++                require(isinstance(node.args[0], (tuple, list)) and len(node.args) in (1, 2)
++                        and (len(node.args) == 1 or isinstance(node.args[1], int)),
++                        f'PT2 cat {node.name}: fixed tensor list and axis required')
++                values = node.args[0]
++                require(values and all(isinstance(value, torch.fx.Node) for value in values),
++                        f'PT2 cat {node.name}: tensor list required')
++                names_dims = [operand(value) for value in values]
++                axis = node.args[1] if len(node.args) == 2 else 0
++                base_dims = names_dims[0][1]
++                axis = axis if axis >= 0 else axis + len(base_dims)
++                require(0 <= axis < len(base_dims) and all(len(item[1]) == len(base_dims) for item in names_dims),
++                        f'PT2 cat {node.name}: invalid axis/rank')
++                expected = list(base_dims)
++                expected[axis] = sum(item[1][axis] for item in names_dims)
++                require(dims == expected and all(all(a == b for i, (a, b) in enumerate(zip(item[1], base_dims)) if i != axis) for item in names_dims),
++                        f'PT2 cat {node.name}: incompatible shapes')
++                emit('torch.cat', node.name, [item[0] for item in names_dims], node.name, dims,
++                     [f'dim={axis}'])
++            elif target == 'aten.index_select.default':
++                require(len(node.args) == 3 and isinstance(node.args[0], torch.fx.Node)
++                        and isinstance(node.args[1], int) and isinstance(node.args[2], torch.fx.Node),
++                        f'PT2 index_select {node.name}: tensor/index operands required')
++                source, source_dims = operand(node.args[0])
++                index, index_dims = operand(node.args[2])
++                axis = node.args[1]
++                axis = axis if axis >= 0 else axis + len(source_dims)
++                require(0 <= axis < len(source_dims)
++                        and len(index_dims) == 1 and isinstance(index_dims[0], int),
++                        f'PT2 index_select {node.name}: fixed axis and rank-1 index required')
++                expected = list(source_dims)
++                expected[axis] = index_dims[0]
++                require(dims == expected, f'PT2 index_select {node.name}: output shape mismatch')
++                emit('torch.index_select', node.name, [source, index], node.name, dims,
++                     [f'dim={axis}'])
++            elif target == 'aten.unbind.int':
++                raise AssertionError('unreachable unbind lowering')
++            elif target == 'aten.slice.Tensor':
++                require(first in blobs and len(node.args) in (4, 5),
++                        f'PT2 slice {node.name}: invalid signature')
++                dim, start, end = node.args[1:4]
++                step = node.args[4] if len(node.args) == 5 else 1
++                require(all(isinstance(value, int) for value in (dim, start, end, step)),
++                        f'PT2 slice {node.name}: dynamic axes and bounds are unsupported')
++                if end > 2147483647:
++                    end = blobs[first][dim]
++                require(len(blobs[first]) == len(dims) and 1 <= len(dims) <= 8
++                        and 0 <= dim < len(dims) and start >= 0
++                        and end >= start and step == 1,
++                        f'PT2 slice {node.name}: only positive fixed slices are supported')
++                expected = list(blobs[first])
++                require(isinstance(expected[dim], int) and end <= expected[dim],
++                        f'PT2 slice {node.name}: slice exceeds a fixed input dimension')
++                expected[dim] = end - start
++                require(dims == expected, f'PT2 slice {node.name}: output shape mismatch')
++                emit('Tensor.slice', node.name, [first], node.name, dims,
++                     [f'dim={dim}', f'start={start}', f'end={end}', f'step={step}'])
++            elif target == 'aten.reshape.default':
++                require(first in blobs and len(node.args) == 2,
++                        f'PT2 reshape {node.name}: invalid signature')
++                requested = node.args[1]
++                require(isinstance(requested, (tuple, list)) and 1 <= len(requested) <= 8
++                        and all(isinstance(value, int) and value != 0 for value in requested),
++                        f'PT2 reshape {node.name}: only fixed positive shapes are supported')
++                requested = list(requested)
++                for axis, value in enumerate(requested):
++                    if value == -1:
++                        require(sum(item == -1 for item in requested) == 1,
++                                f'PT2 reshape {node.name}: at most one inferred dimension is supported')
++                        known = 1
++                        for item in requested:
++                            if item != -1:
++                                known *= item
++                        total = 1
++                        for item in blobs[first]:
++                            require(isinstance(item, int), f'PT2 reshape {node.name}: symbolic input size is unsupported')
++                            total *= item
++                        require(total % known == 0, f'PT2 reshape {node.name}: inferred dimension is not integral')
++                        requested[axis] = total // known
++                require(dims == requested and 1 <= len(dims) <= 8,
++                        f'PT2 reshape {node.name}: output shape mismatch')
++                input_size = 1
++                for value in blobs[first]:
++                    require(isinstance(value, int) and value > 0,
++                            f'PT2 reshape {node.name}: symbolic input size is unsupported')
++                    input_size *= value
++                output_size = 1
++                for value in dims:
++                    output_size *= value
++                require(input_size == output_size, f'PT2 reshape {node.name}: element count mismatch')
++                emit('Tensor.reshape', node.name, [first], node.name, dims,
++                     ['shape=(' + ','.join(str(value) for value in requested) + ')'])
++            elif target == 'aten.reshape_as.default':
++                require(len(node.args) == 2 and isinstance(node.args[1], torch.fx.Node)
++                        and first in blobs, f'PT2 reshape_as {node.name}: invalid signature')
++                target_dims = shape(node.args[1])
++                require(target_dims == dims and all(isinstance(value, int) for value in dims),
++                        f'PT2 reshape_as {node.name}: target shape must be static')
++                emit('Tensor.reshape', node.name, [first], node.name, dims,
++                     ['shape=(' + ','.join(str(value) for value in dims) + ')'])
++            elif target == 'aten.select.int':
++                require(first in blobs and len(node.args) == 3,
++                        f'PT2 select {node.name}: invalid signature')
++                dim, index = node.args[1:]
++                require(isinstance(dim, int) and isinstance(index, int)
++                        and 1 <= len(blobs[first]) <= 4
++                        and 0 <= dim < len(blobs[first]) and 0 <= index < blobs[first][dim],
++                        f'PT2 select {node.name}: only fixed axes and indices are supported')
++                require(blobs[first][dim] > 1 or (blobs[first][dim] == 1 and index == 0),
++                        f'PT2 select {node.name}: invalid singleton-axis index')
++                expected = blobs[first][:dim] + blobs[first][dim + 1:]
++                require(dims == expected and 1 <= len(dims) <= 4,
++                        f'PT2 select {node.name}: output shape mismatch')
++                emit('Tensor.select', node.name, [first], node.name, dims,
++                     [f'dim={dim}', f'index={index}'])
++            elif target == 'aten.rms_norm.default':
++                require(first in blobs and 2 <= len(blobs[first]) <= 4,
++                        f'PT2 RMSNorm {node.name}: expected rank-2..4 activation input')
++                require(len(node.args) == 4, f'PT2 RMSNorm {node.name}: invalid signature')
++                normalized_shape, weight_node, eps = node.args[1:]
++                require(isinstance(normalized_shape, (tuple, list)) and len(normalized_shape) == 1
++                        and isinstance(normalized_shape[0], int) and normalized_shape[0] > 0,
++                        f'PT2 RMSNorm {node.name}: only one fixed normalized dimension is supported')
++                feature_dim = normalized_shape[0]
++                require(blobs[first][-1] == feature_dim and dims == blobs[first],
++                        f'PT2 RMSNorm {node.name}: normalized shape does not match activation')
++                require(isinstance(eps, (float, int)) and float(eps) > 0,
++                        f'PT2 RMSNorm {node.name}: epsilon must be a positive constant')
++                affine = weight_node is not None
++                params = [f'normalized_shape=({feature_dim})', f'eps={float(eps):.9g}',
++                          f'elementwise_affine={affine}']
++                if affine:
++                    require(isinstance(weight_node, torch.fx.Node) and weight_node.name in lifted,
++                            f'PT2 RMSNorm {node.name}: weight must be a lifted constant')
++                    weight_name, weight = lifted[weight_node.name]
++                    require(weight.ndim == 1 and list(weight.shape) == [feature_dim],
++                            f'PT2 RMSNorm {node.name}: invalid weight shape')
++                    tensors[node.name + '.weight'] = weight
++                    used_weights.add(weight_node.name)
++                    params.append(f'@weight=({feature_dim})f32')
++                emit('nn.RMSNorm', node.name, [first], node.name, dims, params)
++            elif target == 'aten.linear.default':
++                require(first in blobs and 2 <= len(blobs[first]) <= 5,
++                        f'PT2 linear {node.name}: expected rank-2..5 activation input')
++                require(len(node.args) in (2, 3), f'PT2 invalid linear signature: {node.name}')
++                weight_node = node.args[1]
++                require(isinstance(weight_node, torch.fx.Node) and weight_node.name in lifted,
++                        f'PT2 linear {node.name}: weight must be lifted constant')
++                weight_name, weight = lifted[weight_node.name]
++                require(weight.ndim == 2 and blobs[first][-1] == weight.shape[1]
++                        and dims == list(blobs[first][:-1]) + [weight.shape[0]],
++                        f'PT2 linear {node.name}: incompatible weight/input/output shapes')
++                tensors[node.name + '.weight'] = weight
++                used_weights.add(weight_node.name)
++                bias = node.args[2] if len(node.args) == 3 else None
++                params = [f'in_features={weight.shape[1]}', f'out_features={weight.shape[0]}',
++                          'bias=' + str(bias is not None), f'@weight=({weight.shape[0]},{weight.shape[1]})f32']
++                if bias is not None:
++                    require(isinstance(bias, torch.fx.Node) and bias.name in lifted,
++                            f'PT2 linear {node.name}: bias must be lifted constant')
++                    _, value = lifted[bias.name]
++                    require(list(value.shape) == [weight.shape[0]], f'PT2 linear {node.name}: invalid bias shape')
++                    tensors[node.name + '.bias'] = value
++                    used_weights.add(bias.name)
++                    params.append(f'@bias=({weight.shape[0]})f32')
++                emit('nn.Linear', node.name, [first], node.name, dims, params)
++            elif target == 'aten.silu.default':
++                require(first in blobs and 2 <= len(blobs[first]) <= 5,
++                        f'PT2 SiLU {node.name}: expected rank-2..5 activation input')
++                require(len(node.args) == 1 and dims == blobs[first], 'PT2 SiLU shape/signature mismatch')
++                emit('nn.SiLU', node.name, [first], node.name, dims)
++            elif target == 'aten.permute.default':
++                require(first in blobs and len(node.args) == 2,
++                        f'PT2 permute {node.name}: invalid signature')
++                permutation = node.args[1]
++                require(isinstance(permutation, (tuple, list))
++                        and len(permutation) == len(blobs[first])
++                        and sorted(permutation) == list(range(len(permutation))),
++                        f'PT2 permute {node.name}: fixed permutation required')
++                expected = [blobs[first][axis] for axis in permutation]
++                require(dims == expected, f'PT2 permute {node.name}: output shape mismatch')
++                emit('Tensor.permute', node.name, [first], node.name, dims,
++                     ['dims=(' + ','.join(str(axis) for axis in permutation) + ')'])
++            elif target == 'aten.matmul.default':
++                require(len(node.args) == 2 and all(isinstance(arg, torch.fx.Node) for arg in node.args),
++                        f'PT2 matmul {node.name}: expected two tensor operands')
++                left, left_dims = operand(node.args[0])
++                right, right_dims = operand(node.args[1])
++                require(len(left_dims) >= 2 and len(right_dims) >= 2
++                        and all(isinstance(value, int) for value in left_dims + right_dims),
++                        f'PT2 matmul {node.name}: static rank-2..4 tensors required')
++                require(left_dims[-1] == right_dims[-2],
++                        f'PT2 matmul {node.name}: incompatible contraction dimensions')
++                batch_left, batch_right = left_dims[:-2], right_dims[:-2]
++                batch_rank = max(len(batch_left), len(batch_right))
++                batch = []
++                for axis in range(1, batch_rank + 1):
++                    ldim = batch_left[-axis] if axis <= len(batch_left) else 1
++                    rdim = batch_right[-axis] if axis <= len(batch_right) else 1
++                    require(ldim == rdim or ldim == 1 or rdim == 1,
++                            f'PT2 matmul {node.name}: incompatible batch dimensions')
++                    batch.append(max(ldim, rdim))
++                expected = list(reversed(batch)) + [left_dims[-2], right_dims[-1]]
++                require(dims == expected, f'PT2 matmul {node.name}: output shape mismatch')
++                emit('torch.matmul', node.name, [left, right], node.name, dims)
++            elif target == 'aten.scaled_dot_product_attention.default':
++                require(len(node.args) == 3 and all(isinstance(arg, torch.fx.Node) for arg in node.args),
++                        f'PT2 SDPA {node.name}: only q/k/v without mask is supported')
++                query, query_dims = operand(node.args[0])
++                key, key_dims = operand(node.args[1])
++                value, value_dims = operand(node.args[2])
++                require(len(query_dims) == len(key_dims) == len(value_dims)
++                        and len(query_dims) in (3, 4)
++                        and all(isinstance(size, int)
++                                for size in query_dims + key_dims + value_dims),
++                        f'PT2 SDPA {node.name}: fixed rank-3/4 q/k/v required')
++                require(query_dims[:-2] == key_dims[:-2] == value_dims[:-2]
++                        and query_dims[-1] == key_dims[-1]
++                        and key_dims[-2] == value_dims[-2],
++                        f'PT2 SDPA {node.name}: q/k/v shapes are incompatible')
++                require(dims == query_dims[:-2] + [query_dims[-2], value_dims[-1]],
++                        f'PT2 SDPA {node.name}: output shape mismatch')
++                emit('F.scaled_dot_product_attention', node.name,
++                     [query, key, value], node.name, dims)
++            else:
++                require(len(node.args) == 2, f'PT2 elementwise {node.name}: expected two tensor operands')
++                def scalar_operand(value):
++                    if isinstance(value, (int, float)):
++                        return value, []
++                    return operand(value)
++                first, first_dims = scalar_operand(node.args[0])
++                second, second_dims = scalar_operand(node.args[1])
++                if not first_dims or not second_dims:
++                    tensor, tensor_dims = (second, second_dims) if second_dims else (first, first_dims)
++                    scalar = first if not first_dims else second
++                    require(isinstance(scalar, (int, float)) and tensor in blobs,
++                            f'PT2 elementwise {node.name}: unsupported scalar operand')
++                    expression = {'aten.mul.Tensor': 'mul', 'aten.add.Tensor': 'add', 'aten.sub.Tensor': 'sub',
++                                  'aten.div.Tensor': 'div'}[target]
++                    emit('pnnx.Expression', node.name, [tensor], node.name, dims,
++                         [f'expr={expression}(@0,{float(scalar):.9g})'])
++                    continue
++                broadcastable(first_dims, second_dims, dims, node.name)
++                expression = {'aten.mul.Tensor': 'mul', 'aten.add.Tensor': 'add', 'aten.sub.Tensor': 'sub',
++                              'aten.div.Tensor': 'div'}[target]
++                emit('pnnx.Expression', node.name, [first, second], node.name, dims,
++                     [f'expr={expression}(@0,@1)'])
++        elif node.op == 'output':
++            require(len(node.args) == 1 and isinstance(node.args[0], (tuple, list)), 'PT2 malformed outputs')
++            for index, output in enumerate(node.args[0]):
++                require(isinstance(output, torch.fx.Node) and resolve(output.name) in blobs, 'PT2 output must be an activation tensor')
++                emit('pnnx.Output', 'output_' + str(index), [resolve(output.name)], None, None)
++        else:
++            raise Unsupported(f'PT2 unsupported node {node.name}: {node.op}')
++    require(input_shapes is None or len(input_shapes) == input_index, 'PT2 input shape count mismatch')
++    unused = set(lifted) - used_weights
++    require(all(name.startswith('b_attn_') or name.startswith('p_vae_encoder_') for name in unused),
++            'PT2 unused/non-linear lifted state unsupported: ' + str(unused))
++    for name in sorted(unused):
++        if name.startswith('b_attn_'):
++            emit_attribute(next(node for node in program.graph.nodes
++                                if node.op == 'placeholder' and node.name == name))
++    require(input_index > 0 and any(line.startswith('pnnx.Output ') for line in lines), 'PT2 missing user inputs/outputs')
++    record = {'frontend': 'seedvr2-restricted-pt2-v5', 'pytorch': torch.__version__,
++              'pt2_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
++              'inputs': signature, 'outputs': [s.arg.name for s in program.graph_signature.output_specs],
++              'range_constraints': constraints, 'runtime_guards': False,
++              'weights': {key: {'target': target, 'shape': list(value.shape),
++                  'sha256': hashlib.sha256(value.numpy().tobytes()).hexdigest()}
++                  for key, (target, value) in lifted.items()},
++              'operators': [str(n.target) for n in program.graph.nodes if n.op == 'call_function']}
++    # Do not publish any IR until the entire program has passed validation.
++    param.parent.mkdir(parents=True, exist_ok=True)
++    weights.parent.mkdir(parents=True, exist_ok=True)
++    with zipfile.ZipFile(weights, 'w', compression=zipfile.ZIP_STORED) as archive:
++        for name, value in tensors.items():
++            archive.writestr(name, value.numpy().tobytes())
++    param.write_text('7767517\n' + f'{len(lines)} {len(blobs)}\n' + '\n'.join(lines) + '\n')
++    param.with_suffix('.json').write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
++    return record
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('pt2', type=Path)
++    parser.add_argument('--param', required=True, type=Path)
++    parser.add_argument('--bin', required=True, type=Path)
++    parser.add_argument('--input-shapes', help='JSON list of concrete shapes to validate; graph stays dynamic')
++    args = parser.parse_args()
++    try:
++        print(json.dumps(lower(args.pt2, args.param, args.bin,
++                               json.loads(args.input_shapes) if args.input_shapes else None), indent=2))
++    except (Unsupported, OSError) as exc:
++        sys.exit(str(exc))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/pnnx/src/CMakeLists.txt b/tools/pnnx/src/CMakeLists.txt
+index 4467942..0c68380 100644
+--- a/tools/pnnx/src/CMakeLists.txt
++++ b/tools/pnnx/src/CMakeLists.txt
+@@ -758,6 +758,7 @@ if(NOT MSVC)
+ endif()
+ 
+ set(pnnx_SRCS
++    load_pnnx_ir.cpp
+     main.cpp
+     ir.cpp
+     model_stat.cpp
+diff --git a/tools/pnnx/src/load_pnnx_ir.cpp b/tools/pnnx/src/load_pnnx_ir.cpp
+new file mode 100644
+index 0000000..11d831a
+--- /dev/null
++++ b/tools/pnnx/src/load_pnnx_ir.cpp
+@@ -0,0 +1,400 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// Copyright (c) 2026 SeedVR2-ncnn contributors
++#include "load_pnnx_ir.h"
++#include "storezip.h"
++#include <fstream>
++#include <sstream>
++#include <stdexcept>
++#include <cstdio>
++#include <cstdlib>
++#include <cmath>
++
++namespace {
++void check(bool ok, const std::string& message)
++{
++    if (!ok) throw std::runtime_error(message);
++}
++int integer(const std::string& text)
++{
++    char* end = 0;
++    long value = strtol(text.c_str(), &end, 10);
++    check(!text.empty() && *end == 0 && value >= -1 && value <= 2147483647, "invalid integer: " + text);
++    return (int)value;
++}
++std::vector<int> shape(const std::string& text, bool weight)
++{
++    check(text.size() >= 6 && text[0] == '(' &&
++          (text.substr(text.size() - 4) == ")f32" || text.substr(text.size() - 4) == ")i32" || text.substr(text.size() - 4) == ")i64"),
++          "expected typed shape: " + text);
++    std::istringstream stream(text.substr(1, text.size() - 5));
++    std::string item;
++    std::vector<int> dims;
++    while (std::getline(stream, item, ','))
++    {
++        int value = integer(item);
++        check(value >= 0 || (!weight && value == -1 && dims.empty()), "unsupported dimension: " + item);
++        dims.push_back(value);
++    }
++    check(dims.size() >= 1 && dims.size() <= 8, "unsupported tensor rank: " + text);
++    if (dims.size() > 2)
++        for (int dim : dims) check(dim >= 0, "rank-3..8 tensors must be static");
++    return dims;
++}
++}
++
++int load_pnnx_ir(const std::string& path, pnnx::Graph& graph, std::vector<std::vector<int64_t> >& shapes, std::vector<std::string>& types)
++{
++    try
++    {
++        check(shapes.empty(), "inputshape overrides are unsupported for canonical IR; validate PT2 shapes in the Python frontend");
++        std::ifstream file(path.c_str());
++        check(file.good(), "cannot open IR");
++        std::string line;
++        std::getline(file, line);
++        check(line == "7767517", "invalid IR magic");
++        std::getline(file, line);
++        std::istringstream header(line);
++        int operators = 0, operands = 0;
++        std::string extra;
++        check(bool(header >> operators >> operands) && !(header >> extra) && operators > 0 && operators <= 100000 && operands > 0 && operands <= 100000, "invalid IR counts");
++        pnnx::StoreZipReader archive;
++        check(archive.open(path.substr(0, path.size() - 6) + ".bin") == 0, "cannot open IR weights");
++        std::set<std::string> names, attributes;
++        int inputs = 0, outputs = 0;
++        for (int index = 0; index < operators; index++)
++        {
++            check(bool(std::getline(file, line)), "truncated IR");
++            std::istringstream stream(line);
++            std::string type, name;
++            int ni = 0, no = 0;
++            check(bool(stream >> type >> name >> ni >> no), "invalid operator header");
++            check(names.insert(name).second, "duplicate operator: " + name);
++        check(type == "pnnx.Input" || type == "pnnx.Output" || type == "pnnx.Attribute" || type == "nn.Linear" || type == "nn.RMSNorm" || type == "nn.SiLU" || type == "nn.Conv3d" || type == "nn.GroupNorm" || type == "pnnx.Expression" || type == "Tensor.slice" || type == "Tensor.reshape" || type == "Tensor.select" || type == "Tensor.permute" || type == "Tensor.repeat" || type == "torch.stack" || type == "torch.cat" || type == "torch.index_select" || type == "torch.mean" || type == "torch.matmul" || type == "F.scaled_dot_product_attention" || type == "F.softmax" || type == "F.pad" || type == "torch.clamp", "unsupported canonical IR operator: " + type);
++            check((type == "pnnx.Input" && ni == 0 && no == 1) || (type == "pnnx.Output" && ni == 1 && no == 0) || (type == "pnnx.Attribute" && ni == 0 && no == 1) || (type == "pnnx.Expression" && (ni == 1 || ni == 2) && no == 1) || (type == "torch.matmul" && ni == 2 && no == 1) || (type == "F.scaled_dot_product_attention" && ni == 3 && no == 1) || ((type == "nn.Linear" || type == "nn.RMSNorm" || type == "nn.SiLU" || type == "nn.Conv3d" || type == "nn.GroupNorm" || type == "Tensor.slice" || type == "Tensor.reshape" || type == "Tensor.select" || type == "Tensor.permute" || type == "Tensor.repeat" || type == "F.softmax" || type == "torch.mean" || type == "F.pad" || type == "torch.clamp") && ni == 1 && no == 1) || ((type == "torch.stack" || type == "torch.cat") && ni >= 1 && no == 1) || (type == "torch.index_select" && ni == 2 && no == 1), "invalid operator arity");
++            pnnx::Operator* op = graph.new_operator(type, name);
++            for (int j = 0; j < ni; j++)
++            {
++                std::string blob;
++                stream >> blob;
++                pnnx::Operand* input = graph.get_operand(blob);
++                check(input != 0, "unknown input operand: " + blob);
++                input->consumers.push_back(op);
++                op->inputs.push_back(input);
++            }
++            if (no)
++            {
++                std::string blob;
++                check(bool(stream >> blob) && !graph.get_operand(blob), "missing/duplicate output operand");
++                pnnx::Operand* output = graph.new_operand(blob);
++                output->producer = op;
++                output->type = 1;
++                op->outputs.push_back(output);
++            }
++            std::set<std::string> keys;
++            int sample_tokens = 0;
++            std::string field;
++            while (stream >> field)
++            {
++                size_t equal = field.find('=');
++                check(equal != std::string::npos && equal > 0, "invalid IR field");
++                std::string key = field.substr(0, equal), value = field.substr(equal + 1);
++                check(keys.insert(key).second, "duplicate field: " + key);
++                if (type == "pnnx.Input" && key == "sample_tokens")
++                {
++                    sample_tokens = integer(value);
++                    check(sample_tokens > 0, "invalid sample token count");
++                }
++                else if (key[0] == '#')
++                {
++                    check(no == 1 && key.substr(1) == op->outputs[0]->name, "shape references wrong operand");
++                    op->outputs[0]->shape = shape(value, false);
++                }
++                else if (key[0] == '@')
++                {
++                    check((type == "pnnx.Attribute" && key == "@data") ||
++                          (type == "nn.Linear" && (key == "@weight" || key == "@bias")) ||
++                          (type == "nn.Conv3d" && (key == "@weight" || key == "@bias")) ||
++                          (type == "nn.GroupNorm" && (key == "@weight" || key == "@bias")) ||
++                          (type == "nn.RMSNorm" && key == "@weight"), "unsupported attribute: " + key);
++                    pnnx::Attribute attr;
++                    const std::string suffix = value.substr(value.size() - 3);
++                    attr.type = suffix == "i64" ? 5 : (suffix == "i32" ? 4 : 1);
++                    attr.shape = shape(value, true);
++                    uint64_t bytes = attr.type == 5 ? 8 : 4;
++                    for (int d : attr.shape) { check(bytes <= 2147483647u / (unsigned)d, "weight too large"); bytes *= d; }
++                    std::string entry = name + "." + key.substr(1);
++                    check(archive.get_file_size(entry) == bytes, "weight byte count mismatch: " + entry);
++                    attr.data.resize(bytes);
++                    check(archive.read_file(entry, attr.data.data()) == 0, "cannot read weight: " + entry);
++                    op->attrs[key.substr(1)] = attr;
++                    attributes.insert(entry);
++                }
++                else
++                {
++                    check((type == "nn.Linear" && (key == "in_features" || key == "out_features" || key == "bias")) ||
++                          (type == "nn.Conv3d" && (key == "in_channels" || key == "out_channels" || key == "kernel_size" || key == "stride" || key == "padding_mode" || key == "padding" || key == "dilation" || key == "groups" || key == "bias")) ||
++                          (type == "nn.GroupNorm" && (key == "num_groups" || key == "num_channels" || key == "eps" || key == "affine")) ||
++                          (type == "nn.RMSNorm" && (key == "normalized_shape" || key == "eps" || key == "elementwise_affine")) ||
++                          (type == "pnnx.Expression" && key == "expr") ||
++                          (type == "Tensor.slice" && (key == "dim" || key == "start" || key == "end" || key == "step")) ||
++                          (type == "Tensor.reshape" && key == "shape") ||
++                          (type == "Tensor.permute" && key == "dims") ||
++                          (type == "Tensor.select" && (key == "dim" || key == "index")) ||
++                          (type == "Tensor.repeat" && key == "sizes") ||
++                          ((type == "torch.stack" || type == "torch.cat") && key == "dim") ||
++                          (type == "torch.index_select" && key == "dim") ||
++                          (type == "torch.mean" && (key == "dim" || key == "keepdim")) ||
++                          (type == "F.softmax" && key == "dim") ||
++                          (type == "F.pad" && (key == "pad" || key == "mode" || key == "value")) ||
++                          (type == "torch.clamp" && (key == "min" || key == "max")) ||
++                          ((type == "BinaryOp" || type == "UnaryOp") && key == "op") ||
++                          (type == "Reduction" && (key == "axes" || key == "keepdim" || key == "op")), "unsupported parameter: " + key);
++                    op->params[key] = pnnx::Parameter::parse_from_string(value);
++                }
++            }
++            check(no == 0 || (op->outputs[0]->shape.size() >= 1 && op->outputs[0]->shape.size() <= 8), "missing output shape");
++            if (type == "pnnx.Attribute")
++            {
++                check(op->params.empty() && op->attrs.size() == 1 && op->has_attr("data"), "invalid Attribute fields");
++                check(op->attrs.at("data").shape == op->outputs[0]->shape, "Attribute shape mismatch");
++            }
++            if (type == "nn.Linear")
++            {
++                check(op->params.size() == 3 && op->has_param("bias") && op->has_param("in_features") && op->has_param("out_features"), "incomplete Linear parameters");
++                check(op->params.at("bias").type == 1 && op->params.at("in_features").type == 2 && op->params.at("out_features").type == 2, "invalid Linear parameter types");
++                int in = op->params.at("in_features").i, out = op->params.at("out_features").i;
++                bool bias = op->params.at("bias").b;
++                check(in > 0 && out > 0 && op->has_attr("weight") && op->attrs.at("weight").shape == std::vector<int>({out, in}) && op->attrs.size() == (bias ? 2u : 1u), "invalid Linear weights");
++                check(!bias || (op->has_attr("bias") && op->attrs.at("bias").shape == std::vector<int>({out})), "invalid Linear bias");
++                check(op->inputs[0]->shape.size() >= 2 && op->inputs[0]->shape.back() == in && op->outputs[0]->shape.size() == op->inputs[0]->shape.size(), "Linear activation shape mismatch");
++                std::vector<int> linear_shape = op->inputs[0]->shape;
++                linear_shape.back() = out;
++                check(op->outputs[0]->shape == linear_shape, "Linear activation shape mismatch");
++            }
++            if (type == "nn.Conv3d")
++            {
++                check(op->params.size() == 9 && op->has_param("in_channels") && op->has_param("out_channels") && op->has_param("kernel_size") && op->has_param("stride") && op->has_param("padding_mode") && op->has_param("padding") && op->has_param("dilation") && op->has_param("groups") && op->has_param("bias"), "incomplete Conv3d parameters");
++                const int in = op->params.at("in_channels").i;
++                const int out = op->params.at("out_channels").i;
++                const int groups = op->params.at("groups").i;
++                check(in > 0 && out > 0 && groups > 0 && in % groups == 0,
++                      "invalid Conv3d channel parameters");
++                check(op->params.at("kernel_size").type == 5 && op->params.at("kernel_size").ai.size() == 3 &&
++                      op->params.at("stride").type == 5 && op->params.at("stride").ai.size() == 3 &&
++                      op->params.at("padding").type == 5 && op->params.at("padding").ai.size() == 3 &&
++                      op->params.at("dilation").type == 5 && op->params.at("dilation").ai.size() == 3,
++                      "invalid Conv3d tuple parameters");
++                check(op->params.at("padding_mode").type == 4 && op->params.at("padding_mode").s == "zeros",
++                      "only zero padded Conv3d is supported in canonical IR");
++                check(op->params.at("bias").type == 1 && op->has_attr("weight") &&
++                      op->attrs.at("weight").shape.size() == 5 && op->attrs.at("weight").shape[0] == out &&
++                      op->attrs.at("weight").shape[1] == in / groups,
++                      "invalid Conv3d weights");
++                const bool bias = op->params.at("bias").b;
++                check(op->attrs.size() == (bias ? 2u : 1u), "invalid Conv3d attributes");
++                if (bias)
++                    check(op->has_attr("bias") && op->attrs.at("bias").shape == std::vector<int>({out}),
++                          "invalid Conv3d bias");
++                check(op->inputs[0]->shape.size() == 5 && op->inputs[0]->shape[1] == in &&
++                      op->outputs[0]->shape.size() == 5 && op->outputs[0]->shape[1] == out,
++                      "Conv3d activation shape mismatch");
++            }
++            if (type == "nn.GroupNorm")
++            {
++                check(op->params.size() == 4 && op->has_param("num_groups") && op->has_param("num_channels") && op->has_param("eps") && op->has_param("affine"), "incomplete GroupNorm parameters");
++                const int groups = op->params.at("num_groups").i;
++                const int channels = op->params.at("num_channels").i;
++                check(groups > 0 && channels > 0 && channels % groups == 0 && op->params.at("eps").f > 0.f,
++                      "invalid GroupNorm parameters");
++                const bool affine = op->params.at("affine").b;
++                check(affine && op->attrs.size() == 2 && op->has_attr("weight") && op->has_attr("bias") &&
++                      op->attrs.at("weight").shape == std::vector<int>({channels}) &&
++                      op->attrs.at("bias").shape == std::vector<int>({channels}),
++                      "only affine GroupNorm is supported in canonical IR");
++                check(op->inputs[0]->shape.size() >= 3 && op->inputs[0]->shape.size() <= 5 &&
++                      op->inputs[0]->shape[1] == channels && op->outputs[0]->shape == op->inputs[0]->shape,
++                      "GroupNorm activation shape mismatch");
++            }
++            if (type == "nn.RMSNorm")
++            {
++                check(op->params.size() == 3 && op->has_param("normalized_shape") && op->has_param("eps") && op->has_param("elementwise_affine"), "incomplete RMSNorm parameters");
++                const pnnx::Parameter& normalized_shape = op->params.at("normalized_shape");
++                const pnnx::Parameter& eps = op->params.at("eps");
++                const pnnx::Parameter& elementwise_affine = op->params.at("elementwise_affine");
++                check(normalized_shape.type == 5 && normalized_shape.ai.size() == 1 && normalized_shape.ai[0] > 0, "invalid RMSNorm normalized_shape");
++                check(eps.type == 3 && std::isfinite(eps.f) && eps.f > 0.f, "invalid RMSNorm epsilon");
++                check(elementwise_affine.type == 1, "invalid RMSNorm elementwise_affine");
++                const int feature_dim = normalized_shape.ai[0];
++                check(op->inputs[0]->shape.size() >= 2 && op->inputs[0]->shape.back() == feature_dim && op->outputs[0]->shape == op->inputs[0]->shape, "RMSNorm activation shape mismatch");
++                const bool affine = elementwise_affine.b;
++                check(op->attrs.size() == (affine ? 1u : 0u), "invalid RMSNorm attributes");
++                if (affine)
++                    check(op->has_attr("weight") && op->attrs.at("weight").shape == std::vector<int>({feature_dim}), "invalid RMSNorm weight");
++                else
++                    check(!op->has_attr("weight"), "unexpected RMSNorm weight");
++            }
++            if (type == "nn.SiLU" || type == "pnnx.Expression")
++            {
++                check(op->params.size() == (type == "pnnx.Expression" ? 1u : 0u), "incomplete activation parameters");
++                if (type == "nn.SiLU")
++                    check(op->inputs[0]->shape == op->outputs[0]->shape, "activation shape mismatch");
++                else
++                {
++                    const std::vector<int>& output = op->outputs[0]->shape;
++                    for (const auto* input : op->inputs)
++                    {
++                        check(input->shape.size() >= 1 && input->shape.size() <= 8, "unsupported expression input rank");
++                        check(output.size() >= 1 && output.size() <= 8 && output.size() >= input->shape.size(), "expression output rank mismatch");
++                        for (size_t axis = 1; axis <= output.size(); axis++)
++                        {
++                            const int output_dim = output[output.size() - axis];
++                            const int input_dim = axis <= input->shape.size() ? input->shape[input->shape.size() - axis] : 1;
++                            check(input_dim == output_dim || input_dim == 1, "expression broadcast shape mismatch");
++                        }
++                    }
++                    if (op->inputs.size() == 1)
++                        check(output == op->inputs[0]->shape, "unary expression output shape mismatch");
++                    else
++                    {
++                        const std::vector<int>& first = op->inputs[0]->shape;
++                        const std::vector<int>& second = op->inputs[1]->shape;
++                        check(output.size() == std::max(first.size(), second.size()), "expression output rank mismatch");
++                        for (size_t axis = 1; axis <= output.size(); axis++)
++                        {
++                            const int left = axis <= first.size() ? first[first.size() - axis] : 1;
++                            const int right = axis <= second.size() ? second[second.size() - axis] : 1;
++                            check((left == right || left == 1 || right == 1) &&
++                                  output[output.size() - axis] == (left == 1 ? right : left),
++                                  "expression output is not the broadcast result");
++                        }
++                    }
++                }
++            }
++            if (type == "Tensor.slice")
++            {
++                check(op->params.size() == 4 && op->has_param("dim") && op->has_param("start") &&
++                      op->has_param("end") && op->has_param("step"), "incomplete Tensor.slice parameters");
++                const int dim = op->params.at("dim").i;
++                const int start = op->params.at("start").i;
++                const int end = op->params.at("end").i;
++                const int step = op->params.at("step").i;
++                check(op->inputs[0]->shape.size() == op->outputs[0]->shape.size() && op->inputs[0]->shape.size() >= 1 && op->inputs[0]->shape.size() <= 8 && dim >= 0 && dim < (int)op->inputs[0]->shape.size() &&
++                      start >= 0 && end >= start && step == 1 && op->inputs[0]->shape[dim] > 0 &&
++                      end <= op->inputs[0]->shape[dim], "unsupported Tensor.slice shape or parameters");
++                std::vector<int> expected = op->inputs[0]->shape;
++                expected[dim] = end - start;
++                check(expected == op->outputs[0]->shape, "Tensor.slice shape mismatch");
++            }
++            if (type == "Tensor.reshape")
++            {
++                check(op->params.size() == 1 && op->has_param("shape") && op->params.at("shape").type == 5,
++                      "incomplete Tensor.reshape parameters");
++                const std::vector<int>& target = op->params.at("shape").ai;
++                check(target.size() >= 1 && target.size() <= 8 &&
++                      op->inputs[0]->shape.size() >= 1 && op->inputs[0]->shape.size() <= 8 && target == op->outputs[0]->shape &&
++                      target.size() == op->outputs[0]->shape.size(), "unsupported Tensor.reshape shape");
++                int64_t input_size = 1, output_size = 1;
++                for (int value : op->inputs[0]->shape)
++                {
++                    check(value > 0, "Tensor.reshape requires a fixed input size");
++                    input_size *= value;
++                }
++                for (int value : target)
++                {
++                    check(value > 0, "Tensor.reshape requires a fixed output size");
++                    output_size *= value;
++                }
++                check(input_size == output_size, "Tensor.reshape element count mismatch");
++            }
++            if (type == "Tensor.select")
++            {
++                check(op->params.size() == 2 && op->has_param("dim") && op->has_param("index"),
++                      "incomplete Tensor.select parameters");
++                const int dim = op->params.at("dim").i;
++                const int index = op->params.at("index").i;
++                check(op->inputs[0]->shape.size() >= 1 && op->inputs[0]->shape.size() <= 8 && op->outputs[0]->shape.size() >= 1 &&
++                      dim >= 0 && dim < (int)op->inputs[0]->shape.size() &&
++                      index >= 0 && index < op->inputs[0]->shape[dim], "unsupported Tensor.select shape or parameters");
++                std::vector<int> expected = op->inputs[0]->shape;
++                expected.erase(expected.begin() + dim);
++                check(expected == op->outputs[0]->shape, "Tensor.select shape mismatch");
++            }
++            if (type == "Tensor.permute")
++            {
++                check(op->params.size() == 1 && op->has_param("dims") && op->params.at("dims").type == 5,
++                      "incomplete Tensor.permute parameters");
++                const std::vector<int>& permutation = op->params.at("dims").ai;
++                check(permutation.size() == op->inputs[0]->shape.size() &&
++                      op->outputs[0]->shape.size() == permutation.size(), "Tensor.permute rank mismatch");
++                std::vector<int> expected(permutation.size());
++                std::vector<int> seen(permutation.size(), 0);
++                for (size_t i = 0; i < permutation.size(); i++)
++                {
++                    check(permutation[i] >= 0 && permutation[i] < (int)permutation.size() && !seen[permutation[i]], "invalid Tensor.permute permutation");
++                    seen[permutation[i]] = 1;
++                    expected[i] = op->inputs[0]->shape[permutation[i]];
++                }
++                check(expected == op->outputs[0]->shape, "Tensor.permute shape mismatch");
++            }
++            if (type == "torch.matmul")
++            {
++                check(op->params.empty() && op->inputs[0]->shape.size() >= 2 && op->inputs[1]->shape.size() >= 2,
++                      "invalid torch.matmul parameters or ranks");
++                const std::vector<int>& left = op->inputs[0]->shape;
++                const std::vector<int>& right = op->inputs[1]->shape;
++                check(left.back() == right[right.size() - 2], "torch.matmul contraction mismatch");
++                const size_t batch_rank = std::max(left.size(), right.size()) - 2;
++                std::vector<int> expected(batch_rank);
++                for (size_t axis = 1; axis <= batch_rank; axis++)
++                {
++                    const int ldim = axis <= left.size() - 2 ? left[left.size() - 2 - axis] : 1;
++                    const int rdim = axis <= right.size() - 2 ? right[right.size() - 2 - axis] : 1;
++                    check(ldim == rdim || ldim == 1 || rdim == 1, "torch.matmul batch mismatch");
++                    expected[batch_rank - axis] = std::max(ldim, rdim);
++                }
++                expected.push_back(left[left.size() - 2]);
++                expected.push_back(right.back());
++                check(expected == op->outputs[0]->shape, "torch.matmul output shape mismatch");
++            }
++            if (type == "F.scaled_dot_product_attention")
++            {
++                check(op->params.empty() && op->inputs[0]->shape.size() >= 3 &&
++                      op->inputs[0]->shape.size() <= 4 &&
++                      op->inputs[1]->shape.size() == op->inputs[0]->shape.size() &&
++                      op->inputs[2]->shape.size() == op->inputs[0]->shape.size(),
++                      "only fixed rank-3/4 unmasked SDPA is supported");
++                const std::vector<int>& query = op->inputs[0]->shape;
++                const std::vector<int>& key = op->inputs[1]->shape;
++                const std::vector<int>& value = op->inputs[2]->shape;
++                check(std::equal(query.begin(), query.end() - 2, key.begin()) &&
++                      std::equal(query.begin(), query.end() - 2, value.begin()) &&
++                      query.back() == key.back() && key[key.size() - 2] == value[value.size() - 2],
++                      "SDPA q/k/v shape mismatch");
++                std::vector<int> expected(query.begin(), query.end() - 2);
++                expected.push_back(query[query.size() - 2]);
++                expected.push_back(value.back());
++                check(op->outputs[0]->shape == expected,
++                      "SDPA output shape mismatch");
++            }
++            if (type == "pnnx.Input")
++            {
++                check(op->outputs[0]->shape.size() >= 1 && op->outputs[0]->shape.size() <= 5, "canonical PT2 input rank must be 1..5");
++                shapes.push_back(std::vector<int64_t>(op->outputs[0]->shape.begin(), op->outputs[0]->shape.end()));
++                check(sample_tokens > 0 && (shapes.back()[0] == -1 || shapes.back()[0] == sample_tokens), "missing/inconsistent input sample shape");
++                shapes.back()[0] = sample_tokens;
++                types.push_back("f32");
++                inputs++;
++            }
++            if (type == "pnnx.Output") outputs++;
++        }
++        while (std::getline(file, line)) check(line.empty(), "unexpected trailing IR content");
++        check((int)graph.operands.size() == operands && inputs && outputs, "IR operand/input/output count mismatch");
++        check(archive.get_names().size() == attributes.size(), "unexpected IR weight entries");
++        return 0;
++    }
++    catch (const std::exception& error)
++    {
++        fprintf(stderr, "canonical PT2 IR rejected: %s\n", error.what());
++        return -1;
++    }
++}
+diff --git a/tools/pnnx/src/load_pnnx_ir.h b/tools/pnnx/src/load_pnnx_ir.h
+new file mode 100644
+index 0000000..fc93d09
+--- /dev/null
++++ b/tools/pnnx/src/load_pnnx_ir.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: BSD-3-Clause
++// Copyright (c) 2026 SeedVR2-ncnn contributors
++#ifndef PNNX_LOAD_PNNX_IR_H
++#define PNNX_LOAD_PNNX_IR_H
++#include "ir.h"
++int load_pnnx_ir(const std::string& path, pnnx::Graph& graph, std::vector<std::vector<int64_t> >& shapes, std::vector<std::string>& types);
++#endif
+diff --git a/tools/pnnx/src/main.cpp b/tools/pnnx/src/main.cpp
+index 3955b00..05d75f3 100644
+--- a/tools/pnnx/src/main.cpp
++++ b/tools/pnnx/src/main.cpp
+@@ -21,6 +21,7 @@
+ #include "pass_level5.h"
+ #include "utils.h"
+ 
++#include "load_pnnx_ir.h"
+ #if BUILD_TORCH2PNNX
+ #include "load_torchscript.h"
+ #endif
+@@ -451,6 +452,13 @@ int main(int argc, char** argv)
+     // clang-format off
+     // *INDENT-OFF*
+ 
++    if (ptpath.size() >= 11 && ptpath.substr(ptpath.size() - 11) == ".pnnx.param")
++    {
++        int ret = load_pnnx_ir(ptpath, pnnx_graph, input_shapes, input_types);
++        if (ret != 0)
++            return ret;
++    }
++    else
+ #if BUILD_TNN2PNNX
+     if (model_file_maybe_tnnproto(ptpath))
+     {
+diff --git a/tools/pnnx/src/pass_ncnn/solve_batch_index.cpp b/tools/pnnx/src/pass_ncnn/solve_batch_index.cpp
+index f08db89..7fae934 100644
+--- a/tools/pnnx/src/pass_ncnn/solve_batch_index.cpp
++++ b/tools/pnnx/src/pass_ncnn/solve_batch_index.cpp
+@@ -1326,6 +1326,12 @@ void solve_batch_index(Graph& graph)
+     // assign known operator
+     for (Operator* op : graph.ops)
+     {
++        // RMSNorm normalizes trailing dimensions but does not identify a batch
++        // axis. Defer its legacy axis-zero default until surrounding operators
++        // have supplied layout information (e.g. unbatched SDPA).
++        if (op->type == "F.rms_norm" || op->type == "nn.RMSNorm")
++            continue;
++
+         if (op->type == std::string("F.scaled_dot_product_attention"))
+         {
+             for (Operand* r : op->inputs)
+@@ -1408,6 +1414,27 @@ void solve_batch_index(Graph& graph)
+         }
+     }
+ 
++    // ncnn stores at most four non-batch dimensions. Preserve the established
++    // leading batch convention for standalone higher-rank RMSNorm, but do not
++    // discard a dimension from an otherwise unbatched rank-2/3/4 tensor.
++    for (Operator* op : graph.ops)
++    {
++        if (op->type != "F.rms_norm" && op->type != "nn.RMSNorm")
++            continue;
++
++        Operand* input = op->inputs[0];
++        Operand* output = op->outputs[0];
++        if (input->shape.size() > 4 &&
++            input->params.find("__batch_index") == input->params.end() &&
++            output->params.find("__batch_index") == output->params.end())
++        {
++            input->params["__batch_index"] = 0;
++            output->params["__batch_index"] = 0;
++            solve_batch_index_backward(input);
++            solve_batch_index_forward(output);
++        }
++    }
++
+     // always treat 1-dim tensor as no batch axis
+     for (Operand* r : graph.operands)
+     {
+diff --git a/tools/pnnx/tests/CMakeLists.txt b/tools/pnnx/tests/CMakeLists.txt
+index 76be8ae..7c1043b 100644
+--- a/tools/pnnx/tests/CMakeLists.txt
++++ b/tools/pnnx/tests/CMakeLists.txt
+@@ -424,3 +424,5 @@ add_subdirectory(ncnn)
+ if(onnxruntime_FOUND)
+     add_subdirectory(onnx)
+ endif()
++
++pnnx_add_test(pt2_independent)
+diff --git a/tools/pnnx/tests/test_pt2_independent.py b/tools/pnnx/tests/test_pt2_independent.py
+new file mode 100644
+index 0000000..2766915
+--- /dev/null
++++ b/tools/pnnx/tests/test_pt2_independent.py
+@@ -0,0 +1,360 @@
++# SPDX-License-Identifier: BSD-3-Clause
++# Copyright (c) 2026 SeedVR2-ncnn contributors
++"""Independent PT2 frontend contract and canonical-IR lowering regression."""
++import importlib.util
++import hashlib
++import json
++from pathlib import Path
++import subprocess
++import tempfile
++import zipfile
++
++import torch
++
++source = Path(__file__).resolve().parents[1]
++spec = importlib.util.spec_from_file_location('pt2_frontend', source / 'python/pt2_to_pnnx.py')
++frontend = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(frontend)
++pnnx = Path('../src/pnnx').resolve()
++
++
++class Model(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.gate = torch.nn.Linear(8, 16)
++        self.value = torch.nn.Linear(8, 16, bias=False)
++        self.out = torch.nn.Linear(16, 8)
++
++    def forward(self, x):
++        return self.out(torch.nn.functional.silu(self.gate(x)) * self.value(x))
++
++
++class ResidualModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.norm = torch.nn.RMSNorm(8, eps=1e-5, elementwise_affine=False)
++        self.gate = torch.nn.Linear(8, 16)
++        self.value = torch.nn.Linear(8, 16, bias=False)
++        self.out = torch.nn.Linear(16, 8)
++
++    def forward(self, x):
++        normalized = self.norm(x)
++        branch = self.out(torch.nn.functional.silu(self.gate(normalized)) * self.value(normalized))
++        return x + branch
++
++
++class AffineNormModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.norm = torch.nn.RMSNorm(8, eps=1e-5)
++
++    def forward(self, x):
++        return self.norm(x)
++
++
++class AdaModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.attn_shift = torch.nn.Parameter(torch.zeros(8))
++        self.attn_scale = torch.nn.Parameter(torch.ones(8))
++
++    def forward(self, x, modulation_shift, modulation_scale):
++        scale = modulation_scale + self.attn_scale
++        shift = modulation_shift + self.attn_shift
++        return x * scale + shift
++
++
++class AdaEmbeddingModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.attn_shift = torch.nn.Parameter(torch.zeros(8))
++        self.attn_scale = torch.nn.Parameter(torch.ones(8))
++
++    def forward(self, x, embedding):
++        modulation = embedding.reshape(8, 6)[:, :3]
++        shift = modulation.select(1, 0)
++        scale = modulation.select(1, 1)
++        return x * (scale + self.attn_scale) + (shift + self.attn_shift)
++
++
++class TensorUtilityModel(torch.nn.Module):
++    """Small graph covering utility ops used by the fixed VAE encoder export."""
++
++    def forward(self, x):
++        # Upstream posterior graphs may retain random helper nodes even when
++        # the selected output is deterministic; dead values must be pruned.
++        _dead_noise = torch.randn_like(x)
++        padded = torch.nn.functional.pad(x, (1, 1, 0, 0), value=0.0)
++        left, right = padded.chunk(2, dim=1)
++        return torch.exp(torch.clamp(left - right, min=-1.0, max=1.0))
++
++
++class DynamicSpatialModel(torch.nn.Module):
++    """A rank-3 dynamic probe kept as an explicit frontend boundary."""
++
++    def forward(self, x):
++        return torch.nn.functional.silu(x)
++
++
++class OutputNormModel(torch.nn.Module):
++    """The explicit RMS normalization used by the DiT output projection."""
++
++    def forward(self, x):
++        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-5)
++
++
++class AttentionModel(torch.nn.Module):
++    def __init__(self, *, boundary=False, mode='plain'):
++        super().__init__()
++        self.qkv = torch.nn.Linear(8, 24, bias=False)
++        self.qnorm = torch.nn.RMSNorm(4, eps=1e-5)
++        self.knorm = torch.nn.RMSNorm(4, eps=1e-5)
++        self.out = torch.nn.Linear(8, 8)
++        # A nontrivial fixed rotation exercises lifted buffers and batched matmul.
++        self.register_buffer('rotation', torch.linalg.qr(torch.randn(7, 4, 4)).Q)
++        self.boundary, self.mode = boundary, mode
++        if boundary:
++            self.norm = torch.nn.RMSNorm(8, eps=1e-5, elementwise_affine=False)
++            self.shift = torch.nn.Parameter(torch.randn(8))
++            self.scale = torch.nn.Parameter(torch.randn(8))
++            self.gate = torch.nn.Parameter(torch.randn(8))
++
++    def forward(self, x, embedding):
++        hidden = x
++        if self.boundary:
++            modulation = embedding.reshape(8, 6)[:, :3]
++            shift, scale, gate = (modulation.select(1, i) for i in range(3))
++            hidden = self.norm(x) * (scale + self.scale) + (shift + self.shift)
++        qkv = self.qkv(hidden).reshape(7, 3, 2, 4)
++        q = (self.qnorm(qkv.select(1, 0)) @ self.rotation).permute(1, 0, 2)
++        k = (self.knorm(qkv.select(1, 1)) @ self.rotation).permute(1, 0, 2)
++        v = qkv.select(1, 2).permute(1, 0, 2)
++        kwargs = {}
++        if self.mode == 'causal':
++            kwargs['is_causal'] = True
++        elif self.mode == 'mask':
++            kwargs['attn_mask'] = x[:, :7]
++        elif self.mode == 'dropout':
++            kwargs['dropout_p'] = 0.1
++        elif self.mode == 'scale':
++            kwargs['scale'] = 0.25
++        elif self.mode == 'gqa':
++            kwargs['enable_gqa'] = True
++        result = torch.nn.functional.scaled_dot_product_attention(q, k, v, **kwargs)
++        result = self.out(result.permute(1, 0, 2).reshape(7, 8))
++        return x + result * (gate + self.gate) if self.boundary else result
++
++
++def reject(operation, message):
++    try:
++        operation()
++    except ValueError as error:
++        assert message in str(error), str(error)
++    else:
++        raise AssertionError('accepted unsupported program: ' + message)
++
++
++def compile_model(program, stem):
++    pt2 = stem.with_suffix('.pt2')
++    torch.export.save(program, pt2)
++    param, weights = stem.with_suffix('.pnnx.param'), stem.with_suffix('.pnnx.bin')
++    record = frontend.lower(pt2, param, weights)
++    for name, tensor in program.state_dict.items():
++        entry = next(value for value in record['weights'].values() if value['target'] == name)
++        assert entry['sha256'] == hashlib.sha256(tensor.detach().numpy().tobytes()).hexdigest()
++    with zipfile.ZipFile(weights) as archive:
++        assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
++        assert sorted(hashlib.sha256(archive.read(name)).hexdigest() for name in archive.namelist()) == sorted(
++            hashlib.sha256(value.detach().numpy().tobytes()).hexdigest() for value in program.state_dict.values())
++    command = [str(pnnx), str(param), 'fp16=0',
++               'pnnxparam=' + str(stem.with_suffix('.converted.param')),
++               'pnnxbin=' + str(stem.with_suffix('.converted.bin')),
++               'ncnnpy=' + str(stem.parent / (stem.name + '_ncnn.py')),
++               'pnnxpy=' + str(stem.with_suffix('.py'))]
++    subprocess.run(command, check=True)
++    generated_spec = importlib.util.spec_from_file_location('generated', stem.with_suffix('.py'))
++    generated = importlib.util.module_from_spec(generated_spec)
++    generated_spec.loader.exec_module(generated)
++    return generated.Model().eval(), pt2, param, weights
++
++
++def test():
++    torch.manual_seed(7)
++    model = Model().eval()
++    x = torch.randn(7, 8)
++    with tempfile.TemporaryDirectory(prefix='pnnx-independent-pt2-') as temporary, torch.no_grad():
++        root = Path(temporary)
++        for candidate, label in ((model, 'swiglu'), (ResidualModel().eval(), 'residual'),
++                                 (AffineNormModel().eval(), 'affine-norm')):
++            for dynamic in (False, True):
++                program = torch.export.export(candidate, (x,), dynamic_shapes=
++                    ({0: torch.export.Dim('tokens', min=1, max=32)},) if dynamic else None)
++                generated, pt2, param, weights = compile_model(program, root / (f'{label}-' + ('dynamic' if dynamic else 'static')))
++                for tokens in ((1, 7, 13, 32) if dynamic else (7,)):
++                    value = torch.randn(tokens, 8)
++                    torch.testing.assert_close(generated(value), candidate(value), rtol=1e-5, atol=1e-6)
++                if dynamic:
++                    for tokens in (0, 33):
++                        reject(lambda: frontend.lower(pt2, param, weights, [[tokens, 8]]),
++                               'positive' if tokens == 0 else 'violates')
++                    reject(lambda: frontend.lower(pt2, param, weights, [[7, 9]]), 'expected 8')
++                    if label == 'swiglu':
++                        # The canonical reader must reject malformed graphs before native passes.
++                        valid = param.read_text()
++                        for bad, message in ((valid.replace('7767517', '1234567', 1), 'magic'),
++                            (valid.replace('nn.Linear', 'aten.unknown', 1), 'unsupported canonical'),
++                            (valid.replace(' 1 1 x ', ' 1 1 missing ', 1), 'unknown input operand'),
++                            (valid.replace('@weight=(16,8)', '@weight=(17,8)', 1), 'weight byte count')):
++                            param.write_text(bad)
++                            result = subprocess.run([str(pnnx), str(param)], text=True, capture_output=True)
++                            assert result.returncode != 0 and message in result.stderr, result.stderr
++                        param.write_text(valid)
++
++        ada = AdaModel().eval()
++        ada_inputs = (x, torch.randn_like(x), torch.randn_like(x))
++        shared = torch.export.Dim('tokens', min=1, max=32)
++        ada_program = torch.export.export(ada, ada_inputs,
++            dynamic_shapes=({0: shared}, {0: shared}, {0: shared}))
++        generated, pt2, param, weights = compile_model(ada_program, root / 'ada')
++        assert 'pnnx.Attribute' in param.read_text()
++        for tokens in (1, 7, 13, 32):
++            values = (torch.randn(tokens, 8), torch.randn(tokens, 8), torch.randn(tokens, 8))
++            torch.testing.assert_close(generated(*values), ada(*values), rtol=1e-5, atol=1e-6)
++        reject(lambda: frontend.lower(pt2, root / 'bad-ada.param', root / 'bad-ada.bin',
++                                       [[7, 8], [13, 8], [7, 8]]), 'shared symbol')
++
++        ada_embedding = AdaEmbeddingModel().eval()
++        embedding_inputs = (x, torch.randn(1, 48))
++        dynamic = torch.export.Dim('tokens', min=1, max=32)
++        embedding_program = torch.export.export(ada_embedding, embedding_inputs,
++            dynamic_shapes=({0: dynamic}, {}))
++        generated, pt2, param, weights = compile_model(embedding_program, root / 'ada-embedding')
++        text = param.read_text()
++        assert 'Tensor.reshape' in text and 'Tensor.slice' in text and 'Tensor.select' in text
++        for tokens in (1, 7, 13, 32):
++            values = (torch.randn(tokens, 8), torch.randn(1, 48))
++            torch.testing.assert_close(generated(*values), ada_embedding(*values), rtol=1e-5, atol=1e-6)
++        assert len([line for line in text.splitlines() if line.startswith('pnnx.Input ')]) == 2
++        assert len([line for line in text.splitlines() if line.startswith('pnnx.Output ')]) == 1
++
++        for boundary in (False, True):
++            attention = AttentionModel(boundary=boundary).eval()
++            inputs = (x, torch.randn(1, 48))
++            program = torch.export.export(attention, inputs)
++            stem = root / ('ada-attention' if boundary else 'attention')
++            generated, pt2, param, weights = compile_model(program, stem)
++            torch.testing.assert_close(generated(*inputs), attention(*inputs), rtol=1e-5, atol=1e-6)
++            text = param.read_text()
++            assert all(op in text for op in ('Tensor.reshape', 'Tensor.select',
++                'nn.RMSNorm', 'Tensor.permute', 'torch.matmul', 'F.scaled_dot_product_attention'))
++            # Tokens are not a batch axis: generated native inputs must retain all 7 rows.
++            native_python = (root / (stem.name + '_ncnn.py')).read_text()
++            assert 'ncnn.Mat(in0.numpy(), batch_index=233)' in native_python, native_python
++            for old, new, message in (('dims=(1,0,2)', 'dims=(0,0,2)', 'invalid Tensor.permute permutation'),
++                                      ('shape=(7,3,2,4)', 'shape=(7,3,2,5)', 'unsupported Tensor.reshape shape')):
++                assert old in text
++                param.write_text(text.replace(old, new, 1))
++                result = subprocess.run([str(pnnx), str(param)], text=True, capture_output=True)
++                assert result.returncode != 0 and message in result.stderr, result.stderr
++            param.write_text(text)
++        for mode in ('mask', 'causal', 'dropout', 'scale', 'gqa'):
++            program = torch.export.export(AttentionModel(mode=mode).eval(), embedding_inputs)
++            path = root / (mode + '.pt2')
++            torch.export.save(program, path)
++            reject(lambda: frontend.lower(path, root / 'bad-attention.param',
++                                          root / 'bad-attention.bin'), 'SDPA')
++            assert not (root / 'bad-attention.param').exists()
++            assert not (root / 'bad-attention.bin').exists()
++
++        class UnsupportedSlice(torch.nn.Module):
++            def forward(self, x, embedding):
++                return x + embedding.reshape(8, 6)[:, ::2].select(1, 0)
++
++        invalid_slice = torch.export.export(UnsupportedSlice(), embedding_inputs,
++            dynamic_shapes=({0: dynamic}, {}))
++        path = root / 'unsupported-slice.pt2'
++        torch.export.save(invalid_slice, path)
++        reject(lambda: frontend.lower(path, root / 'bad-slice.param', root / 'bad-slice.bin'),
++               'positive fixed slices')
++        assert not (root / 'bad-slice.param').exists() and not (root / 'bad-slice.bin').exists()
++
++        class Pair(torch.nn.Module):
++            def forward(self, x, y):
++                return x * y, torch.nn.functional.silu(x)
++        shared = torch.export.Dim('tokens', min=1, max=32)
++        pair = torch.export.export(Pair(), (x, x), dynamic_shapes=({0: shared}, {0: shared}))
++        generated, pt2, param, weights = compile_model(pair, root / 'pair')
++        torch.testing.assert_close(generated(x, x), Pair()(x, x))
++        reject(lambda: frontend.lower(pt2, param, weights, [[7, 8], [13, 8]]), 'shared symbol')
++
++        class Unsupported(torch.nn.Module):
++            def forward(self, x):
++                return torch.tanh(x)
++        path = root / 'unsupported.pt2'
++        torch.export.save(torch.export.export(Unsupported(), (x,)), path)
++        reject(lambda: frontend.lower(path, root / 'bad.param', root / 'bad.bin'), 'aten.tanh.default')
++        assert not (root / 'bad.param').exists()
++
++        class Activation(torch.nn.Module):
++            def forward(self, x):
++                return torch.nn.functional.silu(x)
++        class Broadcast(torch.nn.Module):
++            def forward(self, x, y):
++                return x * y
++        broadcast = Broadcast().eval()
++        program = torch.export.export(broadcast, (x, x[:1]))
++        generated, _, _, _ = compile_model(program, root / 'broadcast')
++        torch.testing.assert_close(generated(x, x[:1]), broadcast(x, x[:1]))
++
++        utility = TensorUtilityModel().eval()
++        utility_input = torch.randn(2, 4)
++        utility_program = torch.export.export(utility, (utility_input,))
++        generated, _, param, _ = compile_model(utility_program, root / 'tensor-utility')
++        torch.testing.assert_close(generated(utility_input), utility(utility_input), rtol=1e-5, atol=1e-6)
++        utility_text = param.read_text()
++        assert 'F.pad' in utility_text and 'Tensor.slice' in utility_text
++        assert 'pnnx.Expression exp' in utility_text and 'torch.clamp' in utility_text
++        assert 'aten.randn' not in utility_text
++
++        output_norm = OutputNormModel().eval()
++        output_norm_program = torch.export.export(output_norm, (x,))
++        generated, _, param, _ = compile_model(output_norm_program, root / 'output-norm')
++        torch.testing.assert_close(generated(x), output_norm(x), rtol=1e-5, atol=1e-6)
++        assert 'expr=pow(@0,2)' in param.read_text() and 'torch.mean' in param.read_text()
++
++        class UnsupportedPower(torch.nn.Module):
++            def forward(self, value):
++                return value.pow(3)
++
++        power_path = root / 'unsupported-power.pt2'
++        torch.export.save(torch.export.export(UnsupportedPower(), (x,)), power_path)
++        reject(lambda: frontend.lower(power_path, root / 'power.param', root / 'power.bin'),
++               'only square with scalar exponent 2')
++        spatial = torch.randn(1, 4, 4)
++        spatial_shapes = ({1: torch.export.Dim('height', min=1, max=16),
++                           2: torch.export.Dim('width', min=1, max=16)},)
++        spatial_program = torch.export.export(DynamicSpatialModel().eval(), (spatial,),
++                                               dynamic_shapes=spatial_shapes)
++        spatial_path = root / 'dynamic-spatial.pt2'
++        torch.export.save(spatial_program, spatial_path)
++        reject(lambda: frontend.lower(spatial_path, root / 'bad-spatial.param',
++                                      root / 'bad-spatial.bin'),
++               'rank-3..5 tensors must have static dimensions')
++        assert not (root / 'bad-spatial.param').exists() and not (root / 'bad-spatial.bin').exists()
++        negatives = [
++            (torch.export.export(Activation(), (x.double(),)), 'rank-1..8 float32'),
++            (torch.export.export(Activation(), (x.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0),)),
++             'user inputs must be rank 1..5'),
++            (torch.export.export(Activation(), (x,), dynamic_shapes=({0: torch.export.Dim('unbounded')},)), 'finite'),
++            (torch.export.export(Activation(), (x,), dynamic_shapes=({0: 2 * torch.export.Dim('half', min=1, max=16) + 1},)), 'derived'),
++        ]
++        for index, (program, message) in enumerate(negatives):
++            path = root / f'negative-{index}.pt2'
++            torch.export.save(program, path)
++            reject(lambda: frontend.lower(path, root / 'bad.param', root / 'bad.bin'), message)
++            assert not (root / 'bad.param').exists() and not (root / 'bad.bin').exists()
++    print('Independent PT2: static/dynamic Linear, RMSNorm, SiLU, Ada gate/attention, reshape/select/permute/matmul/SDPA, weights, I/O and failure contracts passed')
++
++
++if __name__ == '__main__':
++    test()
