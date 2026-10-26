@@ -8,7 +8,7 @@ namespace seedvr2
 class PerformanceProfile;
 
 // DiT predictions must be pack1. The sample may be pack1 or pack4; the result is pack1.
-// use_fp32 is an explicit validation option; the product default retains BF16 storage.
+// use_fp32 selects the all-FP32 validation path; the default DIT path uses a validated FP32 prefix and BF16 suffix.
 bool apply_cfg_euler_vulkan(const ncnn::VkMat& positive_output,
                             const ncnn::VkMat& negative_output,
                             const ncnn::VkMat& sample,

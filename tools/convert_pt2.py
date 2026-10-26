@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 SeedVR2-ncnn contributors
 
-"""Convert a restricted PT2 graph with the independent PNNX frontend."""
+"""Convert a restricted PT2 graph with the repository-local PNNX frontend."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import re
 import shutil
@@ -168,9 +167,7 @@ def convert(
         artifact(".ncnn.bin"),
         artifact("_ncnn.py"),
     ]
-    generated = expected + [artifact(".raw.ncnn.param"), artifact(".raw.ncnn.bin"),
-                            artifact(".frontend.pnnx.param"), artifact(".frontend.pnnx.bin"),
-                            artifact(".frontend.pnnx.json")]
+    generated = expected + [artifact(".raw.ncnn.param"), artifact(".raw.ncnn.bin")]
     collisions = [str(path) for path in generated if path.exists()]
     if collisions and not overwrite:
         raise ValueError("generated artifacts already exist; choose a new output directory or --overwrite: "
@@ -181,20 +178,13 @@ def convert(
     if any(path.exists() and not path.is_file() for path in generated):
         raise ValueError("an artifact path is not a regular file; output directory was left unchanged")
     command = [str(pnnx), str(local_pt2), f"fp16={int(fp16_weights)}"]
-    source = next((parent for parent in pnnx.parents
-                   if (parent / "tools/pnnx/python/pt2_to_pnnx.py").is_file()), None)
-    if source is None:
-        raise ValueError("independent PT2 frontend missing beside PNNX; run prepare_pnnx_pt2.sh")
-    frontend_path = source / "tools/pnnx/python/pt2_to_pnnx.py"
-    command[1] = str(artifact(".frontend.pnnx.param"))
     for key, path in zip(("pnnxparam", "pnnxbin", "pnnxpy", "ncnnparam", "ncnnbin", "ncnnpy"), expected):
         command.append(f"{key}={path}")
     record_path = destination / f"{stem.name}.conversion.json"
     log_path = destination / f"{stem.name}.conversion.log"
     record = {
         "pt2": str(local_pt2),
-        "frontend": "independent",
-        "frontend_source": str(frontend_path),
+        "frontend": "native",
         "pnnx": str(pnnx),
         "command": command,
         "status": "failed",
@@ -213,11 +203,8 @@ def convert(
     try:
         if local_pt2 != pt2:
             shutil.copy2(pt2, local_pt2)
-        spec = importlib.util.spec_from_file_location("pnnx_pt2_frontend", frontend_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        record["frontend_contract"] = module.lower(local_pt2, artifact(".frontend.pnnx.param"),
-                                                   artifact(".frontend.pnnx.bin"))
+        record["frontend_contract"] = {"pt2_sha256": hashlib.sha256(local_pt2.read_bytes()).hexdigest(),
+                                       "mode": "native-pnnx-cli"}
         completed = subprocess.run(
             command, cwd=destination, text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, check=False,

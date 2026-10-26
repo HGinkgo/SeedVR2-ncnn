@@ -42,7 +42,7 @@ void print_usage()
     std::puts("  --steps      Sampling steps (default: 1)");
     std::puts("  --cfg-scale  Classifier-free guidance scale (default: 1; requires CFG model package when > 1)");
     std::puts("  --seed       Use reproducible standard-normal noise (0..4294967295; default: legacy fixture)");
-    std::puts("  --precision  bf16 (default) or experimental fp32 (one 256x256 image, sequential CFG)");
+    std::puts("  --precision bf16 (default: FP32 first 9 DiT blocks, BF16 remainder) or fp32 (sequential CFG)");
     std::puts("  --vae-tile-size  Experimental GPU VAE tile edge in pixels (default: full frame)");
     std::puts("  --gpu-id     Vulkan GPU id, -1 selects automatically (default: -1)");
     std::puts("  --memory-budget-mib  Minimum Vulkan heap budget for preflight (default: 0, disabled)");

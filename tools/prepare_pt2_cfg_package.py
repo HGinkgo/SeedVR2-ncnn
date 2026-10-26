@@ -4,7 +4,7 @@
 """Assemble a fixed-256 opt-in PT2 DiT package, optionally with 64-token CFG.
 
 Keep the provenance JSON beside the package, outside its runtime-only SHA256
-manifest. Source graph manifests and successful independent conversion records
+manifest. Source graph manifests and successful native conversion records
 are required; a directory name containing 'pt2' is insufficient.
 """
 
@@ -52,7 +52,7 @@ def inspect_stack(root: Path, tokens: int) -> dict:
         source = root / f"{name}.pt2"
         conversion = json.loads((root / f"{name}.conversion.json").read_text())
         if (graph.get("frontend") != "pt2" or graph.get("source_sha256") != sha256(source)
-                or conversion.get("status") != "success" or conversion.get("frontend") != "independent"
+                or conversion.get("status") != "success" or conversion.get("frontend") != "native"
                 or conversion.get("frontend_contract", {}).get("pt2_sha256") != graph["source_sha256"]):
             raise ValueError(f"PT2 source/conversion provenance mismatch: {root / name}")
         for suffix in (".ncnn.param", ".ncnn.bin"):

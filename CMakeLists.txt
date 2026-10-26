@@ -4,8 +4,7 @@ project(SeedVR2-ncnn VERSION 0.1.2 LANGUAGES CXX)
 
 option(SEEDVR2_ENABLE_VULKAN "Build ncnn with Vulkan compute support" OFF)
 option(SEEDVR2_ENABLE_FFMPEG "Enable optional FFmpeg video input" OFF)
-option(SEEDVR2_BUILD_PT2_SMOKE "Build the optional PT2/ncnn validation runners" OFF)
-option(SEEDVR2_BUILD_TESTS "Build focused contract tests" OFF)
+option(SEEDVR2_BUILD_TESTS "Build basic smoke tests" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -100,37 +99,6 @@ if(SEEDVR2_BUILD_TESTS)
     add_test(NAME seedvr2-conditioning-smoke COMMAND seedvr2-conditioning-smoke)
 endif()
 
-if(SEEDVR2_BUILD_PT2_SMOKE)
-    add_executable(seedvr2-pt2-smoke tools/pt2_ncnn_smoke.cpp)
-    target_link_libraries(seedvr2-pt2-smoke PRIVATE ncnn)
-    target_include_directories(seedvr2-pt2-smoke PRIVATE
-        "${CMAKE_CURRENT_BINARY_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
-    target_sources(seedvr2-pt2-smoke PRIVATE src/awa/awa_layers.cpp)
-
-    add_executable(seedvr2-pt2-awa-smoke
-        tools/pt2_awa_smoke.cpp
-        src/awa/awa_layers.cpp)
-    target_link_libraries(seedvr2-pt2-awa-smoke PRIVATE ncnn)
-    target_include_directories(seedvr2-pt2-awa-smoke PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
-
-    add_executable(seedvr2-vae-smoke
-        tools/vae_ncnn_smoke.cpp
-        src/vae/temporal_pad.cpp
-        src/vae/causal_conv3d.cpp
-        src/vae/pointwise_conv3d.cpp
-        src/vae/depth_to_space.cpp
-        src/vae/static_vae_graph.cpp)
-    target_link_libraries(seedvr2-vae-smoke PRIVATE ncnn)
-    target_include_directories(seedvr2-vae-smoke PRIVATE
-        "${CMAKE_CURRENT_BINARY_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
-endif()
-
 if(SEEDVR2_ENABLE_VULKAN)
     target_sources(seedvr2-ncnn PRIVATE
         src/dit/dit_stack.cpp
@@ -172,76 +140,8 @@ if(SEEDVR2_ENABLE_VULKAN)
             VERBATIM)
         list(APPEND SEEDVR2_DIT_SHADER_HEADERS "${SEEDVR2_DIT_SHADER_HEADER}")
     endforeach()
-    set(SEEDVR2_RNE_SHADER_HEADERS)
-    foreach(SEEDVR2_RNE_SHADER gemm innerproduct_gemm_wp4 innerproduct_pack4 swish)
-        set(SEEDVR2_RNE_SHADER_SOURCE
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src/layer/vulkan/shader/${SEEDVR2_RNE_SHADER}.comp")
-        set(SEEDVR2_RNE_SHADER_SYMBOL "seedvr2_${SEEDVR2_RNE_SHADER}_rne_comp_data")
-        set(SEEDVR2_RNE_SHADER_HEADER
-            "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader/${SEEDVR2_RNE_SHADER}_rne.comp.hex.h")
-        add_custom_command(
-            OUTPUT "${SEEDVR2_RNE_SHADER_HEADER}"
-            COMMAND ${CMAKE_COMMAND}
-                -DSHADER_SOURCE=${SEEDVR2_RNE_SHADER_SOURCE}
-                -DSHADER_HEADER=${SEEDVR2_RNE_SHADER_HEADER}
-                -DSHADER_SYMBOL=${SEEDVR2_RNE_SHADER_SYMBOL}
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_bf16_rne_shader_header.cmake"
-            DEPENDS "${SEEDVR2_RNE_SHADER_SOURCE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_bf16_rne_shader_header.cmake"
-            COMMENT "Embedding BF16 RNE shader ${SEEDVR2_RNE_SHADER}.comp"
-            VERBATIM)
-        set_source_files_properties("${SEEDVR2_RNE_SHADER_HEADER}" PROPERTIES GENERATED TRUE)
-        list(APPEND SEEDVR2_RNE_SHADER_HEADERS "${SEEDVR2_RNE_SHADER_HEADER}")
-    endforeach()
     target_sources(seedvr2-ncnn PRIVATE src/dit/dit_precision.cpp
-        ${SEEDVR2_DIT_SHADER_HEADERS} ${SEEDVR2_RNE_SHADER_HEADERS})
-    if(SEEDVR2_BUILD_PT2_SMOKE)
-        add_executable(seedvr2-dit-precision-smoke tools/dit_precision_smoke.cpp
-            src/dit/dit_precision.cpp ${SEEDVR2_DIT_SHADER_HEADERS} ${SEEDVR2_RNE_SHADER_HEADERS})
-        target_link_libraries(seedvr2-dit-precision-smoke PRIVATE ncnn)
-        target_include_directories(seedvr2-dit-precision-smoke PRIVATE
-            "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src/layer")
-
-        target_sources(seedvr2-pt2-awa-smoke PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
-        target_include_directories(seedvr2-pt2-awa-smoke PRIVATE
-            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
-
-        add_executable(seedvr2-pt2-dit-stack-smoke
-            tools/pt2_dit_stack_smoke.cpp
-            src/dit/dit_stack.cpp
-            src/awa/awa_layers.cpp
-            src/inference/performance_profile.cpp
-            src/resolution/resolution_plan.cpp)
-        target_link_libraries(seedvr2-pt2-dit-stack-smoke PRIVATE ncnn)
-        target_include_directories(seedvr2-pt2-dit-stack-smoke PRIVATE
-            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
-        target_sources(seedvr2-pt2-dit-stack-smoke PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
-
-        add_executable(seedvr2-reference-sampling-smoke
-            tools/reference_sampling_smoke.cpp
-            src/vae/temporal_pad.cpp
-            src/vae/causal_conv3d.cpp
-            src/vae/pointwise_conv3d.cpp
-            src/vae/depth_to_space.cpp
-            src/vae/static_vae_graph.cpp
-            src/dit/dit_stack.cpp
-            src/awa/awa_layers.cpp
-            src/sampler/sampler.cpp
-            src/sampler/vulkan_sampler.cpp
-            src/inference/performance_profile.cpp
-            src/resolution/resolution_plan.cpp
-            ${SEEDVR2_AWA_SHADER_HEADERS})
-        target_link_libraries(seedvr2-reference-sampling-smoke PRIVATE ncnn)
-        target_include_directories(seedvr2-reference-sampling-smoke PRIVATE
-            "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src"
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src")
-
-    endif()
+        ${SEEDVR2_DIT_SHADER_HEADERS})
     set(SEEDVR2_TEMPORAL_PAD_SHADER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vae/shader/temporal_pad.comp")
     set(SEEDVR2_TEMPORAL_PAD_SHADER_HEADER
         "${CMAKE_CURRENT_BINARY_DIR}/layer/vulkan/shader/temporal_pad.comp.hex.h")
@@ -340,33 +240,6 @@ if(SEEDVR2_ENABLE_VULKAN)
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_CAUSAL_CONV3D_OC8_SHADER_HEADER}")
     target_sources(seedvr2-ncnn PRIVATE "${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}")
     target_include_directories(seedvr2-ncnn PRIVATE "${SEEDVR2_AWA_SHADER_INCLUDE_DIR}")
-
-    if(SEEDVR2_BUILD_PT2_SMOKE)
-        target_sources(seedvr2-reference-sampling-smoke PRIVATE
-            "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
-            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_OC4_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_OC8_SHADER_HEADER}"
-            "${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}")
-        target_sources(seedvr2-vae-smoke PRIVATE ${SEEDVR2_AWA_SHADER_HEADERS})
-        target_sources(seedvr2-vae-smoke PRIVATE
-            "${SEEDVR2_TEMPORAL_PAD_SHADER_HEADER}"
-            "${SEEDVR2_DEPTH_TO_SPACE_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_OC4_SHADER_HEADER}"
-            "${SEEDVR2_CAUSAL_CONV3D_OC8_SHADER_HEADER}"
-            "${SEEDVR2_POINTWISE_CONV3D_SHADER_HEADER}")
-    endif()
-endif()
-
-if(SEEDVR2_ENABLE_VULKAN AND SEEDVR2_BUILD_PT2_SMOKE)
-    foreach(SEEDVR2_DIT_TARGET seedvr2-pt2-dit-stack-smoke seedvr2-reference-sampling-smoke)
-        target_sources(${SEEDVR2_DIT_TARGET} PRIVATE src/dit/dit_precision.cpp
-            ${SEEDVR2_DIT_SHADER_HEADERS} ${SEEDVR2_RNE_SHADER_HEADERS})
-        target_include_directories(${SEEDVR2_DIT_TARGET} PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ncnn/src/layer")
-    endforeach()
 endif()
 
 include(GNUInstallDirs)

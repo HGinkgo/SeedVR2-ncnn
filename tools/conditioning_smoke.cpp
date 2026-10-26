@@ -88,7 +88,7 @@ int main()
         const char* legacy[] = {"seedvr2-ncnn", "--help"};
         require(seedvr2::parse_cli(2, legacy, options, error) && !options.noise_seed,
                 "omitting seed retains the legacy noise fixture");
-        require(!options.fp32, "default precision must remain BF16");
+        require(!options.fp32, "default precision must use the validated mixed path");
         for (const char* precision : {"bf16", "fp32"})
         {
             const char* args[] = {"seedvr2-ncnn", "--precision", precision, "--input", "image.PNG"};

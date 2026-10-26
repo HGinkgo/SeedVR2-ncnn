@@ -192,7 +192,7 @@ def export_stack(
             conversion_path = output_dir / f"{name}.conversion.json"
             conversion = json.loads(conversion_path.read_text()) if reused and conversion_path.is_file() else {}
             complete = (conversion.get("status") == "success"
-                        and conversion.get("frontend") == "independent"
+                        and conversion.get("frontend") == "native"
                         and conversion.get("frontend_contract", {}).get("pt2_sha256") == metadata["pt2_sha256"]
                         and all((output_dir / f"{name}{suffix}").is_file()
                                 for suffix in (".ncnn.param", ".ncnn.bin")))
@@ -382,7 +382,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pnnx", type=Path)
     parser.add_argument("--format", choices=("torchscript", "pt2"), default="torchscript",
-                        help="source format; PT2 uses the independent frontend, TorchScript remains the default")
+                        help="source format; PT2 uses the repository-local PNNX frontend, TorchScript remains the default")
     parser.add_argument("--resume", action="store_true",
                         help="reuse hash/metadata-checked PT2 sources and successful conversions; recompute eager golden")
     parser.add_argument("--seed", type=int, default=20260825)

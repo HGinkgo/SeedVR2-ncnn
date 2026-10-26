@@ -8,7 +8,7 @@ The default is the validated one-frame ncnn package contract
 explicit probe for a finite dynamic spatial PT2 contract.  It uses the
 deterministic encoder core (rather than posterior sampling), records the
 exported range constraints, and deliberately leaves conversion to a separate
-step: the current independent PNNX frontend rejects dynamic rank-3+ values
+step: the current PNNX frontend rejects dynamic rank-3+ values
 with a precise diagnostic instead of producing a partially dynamic graph.
 """
 

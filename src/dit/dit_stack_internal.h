@@ -20,16 +20,7 @@ void configure_dit_vulkan_net(ncnn::Net& net,
                               ncnn::VkAllocator* staging_allocator,
                               ncnn::PipelineCache* pipeline_cache);
 
-// Native BF16 RNE overrides use ncnn's scalar non-SLM Gemm family so each
-// BF16 write can be rounded explicitly before storage.
-void configure_dit_vulkan_net_rne(ncnn::Net& net,
-                                  ncnn::VulkanDevice* vkdev,
-                                  ncnn::VkAllocator* blob_allocator,
-                                  ncnn::VkAllocator* staging_allocator,
-                                  ncnn::PipelineCache* pipeline_cache);
-
-// PT2 stack graphs are validated with scalar FP32 storage.  Keep this opt-in
-// so the existing TorchScript/package path retains its BF16 runtime contract.
+// The DiT prefix uses scalar FP32 storage while the remaining stack uses BF16.
 void configure_dit_vulkan_net_fp32(ncnn::Net& net,
                                    ncnn::VulkanDevice* vkdev,
                                    ncnn::VkAllocator* blob_allocator,

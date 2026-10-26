@@ -6,8 +6,8 @@
 This is an experimental conversion artifact.  It deliberately exports only
 the one-frame 256x256 decoder contract used by the current native package:
 ``[1, 16, 32, 32] -> [1, 3, 256, 256]``.  The production runtime continues to
-use the validated TorchScript/ncnn graph until the PT2 graph has independent
-PNNX and ncnn CPU/Vulkan evidence.
+use the validated TorchScript/ncnn graph until the PT2 graph has complete PNNX
+and ncnn CPU/Vulkan evidence.
 """
 
 from __future__ import annotations

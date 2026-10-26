@@ -186,6 +186,20 @@ bool awa_bf16_io(const ncnn::Option& opt)
     return opt.use_bf16_storage || opt.use_bf16_packed;
 }
 
+void trace_awa_type(const char* name, const ncnn::VkMat& value)
+{
+    if (std::getenv("SEEDVR2_TRACE_OPS"))
+        std::fprintf(stderr, "awa-trace op=%s dims=%d w=%d h=%d d=%d c=%d elemsize=%zu pack=%d\n",
+                     name, value.dims, value.w, value.h, value.d, value.c, value.elemsize, value.elempack);
+}
+
+void trace_awa_type(const char* name, const ncnn::Mat& value)
+{
+    if (std::getenv("SEEDVR2_TRACE_OPS"))
+        std::fprintf(stderr, "awa-trace op=%s dims=%d w=%d h=%d d=%d c=%d elemsize=%zu pack=%d\n",
+                     name, value.dims, value.w, value.h, value.d, value.c, value.elemsize, value.elempack);
+}
+
 ncnn::Option awa_fp32_option(const ncnn::Option& opt)
 {
     ncnn::Option result = opt;
@@ -249,13 +263,13 @@ size_t vkmat_scalar_count(const ncnn::VkMat& mat)
     if (mat.elempack != 1)
         return 0;
     if (mat.dims == 4)
-        return mat.nstep * static_cast<size_t>(mat.n);
+        return static_cast<size_t>(mat.w) * mat.h * mat.d * mat.c * mat.n;
     if (mat.dims == 3)
-        return mat.cstep * static_cast<size_t>(mat.c);
+        return static_cast<size_t>(mat.w) * mat.h * mat.c * mat.n;
     if (mat.dims == 2)
-        return mat.cstep;
+        return static_cast<size_t>(mat.w) * mat.h * mat.n;
     if (mat.dims == 1)
-        return static_cast<size_t>(mat.w);
+        return static_cast<size_t>(mat.w) * mat.n;
     return 0;
 }
 
@@ -267,13 +281,13 @@ bool create_vkmat_like_scalar(const ncnn::VkMat& source, size_t elemsize, ncnn::
     switch (source.dims)
     {
     case 1:
-        destination.create(source.w, elemsize, 1, allocator);
+        destination.create(source.w, elemsize, 1, source.n, allocator);
         break;
     case 2:
-        destination.create(source.w, source.h, elemsize, 1, allocator);
+        destination.create(source.w, source.h, elemsize, 1, source.n, allocator);
         break;
     case 3:
-        destination.create(source.w, source.h, source.c, elemsize, 1, allocator);
+        destination.create(source.w, source.h, source.c, elemsize, 1, source.n, allocator);
         break;
     case 4:
         destination.create(source.w, source.h, source.d, source.c, elemsize, 1, source.n, allocator);
@@ -298,8 +312,17 @@ bool record_awa_cast(ncnn::VkCompute& cmd, ncnn::Pipeline* pipeline, const ncnn:
     std::vector<ncnn::VkMat> bindings(2);
     bindings[0] = source;
     bindings[1] = destination;
-    std::vector<ncnn::vk_constant_type> constants(1);
+    std::vector<ncnn::vk_constant_type> constants(10);
     constants[0].i = static_cast<int>(count);
+    constants[1].i = source.w;
+    constants[2].i = source.dims >= 2 ? source.h : 1;
+    constants[3].i = source.dims == 4 ? source.d : 1;
+    constants[4].i = source.dims >= 3 ? source.c : 1;
+    constants[5].i = source.n;
+    constants[6].i = static_cast<int>(source.cstep);
+    constants[7].i = static_cast<int>(source.nstep);
+    constants[8].i = static_cast<int>(destination.cstep);
+    constants[9].i = static_cast<int>(destination.nstep);
     ncnn::VkMat dispatcher;
     dispatcher.w = static_cast<int>(count);
     dispatcher.h = 1;
@@ -487,6 +510,8 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
     }
     const ncnn::VkMat& video = bottom_blobs[0];
     const ncnn::VkMat& text = bottom_blobs[1];
+    trace_awa_type("pack.video.in", video);
+    trace_awa_type("pack.text.in", text);
     QkvLayout video_layout;
     QkvLayout text_layout;
     if (!describe_qkv_layout(video, source_tokens_, video_layout) ||
@@ -509,6 +534,13 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         if (!record_awa_cast(cmd, bf16_to_fp32_pipeline_, video, video_fp32, opt.workspace_vkallocator, true) ||
             !record_awa_cast(cmd, bf16_to_fp32_pipeline_, text, text_fp32, opt.workspace_vkallocator, true))
             return -100;
+        // Batch strides depend on element size because ncnn pads each batch
+        // to 4 KiB. The FP32 cast buffers can therefore have a different
+        // nstep from their BF16 sources.
+        if (!describe_qkv_layout(video_fp32, source_tokens_, video_layout) ||
+            !describe_qkv_layout(text_fp32, text_tokens_, text_layout) ||
+            video_layout.heads != text_layout.heads || video_layout.head_dim != text_layout.head_dim)
+            return -1;
         video_source = &video_fp32;
         text_source = &text_fp32;
     }
@@ -541,6 +573,7 @@ int SeedVR2AWAPack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
     constants[10].i = static_cast<int>(cu_seqlens_.size());
 
     cmd.record_pipeline(pipeline_, bindings, constants, top_blobs[0]);
+    trace_awa_type("pack.out", top_blobs[0]);
     return 0;
 }
 #endif
@@ -718,6 +751,7 @@ int SeedVR2AWAUnpack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         return -1;
     }
     const ncnn::VkMat& packed = bottom_blobs[0];
+    trace_awa_type("unpack.in", packed);
     if ((packed.elemsize != 2u && packed.elemsize != 4u) || packed.elempack != 1 || packed.dims != 3 ||
         packed.w <= 0 || packed.h <= 0 || packed.c != sequence_tokens_)
     {
@@ -806,6 +840,8 @@ int SeedVR2AWAUnpack::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         top_blobs[0] = video_fp32;
         top_blobs[1] = text_fp32;
     }
+    trace_awa_type("unpack.video.out", top_blobs[0]);
+    trace_awa_type("unpack.text.out", top_blobs[1]);
     return 0;
 }
 #endif
@@ -957,6 +993,7 @@ int SeedVR2MMRoPE::forward(const std::vector<ncnn::VkMat>& bottom_blobs,
         return -1;
     }
     const ncnn::VkMat& input = bottom_blobs[0];
+    trace_awa_type("attention.in", input);
     if ((input.elemsize != 2u && input.elemsize != 4u) || input.elempack != 1 || input.dims != 3 ||
         input.w < rope_dim_ || input.h <= 0 || input.h % 3 != 0 || input.c != sequence_tokens_)
     {
@@ -1079,6 +1116,7 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::Mat>& bottom_blobs,
                 }
             }
     }
+    trace_awa_type("attention.out", top_blobs[0]);
     return 0;
 }
 

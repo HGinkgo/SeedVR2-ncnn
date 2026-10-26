@@ -4,7 +4,7 @@
 
 [源码编译](#build) | [下载模型](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn) | [English](README.en.md)
 
-生产默认仍是 TorchScript/ncnn BF16；Vulkan BF16 生产精度验收尚未通过。ExportedProgram/PT2 → 独立 PNNX → ncnn 的固定 256 验证路径已打通，但仍为 opt-in，尚未替换生产包。
+生产默认采用已通过固定 256 六组配对质量验证的混合精度：DiT 输入、timestep embedding 和前 9 个 block 使用 FP32，后续 block 使用 BF16。RTX 3090 峰值显存约 22.9 GiB。`--precision fp32` 可用于全 FP32 对照。ExportedProgram/PT2 → PNNX → ncnn 的固定 256 验证路径仍为 opt-in。
 
 ## Showcase
 
@@ -38,6 +38,16 @@
 - 单步 Euler 为默认路径；多步采样和 VAE tiling 为实验选项。
 - 可选 `--seed 666` 使用可复现的标准正态初始噪声；省略时保留旧 fixture。
 - 标准输出会进行参考引导的色彩重建：保留模型生成的高频细节，并从输入重建低频色彩。
+
+固定 `256x256` 混合精度现在为默认配置，正常运行无需设置环境变量：
+
+```bash
+tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png \
+  --width 256 --height 256 --gpu-id 0
+```
+
+默认让 DIT 输入、时间嵌入和前 9 个 DIT block 使用 FP32，后续 block 使用 BF16。六组固定质量对照均通过；单步最高占用约 22.9 GiB 显存。
 
 ## Quick Start
 
@@ -131,7 +141,10 @@ tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
 官方固定 commit 的原始输出 Ada 存在维度不匹配；本项目采用显式兼容契约，
 下述历史一致性结果不作为官方采样或画质证据。
 
-仓库提供独立编写的受限 ExportedProgram 前端：Python 读取 `.pt2` 图、权重和签名，输出 canonical PNNX IR；独立上游 checkout 中的 C++ reader 复用 PNNX 优化和 ncnn lowering。入口是 [`tools/convert_pt2.py`](tools/convert_pt2.py)，保留 TorchScript baseline，不修改 `third_party/ncnn`，不要求发布 runtime 携带 Python、PyTorch 或 CUDA。
+仓库内的 [`pnnx/`](pnnx/) 模块直接提供原生 Torch Dynamo ExportedProgram reader，支持
+`pnnx model.pt2`，读取 `.pt2` 图、权重和输入输出签名，并继续复用 PNNX 优化和 ncnn
+lowering。使用 [`tools/prepare_pnnx_pt2.sh`](tools/prepare_pnnx_pt2.sh) 可构建模块并运行
+2 个基础 PT2 测试；更大的算子矩阵和 SeedVR2 全模型验证属于后续集成工作。
 
 已验证静态/有界动态 token 子图、checkpoint MLP/Ada/attention，以及完整固定 block-0、block-1、block-9 的 PT2/TorchScript CPU/Vulkan 对照；固定单帧 PT2 VAE encoder/decoder 也通过 CPU/Vulkan。完整 35 图 stack 的早期结果实际来自 TorchScript，先前的 PT2 来源标记有误；旧 `model-package-pt2-full-stack-256` 只包含 PT2 VAE + TorchScript full-matrix DiT。这些实测结果不能作为 PT2 DiT 全栈证据。
 
@@ -139,15 +152,17 @@ tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
 
 真正 PT2 VAE + DiT 候选包已完成 RTX 3090 上的固定 256 图像 CLI：CFG=1/1.5、一步/两步四组均通过，原生产 TorchScript 一步/两步回归也通过。CFG 去噪结束后释放两套 DiT 权重，再加载 VAE 解码，解决了实测显存申请失败。PNG 差异与图级 FP32 验收分开记录，不据此声称画质或性能提升。
 
-BF16 验证发现并修复了 AWA int32 映射被低精度权重上传转换的问题，同时为 RoPE 补齐 dispatch 加上 token 上界。修复后，在相同 PT2 VAE/conditioning 下，TS/PT2 DiT 的 CFG=1 和 1.5 两步完整图像对照，三个张量交接点指纹和最终 PNG SHA256 均一致。PT2 独立进程重复也满足交接点与 PNG 完全一致；正负向栈各 68 阶段的 BF16 重复及两帧逐帧 CFG 视频均通过。结论限定于记录中的固定输入、模型、binary 和单卡环境；视频尚未验证 temporal VAE 或跨帧 attention。
+BF16 验证发现并修复了 AWA int32 映射被低精度权重上传转换的问题，同时为 RoPE 补齐 dispatch 加上 token 上界。修复后，在相同 PT2 VAE/conditioning 下，TS/PT2 DiT 的 CFG=1 和 1.5 两步完整图像对照，三个张量交接点指纹和最终 PNG SHA256 均一致。PT2 独立进程重复也满足交接点与 PNG 完全一致；正负向栈各 68 阶段的 BF16 重复及两帧逐帧 CFG 视频均通过。视频 CLI 当前逐帧运行 source_t=1 的模型；temporal VAE 和跨帧 attention 尚未实现验证，不能视为时序视频移植完成。
 
-可选 `--seed` 的标准正态初始噪声已完成五次图像、两次视频 Vulkan 验证：seed=666 的匹配 TS/PT2 和独立 PT2 重复，四个交接指纹与 PNG 完全一致；视频第二帧单独截取后也精确复现。不传 seed 的旧输出保持一致。原始完整预处理、默认 BF16 数值与最终画质仍待验收。
+原始纯 BF16 与 Vulkan FP32 对照的六组固定输入验收中有五组未达到质量门槛。现默认采用已通过六组配对门槛的配置：DiT 输入、timestep embedding 和前 9 个 block 使用 FP32，其余使用 BF16；RTX 3090 单步峰值显存约 22.9 GiB。全 FP32 对照仍可用 `--precision fp32` 显式运行。
 
-[`tools/export_dit_stack.py`](tools/export_dit_stack.py) 现提供显式 `--format pt2`，为每张图记录 `.pt2` 哈希和独立转换记录；默认仍为 `torchscript`。CFG runtime 使用独立正向 58-token 和负向 64-token stack，通过 `--cfg-scale` 启用，默认 1；固定 256 的模型包准备器为 [`tools/prepare_pt2_cfg_package.py`](tools/prepare_pt2_cfg_package.py)。生产包仍为 TorchScript/BF16；动态/多帧 VAE、文本 encoder、CFG rescale 和生产默认切换未验收。
+可选 `--seed` 的标准正态初始噪声已完成五次图像、两次视频 Vulkan 验证：seed=666 的匹配 TS/PT2 和独立 PT2 重复，四个交接指纹与 PNG 完全一致；视频第二帧单独截取后也精确复现。不传 seed 的旧输出保持一致。完整原始预处理和时序模型路径仍未验收；这里的精度结论限于上述固定输入、固定 256 对照。
 
-[`tools/prepare_pnnx_pt2.sh`](tools/prepare_pnnx_pt2.sh) 在仓库外固定官方 ncnn commit 并应用[独立 patch](patches/README.md)。[CPU CI](.github/workflows/pt2.yml) 已配置，尚未远程运行；未声称官方接收。
+[`tools/export_dit_stack.py`](tools/export_dit_stack.py) 现提供显式 `--format pt2`，为每张图记录 `.pt2` 哈希和原生转换记录；默认仍为 `torchscript`。CFG runtime 使用独立正向 58-token 和负向 64-token stack，通过 `--cfg-scale` 启用，默认 1；固定 256 的模型包准备器为 [`tools/prepare_pt2_cfg_package.py`](tools/prepare_pt2_cfg_package.py)。当前生产模型包仍是 TorchScript/ncnn，默认推理使用上述混合精度；PT2 端到端替换生产模型包仍未完成。动态/多帧 VAE、文本 encoder 和 CFG rescale 未验收。
 
-无需模型或 GPU 的验收工具回归可执行 `python -m unittest tools.test_pt2_runtime_contracts tools.test_dit_output_contract -v`，覆盖输出 Ada 布局、非法签名、过期导出/模型包、交接指纹、seed/帧号、CFG 阶段顺序和 AVI 帧边界。
+[`pnnx/README.md`](pnnx/README.md) 记录 PNNX 模块和基础验证方式。
+
+基础回归可执行 `ctest --test-dir build --output-on-failure`；PNNX `.pt2` 基础转换回归可执行 `tools/prepare_pnnx_pt2.sh --python <含 PyTorch 的 Python>`。
 
 ## Scope
 

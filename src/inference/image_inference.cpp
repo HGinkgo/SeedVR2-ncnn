@@ -703,7 +703,7 @@ bool initialize_vulkan_context(const ModelGraphSet& graphs,
     context.diagnostics.target_height = plan.image_height;
     std::fprintf(stderr, "vulkan-gpu=%d name=%s precision=%s heap-budget-mib=%u max-allocation-mib=%llu target=%dx%d\n",
                  context.diagnostics.gpu_id, context.diagnostics.device_name.c_str(),
-                 fp32 ? "fp32-sequential-cfg" : "bf16-storage-fp32-accumulation",
+                 fp32 ? "fp32-sequential-cfg" : "fp32-prefix-9-bf16-suffix",
                  context.diagnostics.heap_budget_mib,
                  static_cast<unsigned long long>(context.diagnostics.max_allocation_mib),
                  context.diagnostics.target_width, context.diagnostics.target_height);

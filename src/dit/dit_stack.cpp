@@ -82,8 +82,7 @@ void configure_dit_vulkan_net_impl(ncnn::Net& net,
                                    ncnn::VkAllocator* blob_allocator,
                                    ncnn::VkAllocator* staging_allocator,
                                    ncnn::PipelineCache* pipeline_cache,
-                                   bool use_bf16,
-                                   bool use_native_bf16_rne = false)
+                                   bool use_bf16)
 {
     net.opt.use_vulkan_compute = true;
     net.opt.use_packing_layout = false;
@@ -92,12 +91,6 @@ void configure_dit_vulkan_net_impl(ncnn::Net& net,
     net.opt.use_fp16_packed = false;
     net.opt.use_fp16_storage = false;
     net.opt.use_fp16_arithmetic = false;
-    if (use_native_bf16_rne)
-    {
-        net.opt.use_subgroup_ops = false;
-        net.opt.use_shader_local_memory = false;
-        net.opt.use_cooperative_matrix = false;
-    }
     net.opt.blob_vkallocator = blob_allocator;
     net.opt.workspace_vkallocator = blob_allocator;
     net.opt.staging_vkallocator = staging_allocator;
@@ -112,15 +105,6 @@ void configure_dit_vulkan_net(ncnn::Net& net,
                               ncnn::PipelineCache* pipeline_cache)
 {
     configure_dit_vulkan_net_impl(net, vkdev, blob_allocator, staging_allocator, pipeline_cache, true);
-}
-
-void configure_dit_vulkan_net_rne(ncnn::Net& net,
-                                  ncnn::VulkanDevice* vkdev,
-                                  ncnn::VkAllocator* blob_allocator,
-                                  ncnn::VkAllocator* staging_allocator,
-                                  ncnn::PipelineCache* pipeline_cache)
-{
-    configure_dit_vulkan_net_impl(net, vkdev, blob_allocator, staging_allocator, pipeline_cache, true, true);
 }
 
 void configure_dit_vulkan_net_fp32(ncnn::Net& net,
@@ -183,7 +167,7 @@ bool has_named_parameter(const std::string& param_path, const char* expected)
 bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkdev,
                 ncnn::VkAllocator* blob_allocator, ncnn::VkAllocator* staging_allocator,
                 ncnn::PipelineCache* pipeline_cache, const AwaRuntimeSpec* runtime_spec,
-                DitLoadProfile* load_profile, bool use_fp32, bool enable_native_bf16_rne = false)
+                DitLoadProfile* load_profile, bool use_fp32)
 {
     const std::string graph_name = stem.substr(stem.find_last_of('/') + 1);
     const auto graph_start = load_profile && load_profile->profile && load_profile->profile->enabled()
@@ -191,8 +175,6 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
                                  : PerformanceProfile::Clock::time_point{};
     if (use_fp32)
         configure_dit_vulkan_net_fp32(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
-    else if (enable_native_bf16_rne)
-        configure_dit_vulkan_net_rne(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
     else
         configure_dit_vulkan_net(net, vkdev, blob_allocator, staging_allocator, pipeline_cache);
     register_seedvr2_awa_layers(net, runtime_spec);
@@ -202,17 +184,11 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
     const bool mixed_output = !use_fp32 && graph_name == "dit_output" &&
                              has_named_parameter(param_path, "constant_p_norm");
     if (mixed_block)
-        register_dit_block_precision_layers(net, enable_native_bf16_rne && !use_fp32);
+        register_dit_block_precision_layers(net);
     if (mixed_output)
-        register_dit_output_precision_layers(net, enable_native_bf16_rne && !use_fp32);
+        register_dit_output_precision_layers(net);
     if (graph_name == "dit_embedding")
-    {
         register_dit_timestep_layers(net);
-        if (enable_native_bf16_rne && !use_fp32)
-            register_dit_embedding_precision_layers(net);
-    }
-    if (graph_name == "dit_input" && enable_native_bf16_rne && !use_fp32)
-        register_dit_projection_precision_layers(net);
     const std::string model_path = stem + ".ncnn.bin";
     const int param_status = load_profile ? load_profile->load_param(net, param_path.c_str())
                                           : net.load_param(param_path.c_str());
@@ -221,26 +197,14 @@ bool load_graph(ncnn::Net& net, const std::string& stem, ncnn::VulkanDevice* vkd
         std::fprintf(stderr, "load_graph: failed to load %s\n", param_path.c_str());
         return false;
     }
-    if (mixed_block && !configure_dit_block_precision_layers(net, enable_native_bf16_rne && !use_fp32))
+    if (mixed_block && !configure_dit_block_precision_layers(net))
     {
         std::fprintf(stderr, "load_graph: unrecognized BF16 Ada graph %s\n", param_path.c_str());
         return false;
     }
-    if (mixed_output && !configure_dit_output_precision_layers(net, enable_native_bf16_rne && !use_fp32))
+    if (mixed_output && !configure_dit_output_precision_layers(net))
     {
         std::fprintf(stderr, "load_graph: unrecognized BF16 output graph %s\n", param_path.c_str());
-        return false;
-    }
-    if (graph_name == "dit_input" && enable_native_bf16_rne && !use_fp32 &&
-        !configure_dit_projection_precision_layers(net, 2))
-    {
-        std::fprintf(stderr, "load_graph: unrecognized BF16 input projection graph %s\n", param_path.c_str());
-        return false;
-    }
-    if (graph_name == "dit_embedding" && enable_native_bf16_rne && !use_fp32 &&
-        !configure_dit_embedding_precision_layers(net))
-    {
-        std::fprintf(stderr, "load_graph: unrecognized BF16 embedding projection graph %s\n", param_path.c_str());
         return false;
     }
     const int model_status = load_profile ? load_profile->load_model(net, model_path.c_str())
@@ -362,6 +326,36 @@ bool unpack_gpu_to_pack1(const ncnn::VkMat& input, ncnn::VulkanDevice* vkdev, co
     return !output.empty() && submit_and_wait_profiled(compute, profile) == 0;
 }
 
+bool convert_precision_gpu(const ncnn::VkMat& input, ncnn::VulkanDevice* vkdev,
+                           const ncnn::Option& destination_opt, bool to_bf16,
+                           ncnn::VkMat& output, const PerformanceProfile* profile)
+{
+    if (input.empty() || !vkdev || input.elembits() != (to_bf16 ? 32 : 16))
+    {
+        std::fprintf(stderr, "convert_precision_gpu: invalid input empty=%d elemsize=%zu pack=%d to_bf16=%d\n",
+                     input.empty(), input.elemsize, input.elempack, to_bf16 ? 1 : 0);
+        return false;
+    }
+
+    ncnn::Option convert_opt = destination_opt;
+    // convert_packing infers the source 16-bit format from opt, so describe
+    // the input representation here while the explicit cast type selects
+    // the destination representation.
+    convert_opt.use_bf16_packed = !to_bf16;
+    convert_opt.use_bf16_storage = !to_bf16;
+    convert_opt.use_fp16_packed = false;
+    convert_opt.use_fp16_storage = false;
+    ncnn::VkCompute compute(vkdev);
+    // VulkanDevice uses cast type 1 for FP32 and 5 for BF16. Keeping the cast
+    // on-device avoids materializing the large token matrices on the CPU.
+    vkdev->convert_packing(input, output, 1, to_bf16 ? 5 : 1, compute, convert_opt);
+    const bool converted = !output.empty() && submit_and_wait_profiled(compute, profile) == 0;
+    if (!converted)
+        std::fprintf(stderr, "convert_precision_gpu: cast failed dims=%d w=%d h=%d n=%d size=%zu pack=%d to_bf16=%d\n",
+                     input.dims, input.w, input.h, input.n, input.elemsize, input.elempack, to_bf16 ? 1 : 0);
+    return converted;
+}
+
 bool unpack_to_pack1(ncnn::Net& net, const ncnn::VkMat& packed, ncnn::VulkanDevice* vkdev,
                      ncnn::VkMat& unpacked, const PerformanceProfile* profile)
 {
@@ -452,6 +446,7 @@ struct DitStackSession::Impl
     ncnn::VkAllocator* blob_allocator = nullptr;
     ncnn::VkAllocator* staging_allocator = nullptr;
     bool use_fp32 = false;
+    int fp32_prefix_blocks = 0;
     const PerformanceProfile* profile = nullptr;
     std::unique_ptr<ncnn::PipelineCache> owned_pipeline_cache;
     ncnn::PipelineCache* pipeline_cache = nullptr;
@@ -459,6 +454,7 @@ struct DitStackSession::Impl
     ncnn::Net dit_input;
     ncnn::Net dit_embedding;
     ncnn::Net packing;
+    ncnn::Net fp32_packing;
     std::vector<std::unique_ptr<ncnn::Net>> blocks;
     ncnn::Net dit_output;
 
@@ -470,6 +466,7 @@ struct DitStackSession::Impl
                 block->clear();
         blocks.clear();
         packing.clear();
+        fp32_packing.clear();
         dit_embedding.clear();
         dit_input.clear();
         owned_pipeline_cache.reset();
@@ -519,6 +516,7 @@ bool DitStackSession::open(const std::string& stack_dir,
     candidate->staging_allocator = staging_allocator;
     candidate->profile = profile;
     candidate->use_fp32 = use_fp32;
+    candidate->fp32_prefix_blocks = use_fp32 ? 0 : 9;
     candidate->direct_matrix_contract = detect_direct_matrix_contract(stack_dir);
     if (pipeline_cache)
         candidate->pipeline_cache = pipeline_cache;
@@ -529,14 +527,18 @@ bool DitStackSession::open(const std::string& stack_dir,
     }
     DitLoadProfile load_profile(profile && profile->enabled() ? profile : nullptr);
     DitLoadProfile* load_profile_ptr = load_profile.profile ? &load_profile : nullptr;
+    const bool use_fp32_prefix = candidate->fp32_prefix_blocks > 0;
+    const bool use_fp32_input = use_fp32 || use_fp32_prefix;
     if (!load_graph(candidate->dit_input, stack_dir + "/dit_input", vkdev, blob_allocator, staging_allocator,
-                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32,
-                    candidate->direct_matrix_contract) ||
+                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32_input) ||
         !load_graph(candidate->dit_embedding, stack_dir + "/dit_embedding", vkdev, blob_allocator,
-                    staging_allocator, candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32,
-                    candidate->direct_matrix_contract) ||
+                    staging_allocator, candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32_input) ||
         !load_packing_graph(candidate->packing, vkdev, blob_allocator, staging_allocator,
                             candidate->pipeline_cache, load_profile_ptr, use_fp32))
+        return false;
+    if (use_fp32_prefix &&
+        !load_packing_graph(candidate->fp32_packing, vkdev, blob_allocator, staging_allocator,
+                            candidate->pipeline_cache, load_profile_ptr, true))
         return false;
 
     candidate->blocks.reserve(32);
@@ -545,15 +547,14 @@ bool DitStackSession::open(const std::string& stack_dir,
         std::unique_ptr<ncnn::Net> block(new ncnn::Net);
         const std::string block_name = stack_dir + "/dit_block_" +
                                        (block_index < 10 ? "0" : "") + std::to_string(block_index);
+        const bool block_use_fp32 = use_fp32 || block_index < candidate->fp32_prefix_blocks;
         if (!load_graph(*block, block_name, vkdev, blob_allocator, staging_allocator,
-                        candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32,
-                        candidate->direct_matrix_contract))
+                        candidate->pipeline_cache, &runtime_spec, load_profile_ptr, block_use_fp32))
             return false;
         candidate->blocks.push_back(std::move(block));
     }
     if (!load_graph(candidate->dit_output, stack_dir + "/dit_output", vkdev, blob_allocator, staging_allocator,
-                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32,
-                    candidate->direct_matrix_contract))
+                    candidate->pipeline_cache, &runtime_spec, load_profile_ptr, use_fp32))
         return false;
 
     if (load_profile_ptr)
@@ -805,6 +806,17 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         std::fprintf(stderr, "DitStackSession::run: input patch unpacking failed\n");
         return false;
     }
+    if (impl_->fp32_prefix_blocks > 0)
+    {
+        ncnn::VkMat input_patches_fp32;
+        if (!convert_precision_gpu(input_patches_pack1, vkdev, impl_->dit_input.opt, false,
+                                   input_patches_fp32, impl_->profile))
+        {
+            std::fprintf(stderr, "DitStackSession::run: FP32 prefix patch conversion failed\n");
+            return false;
+        }
+        input_patches_pack1 = input_patches_fp32;
+    }
 
     if (input_patches_pack1.empty() || input_patches_pack1.dims != 2 || input_patches_pack1.w != kVideoPatchWidth ||
         input_patches_pack1.h != plan.video_tokens || input_patches_pack1.elempack != 1 || text.dims != 2 ||
@@ -825,6 +837,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     ncnn::Net& dit_input = impl_->dit_input;
     ncnn::Net& dit_embedding = impl_->dit_embedding;
     ncnn::Net& packing = impl_->packing;
+    ncnn::Net& input_packing = impl_->fp32_prefix_blocks > 0 ? impl_->fp32_packing : packing;
 
     ncnn::VkMat video_packed;
     ncnn::VkMat text_packed;
@@ -843,8 +856,8 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     }
     ncnn::VkMat video_matrix;
     ncnn::VkMat text_matrix;
-    if (!unpack_to_pack1(packing, video_packed, vkdev, video_matrix, impl_->profile) ||
-        !unpack_to_pack1(packing, text_packed, vkdev, text_matrix, impl_->profile))
+    if (!unpack_to_pack1(input_packing, video_packed, vkdev, video_matrix, impl_->profile) ||
+        !unpack_to_pack1(input_packing, text_packed, vkdev, text_matrix, impl_->profile))
     {
         std::fprintf(stderr, "DitStackSession::run: input unpacking failed\n");
         return false;
@@ -907,7 +920,7 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
         }
     }
     ncnn::VkMat embedding_gpu;
-    if (!unpack_to_pack1(packing, embedding_packed, vkdev, embedding_gpu, impl_->profile))
+    if (!unpack_to_pack1(input_packing, embedding_packed, vkdev, embedding_gpu, impl_->profile))
     {
         std::fprintf(stderr, "DitStackSession::run: embedding unpacking failed\n");
         return false;
@@ -918,6 +931,23 @@ bool DitStackSession::run(const ncnn::VkMat& input_patches,
     for (int block_index = 0; block_index < 32; block_index++)
     {
         ncnn::Net& block = *impl_->blocks[block_index];
+        if (impl_->fp32_prefix_blocks > 0 && block_index == impl_->fp32_prefix_blocks)
+        {
+            ncnn::VkMat video_bf16;
+            ncnn::VkMat text_bf16;
+            ncnn::VkMat embedding_bf16;
+            if (!convert_precision_gpu(video_gpu, vkdev, block.opt, true, video_bf16, impl_->profile) ||
+                !convert_precision_gpu(text_gpu, vkdev, block.opt, true, text_bf16, impl_->profile) ||
+                !convert_precision_gpu(embedding_gpu, vkdev, block.opt, true, embedding_bf16, impl_->profile))
+            {
+                std::fprintf(stderr, "DitStackSession::run: BF16 suffix input conversion failed at block %d\n",
+                             block_index);
+                return false;
+            }
+            video_gpu = video_bf16;
+            text_gpu = text_bf16;
+            embedding_gpu = embedding_bf16;
+        }
         ncnn::Extractor extractor = block.create_extractor();
         extractor.set_light_mode(plan.image_width == 256 && plan.image_height == 256);
         ncnn::VkMat next_video;

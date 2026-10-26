@@ -22,3 +22,6 @@ docs/
 
 # Isolated feature worktrees
 .worktrees/
+
+# Externalized model-weight link
+/ckpts

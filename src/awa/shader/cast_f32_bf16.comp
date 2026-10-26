@@ -7,6 +7,15 @@ layout(binding = 1) writeonly buffer output_blob { sfp output_data[]; };
 layout(push_constant) uniform parameter
 {
     int total;
+    int width;
+    int height;
+    int depth;
+    int channels;
+    int batches;
+    int input_cstep;
+    int input_nstep;
+    int output_cstep;
+    int output_nstep;
 } p;
 
 void main()
@@ -14,5 +23,19 @@ void main()
     int index = int(gl_GlobalInvocationID.x);
     if (index >= p.total)
         return;
-    buffer_st1(output_data, index, input_data[index]);
+    int x = index % p.width;
+    int row = index / p.width;
+    int y = row % p.height;
+    row /= p.height;
+    int z = row % p.depth;
+    row /= p.depth;
+    int channel = row % p.channels;
+    int batch = row / p.channels;
+    if (batch >= p.batches)
+        return;
+    int source_offset = batch * p.input_nstep + channel * p.input_cstep +
+                        z * p.width * p.height + y * p.width + x;
+    int output_offset = batch * p.output_nstep + channel * p.output_cstep +
+                        z * p.width * p.height + y * p.width + x;
+    buffer_st1(output_data, output_offset, input_data[source_offset]);
 }

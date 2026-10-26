@@ -6,19 +6,12 @@
 #include "layer/binaryop.h"
 #include "layer/concat.h"
 #include "layer/unaryop.h"
-#include "layer/vulkan/gemm_vulkan.h"
-#include "layer/vulkan/innerproduct_vulkan.h"
-#include "layer/vulkan/swish_vulkan.h"
 #include <algorithm>
 #include <cstdio>
 #include <set>
 #include "gpu.h"
 #include "command.h"
 #include "pipeline.h"
-#include "layer/vulkan/shader/gemm_rne.comp.hex.h"
-#include "layer/vulkan/shader/innerproduct_gemm_wp4_rne.comp.hex.h"
-#include "layer/vulkan/shader/innerproduct_pack4_rne.comp.hex.h"
-#include "layer/vulkan/shader/swish_rne.comp.hex.h"
 #include "layer/vulkan/shader/dit_rmsnorm.comp.hex.h"
 #include "layer/vulkan/shader/dit_binaryop.comp.hex.h"
 #include "layer/vulkan/shader/dit_qkv_concat.comp.hex.h"
@@ -26,13 +19,6 @@
 
 namespace
 {
-bool supports_native_bf16_rne(const ncnn::Option& opt)
-{
-    return opt.use_bf16_storage && opt.use_bf16_packed && !opt.use_fp16_storage &&
-           !opt.use_fp16_packed && !opt.use_fp16_arithmetic && !opt.use_shader_local_memory &&
-           !opt.use_subgroup_ops && !opt.use_cooperative_matrix;
-}
-
 class DitRMSNorm final : public ncnn::RMSNorm
 {
 public:
@@ -103,176 +89,6 @@ private:
     ncnn::VkMat gamma_gpu_;
 };
 ncnn::Layer* create_rmsnorm(void*) { return new DitRMSNorm; }
-
-class DitRneGemm final : public ncnn::Gemm_vulkan
-{
-public:
-    int create_pipeline(const ncnn::Option& opt) override
-    {
-        if (!supports_native_bf16_rne(opt) || ncnn::Gemm_vulkan::create_pipeline(opt) != 0 ||
-            use_subgroup_ops || use_cooperative_matrix || pipeline_gemm_pack4 || !pipeline_gemm)
-            return -1;
-
-        std::vector<uint32_t> spirv;
-        if (ncnn::compile_spirv_module(seedvr2_gemm_rne_comp_data,
-                                       sizeof(seedvr2_gemm_rne_comp_data), opt, spirv) != 0)
-            return -1;
-
-        std::vector<ncnn::vk_specialization_type> specs(15);
-        specs[0].f = alpha;
-        specs[1].f = beta;
-        specs[2].i = transA;
-        specs[3].i = transB;
-        specs[4].i = constantA;
-        specs[5].i = constantB;
-        specs[6].i = constantC;
-        specs[7].i = constantM;
-        specs[8].i = constantN;
-        specs[9].i = constantK;
-        specs[10].i = constant_broadcast_type_C;
-        specs[11].i = output_N1M;
-        specs[12].i = output_elempack;
-        specs[13].i = output_elemtype;
-        specs[14].i = output_transpose;
-
-        delete pipeline_gemm;
-        pipeline_gemm = new ncnn::Pipeline(vkdev);
-        pipeline_gemm->set_optimal_local_size_xyz(ncnn::Mat());
-        return pipeline_gemm->create(spirv.data(), spirv.size() * sizeof(uint32_t), specs);
-    }
-};
-
-class DitRneInnerProduct final : public ncnn::InnerProduct_vulkan
-{
-public:
-    int create_pipeline(const ncnn::Option& opt) override
-    {
-        if (!supports_native_bf16_rne(opt))
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: requires native BF16 storage/packing\n", name.c_str());
-            return -1;
-        }
-        const int base_status = ncnn::InnerProduct_vulkan::create_pipeline(opt);
-        if (base_status != 0 || int8_scale_term)
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: base pipeline status=%d int8=%d\n",
-                         name.c_str(), base_status, int8_scale_term);
-            return -1;
-        }
-
-        const ncnn::Mat& shape = bottom_shapes.empty() ? ncnn::Mat() : bottom_shapes[0];
-        const ncnn::Mat& out_shape = top_shapes.empty() ? ncnn::Mat() : top_shapes[0];
-        const int num_input = weight_data_size / num_output;
-        const int input_pack = num_input % 4 == 0 ? 4 : 1;
-        const int output_pack = num_output % 4 == 0 ? 4 : 1;
-        if (input_pack != 4 || output_pack != 4)
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: unsupported packs input=%d output=%d\n",
-                         name.c_str(), input_pack, output_pack);
-            return -1;
-        }
-
-        const ncnn::Mat shape_unpacked(shape.w, shape.h * shape.elempack, (void*)0);
-        const ncnn::Mat out_shape_unpacked(out_shape.w, out_shape.h * out_shape.elempack, (void*)0);
-        std::vector<ncnn::vk_specialization_type> specs(14);
-        specs[0].i = bias_term;
-        specs[1].i = activation_type;
-        specs[2].f = activation_params.w >= 1 ? activation_params[0] : 0.f;
-        specs[3].f = activation_params.w == 2 ? activation_params[1] : 0.f;
-        specs[4].i = shape_unpacked.dims;
-        specs[5].i = shape_unpacked.w;
-        specs[6].i = shape_unpacked.h;
-        specs[7].i = shape_unpacked.c;
-        specs[8].i = shape_unpacked.cstep;
-        specs[9].i = out_shape_unpacked.dims;
-        specs[10].i = out_shape_unpacked.w;
-        specs[11].i = out_shape_unpacked.h;
-        specs[12].i = out_shape_unpacked.c;
-        specs[13].i = out_shape_unpacked.cstep;
-        if (shape.dims == 0)
-            for (size_t i = 4; i < specs.size(); i++) specs[i].i = 0;
-
-        const bool gemm_path = pipeline_innerproduct_gemm != nullptr;
-        if (gemm_path && shape.dims != 0 && (shape.dims != 2 || shape.w != num_input))
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: GEMM shape=%d:%dx%d input=%d\n",
-                         name.c_str(), shape.dims, shape.w, shape.h, num_input);
-            return -1;
-        }
-        if (!gemm_path && !pipeline_innerproduct)
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: no supported pack4 pipeline shape=%d:%dx%d\n",
-                         name.c_str(), shape.dims, shape.w, shape.h);
-            return -1;
-        }
-
-        ncnn::Mat local_size_xyz;
-        const char* shader_data = nullptr;
-        size_t shader_size = 0;
-        if (gemm_path)
-        {
-            local_size_xyz = ncnn::Mat(std::min(16, num_output / output_pack), 4, 1, (void*)0);
-            if (out_shape.dims != 0)
-            {
-                local_size_xyz.w = std::min(16, out_shape_unpacked.w);
-                local_size_xyz.h = std::min(4, out_shape_unpacked.h);
-                local_size_xyz.c = 1;
-            }
-            shader_data = seedvr2_innerproduct_gemm_wp4_rne_comp_data;
-            shader_size = sizeof(seedvr2_innerproduct_gemm_wp4_rne_comp_data);
-        }
-        else
-        {
-            local_size_xyz = ncnn::Mat(std::min(64, num_output / output_pack), 1, 1, (void*)0);
-            if (out_shape.dims != 0)
-            {
-                local_size_xyz.w = std::min(64, out_shape_unpacked.w);
-                local_size_xyz.h = 1;
-                local_size_xyz.c = 1;
-            }
-            shader_data = seedvr2_innerproduct_pack4_rne_comp_data;
-            shader_size = sizeof(seedvr2_innerproduct_pack4_rne_comp_data);
-        }
-        std::vector<uint32_t> spirv;
-        if (ncnn::compile_spirv_module(shader_data, shader_size, opt, spirv) != 0)
-        {
-            std::fprintf(stderr, "DitRneInnerProduct %s: shader compilation failed\n", name.c_str());
-            return -1;
-        }
-        ncnn::Pipeline*& pipeline = gemm_path ? pipeline_innerproduct_gemm : pipeline_innerproduct;
-        delete pipeline;
-        pipeline = new ncnn::Pipeline(vkdev);
-        pipeline->set_optimal_local_size_xyz(local_size_xyz);
-        const int status = pipeline->create(spirv.data(), spirv.size() * sizeof(uint32_t), specs);
-        if (status != 0)
-            std::fprintf(stderr, "DitRneInnerProduct %s: pipeline creation failed: %d\n", name.c_str(), status);
-        return status;
-    }
-};
-
-class DitRneSwish final : public ncnn::Swish_vulkan
-{
-public:
-    int create_pipeline(const ncnn::Option& opt) override
-    {
-        if (!supports_native_bf16_rne(opt))
-            return -1;
-        const ncnn::Mat& shape = top_shapes.empty() ? ncnn::Mat() : top_shapes[0];
-        std::vector<ncnn::vk_specialization_type> specs(1);
-        specs[0].u32 = shape.total() * shape.elempack / 4;
-        std::vector<uint32_t> spirv;
-        if (ncnn::compile_spirv_module(seedvr2_swish_rne_comp_data,
-                                       sizeof(seedvr2_swish_rne_comp_data), opt, spirv) != 0)
-            return -1;
-        pipeline_swish = new ncnn::Pipeline(vkdev);
-        pipeline_swish->set_optimal_local_size_xyz(std::max(16, (int)vkdev->info.subgroup_size()), 1, 1);
-        return pipeline_swish->create(spirv.data(), spirv.size() * sizeof(uint32_t), specs);
-    }
-};
-
-ncnn::Layer* create_rne_gemm(void*) { return new DitRneGemm; }
-ncnn::Layer* create_rne_innerproduct(void*) { return new DitRneInnerProduct; }
-ncnn::Layer* create_rne_swish(void*) { return new DitRneSwish; }
 
 // PyTorch promotes Q/K to FP32 through the FP32 RMSNorm weights. V is
 // still BF16; stack promotes it without rounding Q/K before RoPE.
@@ -464,24 +280,19 @@ ncnn::Layer* create_memorydata(void*) { return new DitMemoryData; }
 ncnn::Layer* create_binaryop(void*) { return new DitBinaryOp; }
 ncnn::Layer* create_qkv_concat(void*) { return new DitQKVConcat; }
 ncnn::Layer* create_output_unary(void*) { return new DitOutputUnary; }
+
 }
-void seedvr2::register_dit_block_precision_layers(ncnn::Net& net, bool use_native_bf16_rne)
+void seedvr2::register_dit_block_precision_layers(ncnn::Net& net)
 {
     net.register_custom_layer("RMSNorm", create_rmsnorm);
     net.register_custom_layer("MemoryData", create_memorydata);
     net.register_custom_layer("BinaryOp", create_binaryop);
     net.register_custom_layer("Concat", create_qkv_concat);
-    if (use_native_bf16_rne)
-    {
-        register_dit_projection_precision_layers(net);
-        net.register_custom_layer("Swish", create_rne_swish);
-    }
 }
 
 namespace
 {
-bool configure_dit_block_precision_impl(ncnn::Net& net, int& sums, int& gemms, int& swishes,
-                                        bool require_native_bf16_rne)
+bool configure_dit_block_precision_impl(ncnn::Net& net, int& sums, int& gemms, int& swishes)
 {
     // Follow parameter views in the loaded graph, independent of blob numbers.
     // Ada parameter + embedding stays FP32; in-place hidden mul/add and
@@ -494,12 +305,10 @@ bool configure_dit_block_precision_impl(ncnn::Net& net, int& sums, int& gemms, i
     {
         if (layer->type == "Gemm")
         {
-            if (require_native_bf16_rne && !dynamic_cast<DitRneGemm*>(layer)) return false;
             gemms++;
         }
         else if (layer->type == "Swish")
         {
-            if (require_native_bf16_rne && !dynamic_cast<DitRneSwish*>(layer)) return false;
             swishes++;
         }
         if (layer->type == "SeedVR2AWAPack")
@@ -525,78 +334,22 @@ bool configure_dit_block_precision_impl(ncnn::Net& net, int& sums, int& gemms, i
 }
 } // namespace
 
-bool seedvr2::configure_dit_block_precision_boundaries(ncnn::Net& net)
+bool seedvr2::configure_dit_block_precision_layers(ncnn::Net& net)
 {
     int sums = 0, gemms = 0, swishes = 0;
-    return configure_dit_block_precision_impl(net, sums, gemms, swishes, false);
-}
-
-bool seedvr2::configure_dit_block_precision_layers(ncnn::Net& net, bool require_native_bf16_rne)
-{
-    int sums = 0, gemms = 0, swishes = 0;
-    if (!configure_dit_block_precision_impl(net, sums, gemms, swishes, require_native_bf16_rne)) return false;
+    if (!configure_dit_block_precision_impl(net, sums, gemms, swishes)) return false;
     return (sums == 12 && gemms == 10 && swishes == 2) ||
            (sums == 6 && gemms == 7 && swishes == 1); // paired blocks, then video-only last block
 }
 
-void seedvr2::register_dit_projection_precision_layers(ncnn::Net& net)
-{
-    net.register_custom_layer("Gemm", create_rne_gemm);
-}
-
-bool seedvr2::configure_dit_projection_precision_layers(ncnn::Net& net, int expected_count)
-{
-    int gemms = 0;
-    for (const auto* layer : net.mutable_layers())
-    {
-        if (layer->type == "Gemm")
-        {
-            if (!dynamic_cast<const DitRneGemm*>(layer)) return false;
-            gemms++;
-        }
-    }
-    return expected_count > 0 && gemms == expected_count;
-}
-
-void seedvr2::register_dit_embedding_precision_layers(ncnn::Net& net)
-{
-    net.register_custom_layer("InnerProduct", create_rne_innerproduct);
-    net.register_custom_layer("Swish", create_rne_swish);
-}
-
-bool seedvr2::configure_dit_embedding_precision_layers(ncnn::Net& net)
-{
-    const std::set<std::pair<int, int>> expected{{256, 2560}, {2560, 2560}, {2560, 15360}};
-    std::set<std::pair<int, int>> observed;
-    int swishes = 0;
-    for (const auto* layer : net.mutable_layers())
-    {
-        if (layer->type == "InnerProduct")
-        {
-            const auto* projection = dynamic_cast<const DitRneInnerProduct*>(layer);
-            if (!projection || projection->num_output <= 0 || projection->weight_data_size % projection->num_output != 0)
-                return false;
-            observed.emplace(projection->weight_data_size / projection->num_output, projection->num_output);
-        }
-        else if (layer->type == "Swish")
-        {
-            if (!dynamic_cast<const DitRneSwish*>(layer)) return false;
-            swishes++;
-        }
-    }
-    return observed == expected && swishes == 2;
-}
-
-void seedvr2::register_dit_output_precision_layers(ncnn::Net& net, bool use_native_bf16_rne)
+void seedvr2::register_dit_output_precision_layers(ncnn::Net& net)
 {
     net.register_custom_layer("MemoryData", create_memorydata);
     net.register_custom_layer("BinaryOp", create_binaryop);
     net.register_custom_layer("UnaryOp", create_output_unary);
-    if (use_native_bf16_rne)
-        register_dit_projection_precision_layers(net);
 }
 
-bool seedvr2::configure_dit_output_precision_layers(ncnn::Net& net, bool require_native_bf16_rne)
+bool seedvr2::configure_dit_output_precision_layers(ncnn::Net& net)
 {
     std::set<int> fp32_blobs;
     int norms = 0, projections = 0, gemms = 0;
@@ -604,7 +357,6 @@ bool seedvr2::configure_dit_output_precision_layers(ncnn::Net& net, bool require
     {
         if (layer->type == "Gemm")
         {
-            if (require_native_bf16_rne && !dynamic_cast<DitRneGemm*>(layer)) return false;
             gemms++;
         }
         if (layer->type == "MemoryData" || dynamic_cast<DitOutputUnary*>(layer))

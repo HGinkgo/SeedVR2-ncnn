@@ -4,7 +4,7 @@ Native C++ / ncnn / Vulkan SeedVR2 image and video enhancement CLI for Linux x86
 
 [中文](README.md) · [Build from source](#build) · [Model](https://modelscope.cn/models/HGinkgo/SeedVR2-ncnn)
 
-Production remains TorchScript/ncnn BF16; Vulkan BF16 production accuracy has not passed acceptance. The fixed-256 ExportedProgram/PT2 → independent PNNX → ncnn path is validated as an opt-in candidate and has not replaced the production package.
+Production defaults to the mixed-precision configuration that passed all six paired fixed-256 quality cases: DiT input, timestep embedding, and the first 9 blocks use FP32, followed by BF16 blocks. Peak VRAM was around 22.9 GiB on an RTX 3090. `--precision fp32` remains available for full-FP32 comparison. The fixed-256 ExportedProgram/PT2 → PNNX → ncnn path remains opt-in.
 
 ## Showcase
 
@@ -38,6 +38,16 @@ The complete [input video](assets/showcase-video-input-64.avi) and ncnn Vulkan [
 - One-step Euler is the default; multi-step sampling and VAE tiling are experimental.
 - Optional `--seed 666` selects reproducible standard-normal initial noise; omitting it retains the legacy fixture.
 - Output uses reference-guided color reconstruction, retaining generated high-frequency detail while rebuilding low-frequency color from the input.
+
+The validated fixed-`256x256` mixed-precision path is now the default:
+
+```bash
+tools/with-nvidia-vulkan-runtime.sh build/seedvr2-ncnn \
+  --model-dir models/seedvr2-3b --input input.png --output output.png \
+  --width 256 --height 256 --gpu-id 0
+```
+
+This runs the DiT input, timestep embedding, and first 9 DiT blocks in FP32, then uses BF16 for the remaining blocks. All six fixed quality comparisons passed; the one-step peak was about 22.9 GiB VRAM.
 
 ## Quick Start
 
@@ -145,7 +155,7 @@ Ada/MLP. Resume and packaging reject artifacts without the new contracts.
 The pinned official source has an output-Ada dimension mismatch; this project uses an explicit
 compatibility contract. Historical consistency measurements below do not establish official sampling or image quality.
 
-The independently authored restricted frontend reads `.pt2` graphs, weights and signatures with Python, emits canonical PNNX IR, and reuses official PNNX optimization and ncnn lowering through an isolated C++ reader patch. Use [`tools/convert_pt2.py`](tools/convert_pt2.py). TorchScript remains the baseline; `third_party/ncnn` is untouched, and the published runtime does not require Python, PyTorch or CUDA.
+The repository-local [`pnnx/`](pnnx/) module provides a native Torch Dynamo ExportedProgram reader and supports `pnnx model.pt2`, including PT2 graph, weight, and input/output signature loading. Use [`tools/prepare_pnnx_pt2.sh`](tools/prepare_pnnx_pt2.sh) to build the module and run the two basic PT2 tests. The broader operator matrix and full SeedVR2 conversion remain separate integration work.
 
 Static/bounded-token fixtures, checkpoint MLP/Ada/attention, complete fixed blocks 0/1/9, and fixed single-frame PT2 VAE encoder/decoder have CPU/Vulkan evidence. **Provenance correction:** earlier 35-graph stack measurements used TorchScript `.pt` exports. The old `model-package-pt2-full-stack-256` contains PT2 VAE plus TorchScript full-matrix DiT, despite its name. Those measurements do not establish PT2 DiT stack support.
 
@@ -153,15 +163,17 @@ On 2026-10-19, genuine `.pt2` exports passed fixed-256 acceptance for both 58-to
 
 The genuine PT2 VAE + DiT candidate passed four fixed-256 image CLI cases on an RTX 3090: CFG=1/1.5 with one/two steps. The production TorchScript one/two-step regressions also passed. Releasing both CFG DiT weight sets before VAE decode resolves an observed allocation failure. PNG differences are recorded separately from FP32 graph acceptance; these runs establish neither image-quality equivalence nor a performance gain.
 
-BF16 validation exposed an AWA int32 mapping upload being converted as reduced-precision weights. The fix preserves integer bytes and bounds padded RoPE dispatch by token count. With identical PT2 VAE and conditioning, the corrected TS/PT2 DiT paths match all three tensor handoff fingerprints and the final PNG SHA256 for two-step CFG=1 and 1.5. An independent PT2 process also reproduces the handoffs and PNG exactly; BF16 repeats match all 68 stages of each stack, and the two-frame CFG video path passes. These results are scoped to the recorded fixed input, models, binary and single GPU; temporal VAE and cross-frame attention remain unverified.
+BF16 validation exposed an AWA int32 mapping upload being converted as reduced-precision weights. The fix preserves integer bytes and bounds padded RoPE dispatch by token count. With identical PT2 VAE and conditioning, the corrected TS/PT2 DiT paths match all three tensor handoff fingerprints and the final PNG SHA256 for two-step CFG=1 and 1.5. An independent PT2 process also reproduces the handoffs and PNG exactly; BF16 repeats match all 68 stages of each stack, and the two-frame CFG video path passes. The video CLI currently runs source_t=1 models independently per frame; temporal VAE and cross-frame attention have not been implemented and validated, so this is not yet a temporal-video port.
 
-Optional standard-normal noise via `--seed` passed five image and two video Vulkan runs. Matched TS/PT2 and an independent PT2 repeat with seed=666 match all four handoff fingerprints and PNG exactly; the second video frame also reproduces when processed separately with its absolute frame index. Omitting seed preserves the previous output. Complete original preprocessing, default BF16 accuracy and final image quality remain unverified against the original pipeline.
+Five of six fixed-input comparisons between the original default BF16 path and Vulkan FP32 missed the project quality gates. The default now keeps the DiT input, timestep embedding and first nine blocks in FP32, with BF16 for the remaining blocks. It passed all six fixed-256 comparisons against the same gates, with peak GPU memory around 22.9 GiB. Full FP32 comparison remains available with `--precision fp32`.
 
-[`tools/export_dit_stack.py`](tools/export_dit_stack.py) now accepts explicit `--format pt2` and retains each source hash and independent conversion record; its default remains `torchscript`. CFG uses separate 58-token positive and 64-token negative stacks, enabled with `--cfg-scale` (default 1). [`tools/prepare_pt2_cfg_package.py`](tools/prepare_pt2_cfg_package.py) assembles the fixed-256 experimental package. Production remains TorchScript/BF16; dynamic/multi-frame VAE, text encoding, CFG rescale and a production switch remain unaccepted.
+Optional standard-normal noise via `--seed` passed five image and two video Vulkan runs. Matched TS/PT2 and an independent PT2 repeat with seed=666 match all four handoff fingerprints and PNG exactly; the second video frame also reproduces when processed separately with its absolute frame index. Omitting seed preserves the previous output. Complete original preprocessing and temporal model paths remain unverified; the precision result above is limited to the fixed 256 comparison set.
 
-[`tools/prepare_pnnx_pt2.sh`](tools/prepare_pnnx_pt2.sh) prepares the external official checkout with the [independent patch](patches/README.md). [CPU CI](.github/workflows/pt2.yml) is configured but has not run remotely; no upstream acceptance is claimed.
+[`tools/export_dit_stack.py`](tools/export_dit_stack.py) now accepts explicit `--format pt2` and retains each source hash and native conversion record; its default remains `torchscript`. CFG uses separate 58-token positive and 64-token negative stacks, enabled with `--cfg-scale` (default 1). [`tools/prepare_pt2_cfg_package.py`](tools/prepare_pt2_cfg_package.py) assembles the fixed-256 experimental package. The production model package remains TorchScript/ncnn and defaults to the validated mixed precision path; replacing it end to end with PT2 remains unfinished. Dynamic/multi-frame VAE, text encoding and CFG rescale are unverified.
 
-Run `python -m unittest tools.test_pt2_runtime_contracts tools.test_dit_output_contract -v` without a model or GPU to check output-Ada packing, invalid signatures, stale exports/packages, handoff fingerprints, seed/frame indices, CFG lifecycle ordering and AVI frame bounds.
+See [`pnnx/README.md`](pnnx/README.md) for the PNNX module and basic validation command.
+
+Run the basic project regressions with `ctest --test-dir build --output-on-failure`. Run the basic PNNX `.pt2` conversion checks with `tools/prepare_pnnx_pt2.sh --python <Python-with-PyTorch>`.
 
 ## Scope
 
