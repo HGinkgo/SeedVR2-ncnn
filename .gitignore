@@ -19,6 +19,8 @@ __pycache__/
 
 # Local project notes and validation records
 docs/
+.agent/
+patches/
 
 # Isolated feature worktrees
 .worktrees/
