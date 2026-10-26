@@ -1116,7 +1116,6 @@ int SeedVR2WindowAttention::forward(const std::vector<ncnn::Mat>& bottom_blobs,
                 }
             }
     }
-    trace_awa_type("attention.out", top_blobs[0]);
     return 0;
 }
 
